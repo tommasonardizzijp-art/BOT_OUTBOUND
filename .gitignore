@@ -1,0 +1,36 @@
+# Python
+backend/venv/
+backend/__pycache__/
+backend/app/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/data/bot.db
+backend/data/browser_profiles/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local Codex/Claude state and secrets
+.claude/
+
+# Backups (contengono copie .env con segreti) + intero data dir
+backups/
+backend/data/
+data/
+
+# Root build/dependency artifacts accidentally generated outside frontend/
+node_modules/
+.next/
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+.vercel
