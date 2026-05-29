@@ -1,11 +1,12 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 from app.models.campaign import CampaignStatus
 
 
 class CampaignCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
-    target_username: str = Field(..., min_length=1, max_length=255)
+    target_username: str | None = Field(default=None, max_length=255)
+    source_type: str = Field(default='scrape', pattern='^(scrape|import)$')
     base_message_template: str = Field(..., min_length=10)
     ai_prompt_context: str | None = None
     # M10: optional second template for A/B testing
@@ -23,6 +24,12 @@ class CampaignCreate(BaseModel):
     scrape_break_minutes_max: int = Field(default=45, ge=5, le=240)
     bio_fetch_delay_min: float = Field(default=5.0, ge=1.0, le=60.0)
     bio_fetch_delay_max: float = Field(default=8.0, ge=1.0, le=120.0)
+
+    @model_validator(mode='after')
+    def _check_source(self):
+        if self.source_type == 'scrape' and not (self.target_username and self.target_username.strip()):
+            raise ValueError("target_username obbligatorio per source_type='scrape'")
+        return self
 
 
 class CampaignUpdate(BaseModel):
@@ -47,7 +54,8 @@ class CampaignUpdate(BaseModel):
 class CampaignResponse(BaseModel):
     id: str
     name: str
-    target_username: str
+    target_username: str | None
+    source_type: str = 'scrape'
     target_user_id: int | None
     base_message_template: str
     ai_prompt_context: str | None

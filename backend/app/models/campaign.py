@@ -23,7 +23,9 @@ class Campaign(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    target_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 'scrape' = scrape follower/following di una pagina; 'import' = lista profili caricata da file
+    source_type: Mapped[str] = mapped_column(String(20), nullable=False, default='scrape')
     target_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     base_message_template: Mapped[str] = mapped_column(Text, nullable=False)
     ai_prompt_context: Mapped[str | None] = mapped_column(Text, nullable=True)
