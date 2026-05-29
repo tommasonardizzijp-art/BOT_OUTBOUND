@@ -39,14 +39,14 @@ id            str PK (uuid)
 campaign_id   FK → campaigns.id (ondelete CASCADE), index
 raw_input     str         # riga originale dal file
 username      str         # username estratto/normalizzato (lowercase)
-status        str         # pending | resolved | not_found | private | skipped | error
+status        str         # pending | resolved | not_found | private | error
 ig_user_id    BigInteger? # popolato dopo resolve
 error         str?        # dettaglio errore se status=error
 created_at    datetime
 updated_at    datetime
 UniqueConstraint(campaign_id, username)  # dedup interno alla campagna
 ```
-Stati: `pending` (da risolvere) → `resolved` (Follower creato) | `not_found` | `private` (informativo; Follower comunque creato) | `skipped` (dedup global_contacts) | `error`.
+Stati: `pending` (da risolvere) → `resolved` (Follower creato) | `not_found` | `private` (informativo; Follower comunque creato) | `error`.
 
 ## Flusso backend
 
@@ -61,7 +61,6 @@ Stati: `pending` (da risolvere) → `resolved` (Follower creato) | `not_found` |
    - login di un account assegnato con ruolo `scraping`/`both` (stesso requisito odierno; stesso errore se assente)
    - itera le righe `imported_profiles` con `status='pending'`:
      - `user_info_by_username_v1(username)` con retry + rotazione account su 429/soft-block (riuso logica scraper)
-     - **dedup `global_contacts`** prima di creare il Follower → se già contattato, staging `skipped`, nessun Follower
      - successo → crea `Follower(status='bio_scraped')` con pk/bio/full_name/ecc. + staging `resolved` + `ig_user_id`
      - `UserNotFound` → staging `not_found`
      - profilo privato → staging `private` ma **crea comunque** il Follower
@@ -94,7 +93,7 @@ Input per riga, in ordine di tentativo:
 - Username non risolvibile → staging `not_found`, log, prosegue.
 - Profilo privato → staging `private`, Follower comunque creato (bio eventualmente vuota).
 - Duplicati nel file → bloccati da `unique(campaign_id, username)`.
-- Già presente in `global_contacts` → staging `skipped`, nessun Follower.
+- Dedup `global_contacts`: NON a resolve-time. Lo `ig_user_id` è noto solo *dopo* la call IG e il worker DM già deduplica a send-time (`skip_reason="already_contacted_globally"`). Si mirrora lo scraper: si crea sempre il Follower, la dedup avviene all'invio. Niente stato `skipped`.
 - Nessun account `scraping`/`both` assegnato → stesso errore esistente dello scraper; campagna resta in stato gestito (non va in `error` su retry stale).
 - Crash recovery: `resolve_imports_task` riprende solo righe `pending` (idempotente).
 
