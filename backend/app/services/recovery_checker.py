@@ -31,6 +31,7 @@ from app.models.follower import Follower, FollowerStatus
 from app.models.message import Message, MessageStatus
 from app.models.activity_log import ActivityLog
 from app.utils.instagrapi_client import login as _login
+from app.utils.events import emit as emit_event
 
 
 def _normalize(text: str) -> str:
@@ -185,6 +186,15 @@ async def _recover_one(msg: Message, db) -> str:
             }),
         ))
         await db.commit()
+        emit_event(
+            msg.campaign_id,
+            "dm_recovery_giveup",
+            (
+                f"DM non confermato per @{follower.username} dopo il retry: "
+                "marcato fallito per evitare retry infiniti."
+            ),
+            level="warn",
+        )
         await _resume_dm_worker_after_recovery(msg, account, db)
         try:
             from app.services.anomaly_detector import report_anomaly
@@ -224,6 +234,12 @@ async def _recover_one(msg: Message, db) -> str:
         }),
     ))
     await db.commit()
+    emit_event(
+        msg.campaign_id,
+        "dm_recovery_no_evidence",
+        f"DM non confermato per @{follower.username}: rimesso in retry una volta.",
+        level="warn",
+    )
     logger.info(f"[Recovery] {msg.id} @{follower.username}: no evidence -- reset to retry")
     await _resume_dm_worker_after_recovery(msg, account, db)
 

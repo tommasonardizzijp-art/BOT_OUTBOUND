@@ -37,3 +37,30 @@ async def test_send_telegram_falls_back_to_plain_text_when_markdown_is_rejected(
     assert payloads[0]["parse_mode"] == "Markdown"
     assert "parse_mode" not in payloads[1]
     assert payloads[1]["text"] == payloads[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_campaign_auto_pause_alert_is_operator_readable(monkeypatch):
+    sent: dict = {}
+
+    async def _fake_send_telegram(message: str, level: str = "info", **kwargs):
+        sent["message"] = message
+        sent["level"] = level
+
+    monkeypatch.setattr(notifier, "send_telegram", _fake_send_telegram)
+
+    await notifier.send_campaign_auto_pause_alert(
+        campaign_name="PRIMERO Outreach",
+        reason="worker_startup_requires_operator_resume",
+        level="warning",
+        details={
+            "previous_status": "running",
+            "inflight": {"sending": 0, "locked": 0},
+        },
+    )
+
+    assert sent["level"] == "warning"
+    assert "Campagna messa in pausa al riavvio" in sent["message"]
+    assert "Cosa significa:" in sent["message"]
+    assert "Cosa fare:" in sent["message"]
+    assert "Codice tecnico: `worker_startup_requires_operator_resume`" in sent["message"]

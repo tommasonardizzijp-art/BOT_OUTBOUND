@@ -955,14 +955,35 @@ async def _enqueue_campaign_run(campaign_id: str):
                         f"Campaign {campaign_id} dropped to scraping: 0 DM workers enqueued"
                     )
                 elif camp and camp.status == CampaignStatus.running:
+                    previous_status = camp.status.value
                     camp.status = CampaignStatus.paused
                     camp.updated_at = datetime.utcnow()
                     db.add(ActivityLog(
                         campaign_id=campaign_id,
                         action="campaign_auto_paused",
-                        details='{"reason":"zero_workers_enqueued"}',
+                        details=json.dumps(
+                            {
+                                "reason": "zero_workers_enqueued",
+                                "previous_status": previous_status,
+                            }
+                        ),
                     ))
                     await db.commit()
+                    from app.utils.events import emit as emit_event
+                    from app.services.notifier import send_campaign_auto_pause_alert
+                    emit_event(
+                        campaign_id,
+                        "campaign_auto_paused",
+                        "Campagna messa in pausa: nessun worker DM accodato al restart.",
+                        level="warn",
+                    )
+                    await send_campaign_auto_pause_alert(
+                        campaign_name=camp.name,
+                        campaign_id=campaign_id,
+                        reason="zero_workers_enqueued",
+                        level="warning",
+                        details={"previous_status": previous_status},
+                    )
                     logger.warning(
                         f"Campaign {campaign_id} auto-paused: 0 workers enqueued "
                         f"(account removed or role changed during start)"

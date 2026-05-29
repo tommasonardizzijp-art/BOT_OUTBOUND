@@ -6,20 +6,27 @@ from urllib.parse import urlparse
 
 from arq.connections import RedisSettings
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
+from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.account import AccountStatus, InstagramAccount
 from app.models.activity_log import ActivityLog
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.campaign_account import CampaignAccount
 from app.models.follower import Follower
+from app.models.message import Message, MessageStatus
+from app.services.notifier import send_campaign_auto_pause_alert
+from app.utils.events import emit as emit_event
 
 
 ARQ_MAIN_QUEUE = "arq:queue"
 ARQ_CRON_QUEUE = "arq:cron"
 DM_STARTUP_STAGGER_MAX_SECONDS = 5 * 60
-STARTUP_ACTIVE_WORK_GRACE_SECONDS = 5 * 60
+# A restart should not pause a campaign while a worker is still legitimately
+# active. Inter-message delays are up to 8 min and session-break heartbeats
+# happen every 10 min, so 20 min keeps us above normal idle windows.
+STARTUP_ACTIVE_WORK_GRACE_SECONDS = max(20 * 60, settings.max_delay_seconds + 5 * 60)
 
 
 def dm_worker_job_id(campaign_id: str, account_id: str) -> str:
@@ -128,6 +135,23 @@ def _dm_worker_queued_detail(account_username: str, defer_seconds: int) -> str:
     return f"Worker DM accodato per @{account_username}: avvio tra circa {defer_minutes} min."
 
 
+async def _campaign_has_inflight_work(db, campaign_id: str) -> dict[str, int]:
+    """Return a small snapshot of work that is still in-flight for a campaign."""
+    sending = await db.scalar(
+        select(func.count(Message.id)).where(
+            Message.campaign_id == campaign_id,
+            Message.status == MessageStatus.sending,
+        )
+    ) or 0
+    locked = await db.scalar(
+        select(func.count(Follower.id)).where(
+            Follower.campaign_id == campaign_id,
+            Follower.locked_by_account_id.isnot(None),
+        )
+    ) or 0
+    return {"sending": int(sending), "locked": int(locked)}
+
+
 async def enqueue_dm_workers_with_redis(redis, campaign_id: str) -> int:
     """Queue one staggered DM worker per usable campaign account."""
     return await _enqueue_dm_workers_with_redis(redis, campaign_id)
@@ -158,10 +182,32 @@ async def pause_active_work_on_startup() -> dict[str, int]:
         )
         campaigns = list(result.scalars().all())
         campaign_ids: list[str] = []
+        auto_pause_alerts: list[dict] = []
         now = datetime.utcnow()
 
         for campaign in campaigns:
             previous_status = campaign.status.value
+            previous_updated_at = campaign.updated_at
+            inflight = await _campaign_has_inflight_work(db, campaign.id)
+
+            # If there is still evidence of a live worker session, do not force
+            # the campaign into paused: let recovery reconcile the in-flight work.
+            if inflight["sending"] > 0 or inflight["locked"] > 0:
+                emit_event(
+                    campaign.id,
+                    "startup_guard_skipped",
+                    (
+                        f"Controllo riavvio saltato per {campaign.name}: "
+                        f"lavoro ancora in corso (sending={inflight['sending']}, locked={inflight['locked']})."
+                    ),
+                    level="warn",
+                )
+                logger.warning(
+                    f"[Startup] Skipping auto-pause for '{campaign.name}' "
+                    f"(in-flight sending={inflight['sending']}, locked={inflight['locked']})"
+                )
+                continue
+
             campaign.status = CampaignStatus.paused
             campaign.scrape_break_until = None
             campaign.scrape_break_prev_status = None
@@ -175,9 +221,33 @@ async def pause_active_work_on_startup() -> dict[str, int]:
                         {
                             "reason": "worker_startup_requires_operator_resume",
                             "previous_status": previous_status,
+                            "stale_before": stale_before.isoformat(),
+                            "campaign_updated_at": previous_updated_at.isoformat() if previous_updated_at else None,
+                            "inflight": inflight,
                         }
                     ),
                 )
+            )
+            emit_event(
+                campaign.id,
+                "campaign_auto_paused",
+                (
+                    f"Campagna messa in pausa al riavvio: "
+                    f"stato precedente={previous_status}, sending={inflight['sending']}, locked={inflight['locked']}."
+                ),
+                level="warn",
+            )
+            auto_pause_alerts.append(
+                {
+                    "campaign_name": campaign.name,
+                    "campaign_id": campaign.id,
+                    "reason": "worker_startup_requires_operator_resume",
+                    "level": "warning",
+                    "details": {
+                        "previous_status": previous_status,
+                        "inflight": inflight,
+                    },
+                }
             )
 
         if campaign_ids:
@@ -192,6 +262,8 @@ async def pause_active_work_on_startup() -> dict[str, int]:
             counts["campaigns_paused"] = len(campaign_ids)
             counts["locks_released"] = released.rowcount or 0
             await db.commit()
+            for alert in auto_pause_alerts:
+                await send_campaign_auto_pause_alert(**alert)
 
     if counts["campaigns_paused"]:
         logger.warning(

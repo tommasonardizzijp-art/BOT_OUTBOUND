@@ -666,7 +666,10 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                         await capture_and_send_screenshot(
                             browser_session.page,
                             label=f"challenge_{account.username}",
-                            caption=f"⚠️ Challenge richiesta per @{account.username}",
+                            caption=(
+                                f"Instagram chiede una verifica per @{account.username}. "
+                                "Worker fermo finche' non viene completata."
+                            ),
                             level="error",
                         )
                     except Exception:
@@ -696,7 +699,10 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                         await capture_and_send_screenshot(
                             browser_session.page,
                             label=f"banned_{account.username}",
-                            caption=f"🚨 Account @{account.username} BANNATO",
+                            caption=(
+                                f"Account @{account.username} risulta bannato. "
+                                "Non verra' usato per altri invii."
+                            ),
                             level="critical",
                         )
                     except Exception:
@@ -866,20 +872,63 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 except Exception:
                     await db.rollback()
                 if consecutive_unexpected_errors >= UNEXPECTED_ERROR_THRESHOLD:
+                    campaign_paused = False
                     try:
-                        await db.execute(
+                        pause_result = await db.execute(
                             update(Campaign)
-                            .where(Campaign.id == campaign_id, Campaign.status == CampaignStatus.running)
+                            .where(
+                                Campaign.id == campaign_id,
+                                Campaign.status.in_(
+                                    (CampaignStatus.running, CampaignStatus.scraping_and_running)
+                                ),
+                            )
                             .values(status=CampaignStatus.paused, updated_at=datetime.utcnow())
                         )
+                        campaign_paused = (pause_result.rowcount or 0) > 0
+                        if campaign_paused:
+                            db.add(
+                                ActivityLog(
+                                    campaign_id=campaign_id,
+                                    account_id=account_id,
+                                    action="campaign_auto_paused",
+                                    details=json.dumps(
+                                        {
+                                            "reason": "consecutive_unexpected_errors",
+                                            "count": consecutive_unexpected_errors,
+                                            "username": account.username,
+                                            "last_error": str(e)[:200],
+                                        }
+                                    ),
+                                )
+                            )
                         await db.commit()
-                    except Exception:
+                    except Exception as pause_err:
                         await db.rollback()
+                        logger.warning(f"[Worker] Auto-pause commit failed: {pause_err}")
                     emit_event(
                         campaign_id, "worker_error",
-                        f"Campagna messa in pausa automaticamente: {consecutive_unexpected_errors} errori consecutivi inattesi — possibile proxy o connessione down",
+                        (
+                            "Campagna messa in pausa automaticamente: "
+                            f"{consecutive_unexpected_errors} errori tecnici consecutivi. "
+                            "Possibile problema di proxy, connessione o sessione Instagram."
+                        )
+                        if campaign_paused
+                        else (
+                            f"Worker fermo dopo {consecutive_unexpected_errors} errori tecnici consecutivi. "
+                            "La campagna era gia' non-running o la pausa non e' stata applicata."
+                        ),
                         level="error",
                     )
+                    if campaign_paused:
+                        emit_event(
+                            campaign_id,
+                            "campaign_auto_paused",
+                            (
+                                "Campagna messa in pausa dopo "
+                                f"{consecutive_unexpected_errors} errori tecnici consecutivi."
+                            ),
+                            level="error",
+                        )
                     logger.error(
                         f"[Worker] {consecutive_unexpected_errors} consecutive unexpected errors. "
                         "Auto-paused campaign to protect contact list."

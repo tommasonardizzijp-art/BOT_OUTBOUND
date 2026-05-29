@@ -7,6 +7,7 @@ inside the orchestrator and an exception there would mask the real bug.
 import asyncio
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 import httpx
 from loguru import logger
 
@@ -24,6 +25,134 @@ _LEVEL_EMOJI = {
 
 def _telegram_enabled() -> bool:
     return bool(settings.telegram_bot_token and settings.telegram_chat_id)
+
+
+def _clip(value: Any, limit: int = 320) -> str:
+    text = "" if value is None else str(value)
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _format_operator_details(details: dict[str, Any] | None) -> list[str]:
+    if not details:
+        return []
+
+    rows: list[str] = []
+    inflight = details.get("inflight")
+    if isinstance(inflight, dict):
+        rows.append(
+            f"Messaggi in corso: `{inflight.get('sending', 0)}` | "
+            f"lead bloccati: `{inflight.get('locked', 0)}`"
+        )
+
+    labels = {
+        "previous_status": "Stato precedente",
+        "count": "Conteggio",
+        "username": "Profilo",
+        "last_error": "Ultimo errore",
+        "error": "Errore",
+    }
+    for key, label in labels.items():
+        if key in details and details[key] not in (None, ""):
+            value = _clip(details[key], 420 if key in ("last_error", "error") else 160)
+            if key == "username" and not value.startswith("@"):
+                value = f"@{value}"
+            rows.append(f"{label}: `{value}`")
+    return rows
+
+
+_AUTO_PAUSE_COPY = {
+    "worker_startup_requires_operator_resume": {
+        "title": "Campagna messa in pausa al riavvio",
+        "meaning": (
+            "Il backend e' ripartito e ha trovato una campagna attiva ma senza "
+            "un worker recente associato. Per sicurezza l'ha fermata invece di "
+            "lasciarla sembrare attiva mentre non sta lavorando."
+        ),
+        "action": (
+            "Controlla che Redis/worker siano avviati e poi usa Riprendi sulla campagna."
+        ),
+    },
+    "zero_workers_enqueued": {
+        "title": "Campagna fermata: nessun worker DM avviato",
+        "meaning": (
+            "La campagna era in stato running, ma al restart non e' stato accodato "
+            "nessun profilo DM utilizzabile."
+        ),
+        "action": (
+            "Verifica profili assegnati, stato account e ruolo DM/both, poi riprendi."
+        ),
+    },
+    "dm_failed_streak": {
+        "title": "Campagna fermata: troppi DM falliti di fila",
+        "meaning": (
+            "Lo stesso profilo ha fallito piu' invii consecutivi. Il bot si e' "
+            "fermato per evitare di bruciare altri lead."
+        ),
+        "action": (
+            "Apri il profilo Instagram, controlla eventuali blocchi o limiti, poi "
+            "decidi se riattivare o sostituire il profilo."
+        ),
+    },
+    "consecutive_unexpected_errors": {
+        "title": "Campagna fermata: errori tecnici consecutivi",
+        "meaning": (
+            "Il worker ha incontrato errori inattesi di seguito. Spesso dipende da "
+            "proxy, connessione, browser o sessione Instagram non stabile."
+        ),
+        "action": (
+            "Controlla proxy/connessione e sessione del profilo prima di riprendere."
+        ),
+    },
+}
+
+
+async def send_campaign_auto_pause_alert(
+    *,
+    campaign_name: str | None = None,
+    campaign_id: str | None = None,
+    reason: str,
+    level: str = "warning",
+    account_username: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Send a readable operator alert when the system pauses a campaign."""
+    copy = _AUTO_PAUSE_COPY.get(reason, {})
+    title = copy.get("title", "Campagna messa in pausa automaticamente")
+    meaning = copy.get(
+        "meaning",
+        "Il sistema ha rilevato una condizione di rischio e ha fermato la campagna.",
+    )
+    action = copy.get(
+        "action",
+        "Apri la campagna, controlla gli ultimi log e riprendi solo dopo la verifica.",
+    )
+
+    lines = [f"*{title}*"]
+    if campaign_name:
+        lines.append(f"Campagna: *{campaign_name}*")
+    elif campaign_id:
+        lines.append(f"Campagna ID: `{campaign_id}`")
+    if account_username:
+        username = account_username if account_username.startswith("@") else f"@{account_username}"
+        lines.append(f"Profilo: `{username}`")
+
+    lines.extend(
+        [
+            "",
+            f"Cosa significa: {meaning}",
+            f"Cosa fare: {action}",
+        ]
+    )
+    detail_lines = _format_operator_details(details)
+    if detail_lines:
+        lines.append("")
+        lines.extend(detail_lines)
+    lines.append("")
+    lines.append(f"Codice tecnico: `{reason}`")
+    await send_telegram("\n".join(lines), level=level)
 
 
 async def send_telegram(
