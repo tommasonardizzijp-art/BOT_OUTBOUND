@@ -9,6 +9,7 @@ from app.models.contact_reservation import ContactReservation
 from app.models.anomaly import Anomaly
 from app.models.user import User
 from app.models.bot_state import BotState
+from app.models.imported_profile import ImportedProfile
 
 __all__ = [
     "InstagramAccount",
@@ -22,4 +23,5 @@ __all__ = [
     "Anomaly",
     "User",
     "BotState",
+    "ImportedProfile",
 ]
