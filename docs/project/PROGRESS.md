@@ -881,6 +881,13 @@ Branch: `feature/import-profiles`. Permette a una campagna di partire da una lis
 - Test: `test_ig_username.py` (7) + `test_import_resolver.py` (4). Suite completa: 31 passed.
 - Realineata la documentazione: il DB di produzione è **Supabase Postgres**, non SQLite (SQLite resta solo fallback dev). Corretti `CLAUDE.md` e questo file.
 
+### Fix post-audit (commit a0ed1ed)
+- **resume/reenqueue dispatch** (BLOCCANTE): nuovo `enqueue_collection` instrada import→`resolve_imports_task`, scrape→`scrape_followers_task`. Usato in `resume_campaign_control` e `reenqueue_active_work` (boot/unhalt) — prima lanciavano lo scraper su campagne import (`target_username=None`) → errore.
+- **reset import-aware** (BLOCCANTE): import con lead → `ready`; import senza lead → `draft` + import a `pending`. Niente campagna incastrata.
+- **no DM parallelo per import** (ALTO): `start_dm_auto` rifiuta import + bottone nascosto → import a fase singola (risolvi → ready → /start).
+- **UI**: "Lista importata" invece di `@null` (lista campagne, filtro leads, recap Telegram).
+- **Non fatto di proposito**: resolver a batch brevi/defer (#4) e slot account su rotazione (#5) rispecchiano lo scraper esistente; vanno rifattorizzati su scraper+resolver insieme in un task dedicato per non divergere. Endpoint "ritenta errori import" (#6) = feature futura.
+
 ---
 
 ## Storico audit
