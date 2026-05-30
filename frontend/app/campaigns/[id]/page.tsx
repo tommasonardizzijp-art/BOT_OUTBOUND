@@ -21,7 +21,7 @@ import {
   UserPlus, Pencil, X, AlertTriangle, Shield, Zap, ChevronLeft, ChevronRight,
   ThumbsUp, ThumbsDown, MessageSquare, Activity, ArrowUpDown, MinusCircle, Filter
 } from 'lucide-react'
-import type { Campaign, Follower, FollowerStatus, CampaignAccount, Account, AccountStatus, ABStats, ApprovalQueueItem, ApprovalQueue, WorkerEvent, AccountRole } from '@/lib/types'
+import type { Campaign, Follower, FollowerStatus, CampaignAccount, Account, AccountStatus, ABStats, ApprovalQueueItem, ApprovalQueue, WorkerEvent, AccountRole, ImportStatusResponse } from '@/lib/types'
 
 const FOLLOWER_STATUS_LABEL: Record<FollowerStatus, string> = {
   pending: 'In attesa',
@@ -97,6 +97,11 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     `campaign-accounts-${id}`, () => api.campaignAccounts.list(id), { refreshInterval: 10000 }
   )
   const { data: allAccounts } = useSWR<Account[]>('accounts', api.accounts.list, { refreshInterval: 30000 })
+  const { data: importStatus } = useSWR<ImportStatusResponse>(
+    campaign?.source_type === 'import' ? `import-status-${id}` : null,
+    () => api.campaigns.importStatus(id),
+    { refreshInterval: 5000 }
+  )
 
   const [loadingAction, setLoadingAction] = useState(false)
   const [loadingFollowerId, setLoadingFollowerId] = useState<string | null>(null)
@@ -528,15 +533,28 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               campaign.status === 'scraping_break' ? 'bg-amber-700/80 text-amber-100 border-0' : ''
             }`}>
               {campaign.status === 'scraping_and_running' ? '⚡ Scraping + DM' :
+               campaign.source_type === 'import' && campaign.status === 'scraping' ? 'Risoluzione profili' :
+               campaign.source_type === 'import' && campaign.status === 'scraping_break' ? '⏸ Pausa risoluzione' :
                campaign.status === 'scraping_break' ? '⏸ Pausa sessione' :
                campaign.status}
             </Badge>
           </div>
           <div className="flex items-center gap-2 mt-1">
-            <p className="text-gray-400 text-base">@{campaign.target_username}</p>
-            <Badge variant="outline" className="text-xs text-gray-500 border-gray-700 py-0">
-              {campaign.scrape_mode === 'following' ? 'following' : 'follower'}
-            </Badge>
+            {campaign.source_type === 'import' ? (
+              <>
+                <p className="text-gray-400 text-base">Lista importata</p>
+                <Badge variant="outline" className="text-xs text-gray-500 border-gray-700 py-0">
+                  import
+                </Badge>
+              </>
+            ) : (
+              <>
+                <p className="text-gray-400 text-base">@{campaign.target_username}</p>
+                <Badge variant="outline" className="text-xs text-gray-500 border-gray-700 py-0">
+                  {campaign.scrape_mode === 'following' ? 'following' : 'follower'}
+                </Badge>
+              </>
+            )}
           </div>
         </div>
 
@@ -545,7 +563,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           {campaign.status === 'draft' && (
             <Button size="sm" variant="outline" className="border-gray-700 text-gray-300"
               onClick={() => action(() => api.campaigns.startScrape(id))} disabled={loadingAction}>
-              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Avvia scraping'}
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : (campaign.source_type === 'import' ? 'Avvia risoluzione' : 'Avvia scraping')}
             </Button>
           )}
           {campaign.status === 'ready' && (
@@ -654,6 +672,21 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
       {/* Scraping break panel */}
       {campaign.status === 'scraping_break' && campaign.scrape_break_until && (
         <ScrapeBreakPanel breakUntil={campaign.scrape_break_until} onResume={() => action(() => api.campaigns.resumeBreak(id))} loading={loadingAction} />
+      )}
+
+      {/* Import status panel (solo campagne import) */}
+      {campaign.source_type === 'import' && importStatus && (
+        <div className="rounded-lg border border-gray-800 bg-gray-900 p-4 space-y-2">
+          <h3 className="text-sm font-medium text-gray-200">Profili importati</h3>
+          <div className="grid grid-cols-3 gap-2 text-sm">
+            <div><span className="text-gray-400">Totale:</span> <span className="text-white">{importStatus.total}</span></div>
+            <div><span className="text-gray-400">Da risolvere:</span> <span className="text-yellow-300">{importStatus.pending}</span></div>
+            <div><span className="text-gray-400">Risolti:</span> <span className="text-green-400">{importStatus.resolved}</span></div>
+            <div><span className="text-gray-400">Non trovati:</span> <span className="text-gray-300">{importStatus.not_found}</span></div>
+            <div><span className="text-gray-400">Privati:</span> <span className="text-gray-300">{importStatus.private}</span></div>
+            <div><span className="text-gray-400">Errori:</span> <span className="text-red-400">{importStatus.error}</span></div>
+          </div>
+        </div>
       )}
 
       {/* No account warning */}
