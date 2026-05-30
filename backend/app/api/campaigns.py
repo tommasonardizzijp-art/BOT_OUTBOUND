@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 from loguru import logger
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, func
 from app.database import get_db
@@ -11,6 +11,8 @@ from app.models.campaign_account import CampaignAccount
 from app.models.follower import Follower, FollowerStatus
 from app.models.message import Message, MessageStatus
 from app.models.activity_log import ActivityLog
+from app.models.imported_profile import ImportedProfile
+from app.services.import_resolver import store_imported_lines
 from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignResponse
 from app.services.campaign_control import (
     CampaignControlError,
@@ -241,6 +243,51 @@ async def delete_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
 
+@router.post("/{campaign_id}/import-profiles")
+async def import_profiles(campaign_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    """Upload a .txt/.csv of profile URLs/usernames into the import staging table."""
+    campaign = await _get_or_404(campaign_id, db)
+    if campaign.source_type != "import":
+        raise HTTPException(status_code=400, detail="La campagna non è di tipo 'import'")
+    if campaign.status != CampaignStatus.draft:
+        raise HTTPException(status_code=400, detail="I profili si caricano solo in stato draft")
+    if not (file.filename or "").lower().endswith((".txt", ".csv")):
+        raise HTTPException(status_code=400, detail="Formato file non supportato (usa .txt o .csv)")
+    raw_bytes = await file.read()
+    if len(raw_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File troppo grande (max 5MB)")
+    try:
+        raw = raw_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Impossibile leggere il file (encoding)")
+    try:
+        counts = await store_imported_lines(db, campaign_id, raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return counts
+
+
+@router.get("/{campaign_id}/import-status")
+async def import_status(campaign_id: str, db: AsyncSession = Depends(get_db)):
+    """Per-status counts of imported_profiles for the import panel."""
+    await _get_or_404(campaign_id, db)
+    rows = await db.execute(
+        select(ImportedProfile.status, func.count(ImportedProfile.id))
+        .where(ImportedProfile.campaign_id == campaign_id)
+        .group_by(ImportedProfile.status)
+    )
+    counts = {s: c for s, c in rows.all()}
+    total = sum(counts.values())
+    return {
+        "total": total,
+        "pending": counts.get("pending", 0),
+        "resolved": counts.get("resolved", 0),
+        "not_found": counts.get("not_found", 0),
+        "private": counts.get("private", 0),
+        "error": counts.get("error", 0),
+    }
+
+
 @router.post("/{campaign_id}/start-scrape", response_model=CampaignResponse)
 async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
     campaign = await _get_or_404(campaign_id, db)
@@ -252,6 +299,20 @@ async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
         await ensure_bot_accepts_work(db)
     except CampaignControlError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    is_import = campaign.source_type == "import"
+    if is_import:
+        pending = await db.scalar(
+            select(func.count(ImportedProfile.id)).where(
+                ImportedProfile.campaign_id == campaign_id,
+                ImportedProfile.status == "pending",
+            )
+        ) or 0
+        if pending == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Nessun profilo importato da risolvere. Carica un file prima di avviare.",
+            )
 
     if not await has_active_role_account(
         db, campaign_id, ("scraping", "both"), (AccountStatus.active,)
@@ -271,15 +332,21 @@ async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
     campaign.status = CampaignStatus.scraping
     campaign.updated_at = datetime.utcnow()
 
-    log = ActivityLog(campaign_id=campaign.id, action="scrape_started")
+    log = ActivityLog(
+        campaign_id=campaign.id,
+        action="resolve_started" if is_import else "scrape_started",
+    )
     db.add(log)
     await db.commit()
     await db.refresh(campaign)
 
     try:
-        from app.services.work_enqueue import enqueue_scrape
+        from app.services.work_enqueue import enqueue_scrape, enqueue_resolve
 
-        await enqueue_scrape(campaign_id)
+        if is_import:
+            await enqueue_resolve(campaign_id)
+        else:
+            await enqueue_scrape(campaign_id)
     except Exception as exc:
         campaign.status = CampaignStatus.draft
         campaign.updated_at = datetime.utcnow()
