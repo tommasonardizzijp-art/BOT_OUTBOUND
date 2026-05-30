@@ -39,7 +39,7 @@ L'aggiornamento è **non opzionale** — è parte integrante del completamento d
 | Layer | Tecnologia |
 |---|---|
 | Backend API | Python 3.13 + FastAPI + Uvicorn |
-| Database | SQLite + aiosqlite (WAL mode) oppure Postgres/Supabase via `DATABASE_URL` |
+| Database | **Supabase Postgres** (produzione, via `DATABASE_URL` + asyncpg) · SQLite + aiosqlite (WAL) come fallback dev locale |
 | ORM / Migrations | SQLAlchemy 2.x async + Alembic |
 | Task queue | ARQ (async Redis queue) |
 | Cache/broker | Redis (via Docker) |
@@ -115,7 +115,7 @@ d:\BOT OUTBOUND\
 │   │   └── versions/
 │   ├── tests/
 │   ├── data/                         # Creata a runtime
-│   │   ├── bot.db                    # SQLite database
+│   │   ├── bot.db                    # SQLite (solo dev locale; produzione = Supabase)
 │   │   └── browser_profiles/         # Profili Chromium per account
 │   ├── pyproject.toml
 │   └── requirements.txt
@@ -170,7 +170,8 @@ Stato degli account Instagram usati per inviare DM.
 - `encrypted_password`: Fernet-encrypted, mai in chiaro
 
 ### `campaigns`
-Una campagna = una pagina target + un template messaggio.
+Una campagna = una sorgente di profili + un template messaggio.
+- `source_type`: `'scrape'` (default) | `'import'`. `scrape` = raccoglie follower/following di `target_username`; `import` = profili caricati da file (vedi `imported_profiles`). Per `import`, `target_username` è NULL (reso nullable in migrazione 013); UI/query che lo assumono presente devono fare guardia su `source_type`.
 - `status` enum: `draft → scraping → scraping_break | scraping_and_running → ready → running → paused → completed | error`
   - `scraping_break`: scraper in pausa sessione (con countdown), riprendibile manualmente
   - `scraping_and_running`: scraper + worker DM attivi simultaneamente (account separati per ruolo)
@@ -198,6 +199,14 @@ Ogni riga è un follower della pagina target in una campagna specifica.
 - Unique constraint: `(campaign_id, ig_user_id)` — previene duplicati nella stessa campagna
 - `locked_by_account_id` + `locked_at`: optimistic locking per multi-worker (auto-released dopo 20 min)
 
+### `imported_profiles`
+Tabella di staging per la modalità `source_type='import'` (migrazione 013). Ogni riga = un profilo IG fornito dall'utente via file, in attesa di risoluzione in `Follower`. Serve perché `Follower.ig_user_id` è NOT NULL + unique ma all'import si ha solo lo username (il `pk` arriva dopo la call IG).
+- `status` enum: `pending → resolved | not_found | private | error`
+- `raw_input`: riga originale del file; `username`: username normalizzato (lowercase)
+- `ig_user_id`: popolato dopo la risoluzione (null finché `pending`)
+- Unique constraint: `(campaign_id, username)` — dedup interno alla campagna
+- Risolto dal worker `resolve_imports_task` (`app/services/import_resolver.py`): `user_info_by_username_v1` → crea `Follower(bio_scraped)`; riusa login/rotazione-429/session-break dello scraper. Profilo privato → `Follower` creato comunque. La dedup `global_contacts` NON avviene qui (solo a send-time).
+
 ### `messages`
 Ogni DM (generato o inviato) è una riga separata.
 - Collegato a follower + account che ha inviato + campagna
@@ -224,8 +233,9 @@ Alembic e FastAPI lo leggono tramite Pydantic Settings con `env_file=".env"`.
 
 Variabili chiave:
 - `SECRET_KEY`: chiave Fernet generata con `from cryptography.fernet import Fernet; Fernet.generate_key()`
-- `DATABASE_URL`: percorso SQLite, default `sqlite+aiosqlite:///./data/bot.db` (relativo a `backend/`)
-  - Supabase/Postgres: usare `postgresql+asyncpg://...`. Il codice aggiunge automaticamente parametri safe per Supabase Pooler/PgBouncer (`prepared_statement_cache_size=0`, `statement_cache_size=0`, unique prepared statement names, `NullPool`) per evitare `DuplicatePreparedStatementError`.
+- `DATABASE_URL`: **in produzione punta a Supabase Postgres** (`postgresql+asyncpg://...@...pooler.supabase.com...`). Il codice aggiunge automaticamente parametri safe per Supabase Pooler/PgBouncer (`prepared_statement_cache_size=0`, `statement_cache_size=0`, unique prepared statement names, `NullPool`) per evitare `DuplicatePreparedStatementError`.
+  - Fallback dev locale: `sqlite+aiosqlite:///./data/bot.db` (relativo a `backend/`). Il codice mantiene i branch SQLite (vedi `app/utils/db_dialect.py`), ma il deployment reale è su Supabase.
+  - **Le migrazioni Alembic girano contro Supabase** (`python -m scripts.migrate`). Attenzione: una connessione `idle in transaction` lasciata aperta da un processo bot morto tiene un lock su `campaigns`/`followers` e fa andare in timeout gli `ALTER TABLE` — fermare il bot e/o terminare il backend zombie prima di migrare.
 - `OLLAMA_MODEL`: nome modello Ollama (usato solo se `AI_PROVIDER=ollama`)
 - `AI_PROVIDER`: `ollama` | `groq` | `gemini` — seleziona provider LLM
 - `AI_API_KEY`: API key del provider cloud (Groq: `gsk_...`, Gemini: `AIza...`)
@@ -345,7 +355,7 @@ Il layer browser in `app/browser/` gestisce:
 
 ### Multi-account per campagna (Fase 7A — ✅ IMPLEMENTATA)
 - 1 ARQ job per account assegnato, deduplicato con `_job_id=worker:{campaign_id}:{account_id}`
-- Claiming atomico via `UPDATE WHERE locked_by_account_id IS NULL` (SQLite WAL)
+- Claiming atomico via `UPDATE WHERE locked_by_account_id IS NULL` (Postgres/Supabase; SQLite WAL in dev)
 - Crash recovery: stale lock timeout 20min + cron 15min; lo startup guard del worker DM pausa lavoro attivo stale da processi precedenti.
 - Mutex asyncio per-account in `context_manager.py` — 1 browser alla volta
 - Campaign daily limit live query (non contatore stale)
@@ -362,6 +372,13 @@ Il layer browser in `app/browser/` gestisce:
 - Stagger automatico worker DM (0-15 min random offset) per desincronizzare session break
 - `auto_generate=True`: worker DM generano messaggi AI on-the-fly su follower `bio_scraped`
 - Endpoint: `POST /campaigns/{id}/start-dm-auto`, `POST /campaigns/{id}/resume-break`
+
+### Import profili da lista (✅ IMPLEMENTATA)
+- Alternativa allo scraping: la campagna parte da una lista di profili IG caricata da file (`.txt`/`.csv`) invece che dai follower/following di una pagina. Caso d'uso: il cliente ha già selezionato i profili.
+- `campaigns.source_type='import'` + tabella staging `imported_profiles`. Worker dedicato `resolve_imports_task` (`app/services/import_resolver.py`) risolve ogni username via `user_info_by_username_v1` (1 call → pk + bio), creando `Follower(bio_scraped)`. Riusa login/anti-detection/session-break/kill-switch dello scraper. Il flusso AI + invio DM a valle è invariato.
+- Parser URL/username puro: `app/utils/ig_username.py` (gestisce URL completi, `@handle`, username nudo, prima colonna CSV, scarta path non-profilo come `/p/`, `/reel/`).
+- Endpoint: `POST /campaigns/{id}/import-profiles` (upload multipart, solo in `draft`), `GET /campaigns/{id}/import-status` (contatori per-stato). `start-scrape` dirama su `source_type` → `enqueue_resolve` (job id `resolve:{campaign_id}`). Serve comunque un account con ruolo `scraping`/`both` per le call IG.
+- Frontend: toggle "Sorgente: Scraping pagina | Lista importata" nel form nuova campagna + pannello contatori (pending/resolved/not_found/private/error) nel dettaglio.
 
 ### Control-plane remoto e kill-switch (✅ IMPLEMENTATO)
 - Kill-switch globale in `bot_state`: `halted=True` blocca scraper e worker DM sui check interni. Endpoint web admin: `POST /admin/halt`, `POST /admin/resume`.
@@ -410,7 +427,7 @@ Il layer browser in `app/browser/` gestisce:
 
 ```
 fastapi, uvicorn[standard]
-sqlalchemy[asyncio], aiosqlite, alembic
+sqlalchemy[asyncio], asyncpg (Supabase/Postgres), aiosqlite (dev), alembic
 pydantic>=2.7, pydantic-settings
 cryptography (Fernet)
 httpx (Ollama client)
@@ -437,6 +454,7 @@ Vedi `docs/project/PROGRESS.md` per lo stato aggiornato di ogni fase.
 | 7A | Multi-account per campagna | ✅ Completata |
 | 7C | Lead database + export CSV | ✅ Completata |
 | 7D | Scraping + DM parallelo, ruoli account, session break configurabile | ✅ Completata |
+| 7E | Import profili da lista (source_type=import, imported_profiles, resolve worker) | ✅ Completata |
 | 7B | Multi-campagna parallela | Da fare |
 
 ---

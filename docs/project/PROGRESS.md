@@ -851,6 +851,38 @@ npm run dev
 
 ---
 
+## [2026-05-30] Fase 7E — Import profili da lista ✅ COMPLETATA
+
+Branch: `feature/import-profiles`. Permette a una campagna di partire da una lista di profili IG caricata da file (`.txt`/`.csv`) invece che dallo scraping di una pagina target. Il cliente fornisce i profili già selezionati; il bot recupera le bio via account IG e genera/invia i DM col flusso esistente.
+
+### Modello dati
+- `campaigns.source_type` (`'scrape'` default | `'import'`); `target_username` reso **nullable** (migrazione 013).
+- Nuova tabella staging `imported_profiles` (`pending → resolved | not_found | private | error`, unique `(campaign_id, username)`).
+- Migrazione `013_import_profiles.py` applicata a **Supabase** (012 → 013). Durante l'applicazione individuata e terminata una connessione zombie `idle in transaction` (~10 giorni) che teneva un lock su `campaigns` e mandava in timeout l'`ALTER TABLE`.
+
+### Backend
+| File | Contenuto |
+|---|---|
+| `backend/alembic/versions/013_import_profiles.py` | Migrazione source_type + imported_profiles |
+| `backend/app/models/imported_profile.py` | Modello staging `ImportedProfile` |
+| `backend/app/utils/ig_username.py` | Parser puro URL/@handle/username/CSV (+ test) |
+| `backend/app/services/import_resolver.py` | `store_imported_lines`, `classify_resolution`, loop async `resolve_imports` (riusa login/rotazione-429/session-break/kill-switch dello scraper) |
+| `backend/app/workers/import_worker.py` | `resolve_imports_task` (ARQ) |
+| `backend/app/services/work_enqueue.py` | `enqueue_resolve` (job id `resolve:{campaign_id}`) |
+| `backend/app/api/campaigns.py` | `POST /import-profiles` (upload), `GET /import-status`, branch import in `start-scrape` |
+
+### Frontend
+- `lib/types.ts` / `lib/api.ts`: `source_type`, `ImportStatusResponse`, `importProfiles` (fetch multipart), `importStatus`.
+- Form nuova campagna: toggle "Scraping pagina | Lista importata" + upload file.
+- Dettaglio campagna: pannello contatori import (pending/resolved/not_found/private/error) + label "Risoluzione profili".
+
+### Note
+- Dedup `global_contacts`: NON a resolve-time (ig_user_id noto solo dopo la call IG); resta la dedup a send-time del worker DM. Profilo privato → `Follower` creato comunque.
+- Test: `test_ig_username.py` (7) + `test_import_resolver.py` (4). Suite completa: 31 passed.
+- Realineata la documentazione: il DB di produzione è **Supabase Postgres**, non SQLite (SQLite resta solo fallback dev). Corretti `CLAUDE.md` e questo file.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |
