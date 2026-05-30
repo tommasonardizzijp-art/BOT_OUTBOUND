@@ -17,6 +17,8 @@ const IG_USERNAME_RE = /^[a-zA-Z0-9._]{1,30}$/
 export default function NewCampaignPage() {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
+  const [sourceType, setSourceType] = useState<'scrape' | 'import'>('scrape')
+  const [importFile, setImportFile] = useState<File | null>(null)
   const [form, setForm] = useState({
     name: '',
     target_username: '',
@@ -42,11 +44,15 @@ export default function NewCampaignPage() {
   const validate = () => {
     const errs: Record<string, string> = {}
     if (!form.name.trim()) errs.name = 'Il nome è obbligatorio'
-    const username = form.target_username.replace(/^@/, '').trim()
-    if (!username) {
-      errs.target_username = "L'username è obbligatorio"
-    } else if (!IG_USERNAME_RE.test(username)) {
-      errs.target_username = 'Username non valido. Solo lettere, numeri, punti e underscore (max 30 caratteri)'
+    if (sourceType === 'scrape') {
+      const username = form.target_username.replace(/^@/, '').trim()
+      if (!username) {
+        errs.target_username = "L'username è obbligatorio"
+      } else if (!IG_USERNAME_RE.test(username)) {
+        errs.target_username = 'Username non valido. Solo lettere, numeri, punti e underscore (max 30 caratteri)'
+      }
+    } else if (!importFile) {
+      errs.import_file = 'Carica un file con i profili da contattare'
     }
     if (!form.base_message_template.trim()) errs.base_message_template = 'Il template è obbligatorio'
     if (form.daily_limit && Number(form.daily_limit) < 1) errs.daily_limit = 'Il limite deve essere almeno 1'
@@ -62,7 +68,8 @@ export default function NewCampaignPage() {
     try {
       const campaign = await api.campaigns.create({
         name: form.name.trim(),
-        target_username: form.target_username.replace(/^@/, '').trim(),
+        source_type: sourceType,
+        target_username: sourceType === 'scrape' ? form.target_username.replace(/^@/, '').trim() : null,
         scrape_mode: form.scrape_mode,
         base_message_template: form.base_message_template,
         message_template_b: showTemplateB && form.message_template_b ? form.message_template_b : null,
@@ -76,7 +83,12 @@ export default function NewCampaignPage() {
         bio_fetch_delay_min: Number(advancedConfig.bio_fetch_delay_min) || 5,
         bio_fetch_delay_max: Number(advancedConfig.bio_fetch_delay_max) || 8,
       })
-      toast.success('Campagna creata!')
+      if (sourceType === 'import' && importFile) {
+        const res = await api.campaigns.importProfiles(campaign.id, importFile)
+        toast.success(`Campagna creata! ${res.inserted} profili importati`)
+      } else {
+        toast.success('Campagna creata!')
+      }
       router.push(`/campaigns/${campaign.id}`)
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : 'Errore nella creazione')
@@ -102,6 +114,22 @@ export default function NewCampaignPage() {
             <CardTitle className="text-base text-gray-100">Configurazione campagna</CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
+            <div className="space-y-2">
+              <label className="text-sm text-gray-300 font-medium">Sorgente profili</label>
+              <div className="flex gap-3">
+                <button type="button" onClick={() => setSourceType('scrape')}
+                  className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${sourceType === 'scrape' ? 'bg-purple-600/20 border-purple-500 text-purple-300' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'}`}>
+                  Scraping pagina
+                  <span className="block text-xs font-normal mt-0.5 opacity-70">Follower/following di una pagina target</span>
+                </button>
+                <button type="button" onClick={() => setSourceType('import')}
+                  className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${sourceType === 'import' ? 'bg-purple-600/20 border-purple-500 text-purple-300' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'}`}>
+                  Lista importata
+                  <span className="block text-xs font-normal mt-0.5 opacity-70">File di URL/username</span>
+                </button>
+              </div>
+            </div>
+
             <div className="space-y-1.5">
               <label className="text-sm text-gray-300 font-medium">Nome campagna *</label>
               <Input
@@ -113,6 +141,7 @@ export default function NewCampaignPage() {
               {errors.name && <p className="text-xs text-red-400">{errors.name}</p>}
             </div>
 
+            {sourceType === 'scrape' && (<>
             <div className="space-y-1.5">
               <label className="text-sm text-gray-300 font-medium">Pagina target (username) *</label>
               <Input
@@ -160,6 +189,19 @@ export default function NewCampaignPage() {
                 </button>
               </div>
             </div>
+            </>)}
+
+            {sourceType === 'import' && (
+              <div className="space-y-1.5">
+                <label className="text-sm text-gray-300 font-medium">File profili (.txt / .csv) *</label>
+                <Input type="file" accept=".txt,.csv"
+                  onChange={e => { setImportFile(e.target.files?.[0] ?? null); setErrors(er => ({ ...er, import_file: '' })) }}
+                  className={`bg-gray-800 border-gray-700 text-white ${errors.import_file ? 'border-red-600' : ''}`} />
+                {errors.import_file
+                  ? <p className="text-xs text-red-400">{errors.import_file}</p>
+                  : <p className="text-xs text-gray-500">Un profilo per riga (URL Instagram o username). Serve un account con ruolo scraping/both assegnato per recuperare le bio.</p>}
+              </div>
+            )}
 
             <div className="space-y-1.5">
               <label className="text-sm text-gray-300 font-medium">Template messaggio base *</label>
