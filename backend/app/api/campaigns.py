@@ -231,7 +231,7 @@ async def delete_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
             job_id = f"worker:{campaign_id}:{ca.account_id}"
             await redis.delete(f"arq:job:{job_id}", f"arq:retry:{job_id}")
         # Also clean up scrape/pregen keys
-        for suffix in [f"scrape:{campaign_id}", f"pregen:{campaign_id}:preview", f"pregen:{campaign_id}:full"]:
+        for suffix in [f"scrape:{campaign_id}", f"resolve:{campaign_id}", f"pregen:{campaign_id}:preview", f"pregen:{campaign_id}:full"]:
             await redis.delete(f"arq:job:{suffix}", f"arq:retry:{suffix}")
         await redis.aclose()
     except Exception as e:

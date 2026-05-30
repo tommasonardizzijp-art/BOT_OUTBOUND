@@ -314,6 +314,33 @@ async def enqueue_scrape(campaign_id: str) -> bool:
         await redis.aclose()
 
 
+async def _enqueue_resolve_with_redis(redis, campaign_id: str) -> bool:
+    job_id = f"resolve:{campaign_id}"
+    await redis.delete(
+        f"arq:job:{job_id}",
+        f"arq:retry:{job_id}",
+        f"arq:in-progress:{job_id}",
+    )
+    await redis.enqueue_job(
+        "resolve_imports_task",
+        campaign_id,
+        _job_id=job_id,
+        _queue_name=ARQ_MAIN_QUEUE,
+    )
+    return True
+
+
+async def enqueue_resolve(campaign_id: str) -> bool:
+    """Enqueue the import-resolution job (dedup by job id, mirrors enqueue_scrape)."""
+    import arq
+
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        return await _enqueue_resolve_with_redis(redis, campaign_id)
+    finally:
+        await redis.aclose()
+
+
 async def enqueue_campaign_run(campaign_id: str) -> int:
     import arq
 
