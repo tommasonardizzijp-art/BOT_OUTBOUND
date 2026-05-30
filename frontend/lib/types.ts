@@ -32,7 +32,9 @@ export type CampaignStatus = 'draft' | 'scraping' | 'scraping_break' | 'scraping
 export interface Campaign {
   id: string
   name: string
-  target_username: string
+  target_username: string | null
+  // 'scrape' = scrape follower/following pagina; 'import' = lista profili da file
+  source_type: 'scrape' | 'import'
   target_user_id: number | null
   base_message_template: string
   ai_prompt_context: string | null
@@ -90,7 +92,8 @@ export interface ApprovalQueue {
 
 export interface CampaignCreate {
   name: string
-  target_username: string
+  target_username?: string | null
+  source_type?: 'scrape' | 'import'
   base_message_template: string
   ai_prompt_context?: string
   message_template_b?: string | null
@@ -338,6 +341,22 @@ export interface HealthStatus {
   ollama: string
   redis: string
   database: string
+}
+
+// Import profiles (lista da file)
+export interface ImportStatusResponse {
+  total: number
+  pending: number
+  resolved: number
+  not_found: number
+  private: number
+  error: number
+}
+export interface ImportUploadResponse {
+  inserted: number
+  duplicates_in_file: number
+  skipped_existing: number
+  skipped_invalid: number
 }
 
 export interface BotState {

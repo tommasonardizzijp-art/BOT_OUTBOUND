@@ -5,6 +5,7 @@ import type {
   FollowerListResponse, MessageListResponse, MessageStats, DashboardStats,
   ActivityLogListResponse, TimelineResponse, HealthStatus,
   LeadListResponse, AccountRole, BotState,
+  ImportStatusResponse, ImportUploadResponse,
 } from './types'
 
 // Re-export for consumers
@@ -139,6 +140,24 @@ export const api = {
       request<Campaign>(`/campaigns/${id}/start-dm-auto`, { method: 'POST' }),
     resumeBreak: (id: string) =>
       request<Campaign>(`/campaigns/${id}/resume-break`, { method: 'POST' }),
+    // Import profili da lista (file .txt/.csv) — usa fetch diretto perché request() forza
+    // Content-Type: application/json, incompatibile con FormData (serve boundary multipart).
+    importProfiles: async (id: string, file: File): Promise<ImportUploadResponse> => {
+      const token = getAuthToken()
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await fetch(`${BASE_URL}/campaigns/${id}/import-profiles`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      return res.json()
+    },
+    importStatus: (id: string) => request<ImportStatusResponse>(`/campaigns/${id}/import-status`),
   },
 
   campaignAccounts: {
