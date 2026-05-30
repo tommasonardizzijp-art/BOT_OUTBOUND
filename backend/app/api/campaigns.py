@@ -503,12 +503,23 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
         select(sa_func.count(Follower.id)).where(Follower.campaign_id == campaign_id)
     ) or 0
 
-    campaign.status = CampaignStatus.draft
+    # Reset landing status:
+    # - scrape → draft (si ri-scrappa la pagina target)
+    # - import con lead già risolti → ready: la risoluzione IG è la parte costosa,
+    #   si mantengono i follower e si riparte dall'invio DM (no campagna incastrata
+    #   in draft, dato che start-scrape per import richiede righe import pending)
+    # - import senza lead → draft + righe import rimesse a pending (sotto) per rilanciare
+    is_import = campaign.source_type == "import"
+    if is_import and actual_count > 0:
+        campaign.status = CampaignStatus.ready
+        campaign.scrape_completed_at = datetime.utcnow()
+    else:
+        campaign.status = CampaignStatus.draft
+        campaign.scrape_completed_at = None
     campaign.total_followers = actual_count
     campaign.messages_sent = 0
     campaign.messages_failed = 0
     campaign.messages_pending = actual_count
-    campaign.scrape_completed_at = None
     campaign.started_at = None
     campaign.completed_at = None
     campaign.auto_generate = False
@@ -527,6 +538,15 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
         .values(status=FollowerStatus.bio_scraped, locked_by_account_id=None, locked_at=None)
     )
 
+    # Import senza lead risolti: rimetti le righe staging a pending così la
+    # risoluzione può ripartire (start-scrape per import richiede righe pending).
+    if is_import and actual_count == 0:
+        await db.execute(
+            update(ImportedProfile)
+            .where(ImportedProfile.campaign_id == campaign_id)
+            .values(status="pending", ig_user_id=None, error=None)
+        )
+
     log = ActivityLog(campaign_id=campaign.id, action="campaign_reset")
     db.add(log)
     await db.commit()
@@ -540,6 +560,16 @@ async def start_dm_auto(campaign_id: str, db: AsyncSession = Depends(get_db)):
     Transitions campaign to scraping_and_running. DM generation happens inline (auto-gen).
     """
     campaign = await _get_or_404(campaign_id, db)
+
+    if campaign.source_type == "import":
+        # Import è a fase singola: prima si risolvono tutti i profili, poi (ready) si
+        # avviano i DM con /start. Il DM parallelo non è supportato qui — un worker DM
+        # partito durante la risoluzione uscirebbe senza follower pronti e lascerebbe
+        # la campagna "running" senza worker.
+        raise HTTPException(
+            status_code=400,
+            detail="DM in parallelo non disponibile per campagne import: attendi la fine della risoluzione, poi avvia i DM."
+        )
 
     if campaign.status not in (CampaignStatus.scraping, CampaignStatus.scraping_break):
         raise HTTPException(

@@ -368,10 +368,11 @@ async def _answer_callback(callback_id: str, text: str | None = None) -> None:
 
 
 def _format_campaign(campaign: Campaign) -> str:
+    source = "lista importata" if campaign.source_type == "import" else f"@{_clean(campaign.target_username)}"
     return (
         f"*{_clean(campaign.name)}*"
         f" `[{campaign.status.value}]`"
-        f" target=`@{_clean(campaign.target_username)}`"
+        f" target=`{source}`"
         f" pending=`{campaign.messages_pending}` sent=`{campaign.messages_sent}`"
     )
 

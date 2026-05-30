@@ -341,6 +341,30 @@ async def enqueue_resolve(campaign_id: str) -> bool:
         await redis.aclose()
 
 
+async def _enqueue_collection_with_redis(redis, campaign_id: str, source_type: str) -> bool:
+    """Enqueue the right profile-collection job for a campaign.
+
+    Import campaigns resolve a user-provided list (resolve_imports_task); scrape
+    campaigns crawl a target page (scrape_followers_task). Centralized so resume,
+    /unhalt and boot-recovery never run the scraper on an import campaign (which
+    has target_username=None and would fail).
+    """
+    if source_type == "import":
+        return await _enqueue_resolve_with_redis(redis, campaign_id)
+    return await _enqueue_scrape_with_redis(redis, campaign_id)
+
+
+async def enqueue_collection(campaign_id: str, source_type: str) -> bool:
+    """Pool wrapper for _enqueue_collection_with_redis."""
+    import arq
+
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        return await _enqueue_collection_with_redis(redis, campaign_id, source_type)
+    finally:
+        await redis.aclose()
+
+
 async def enqueue_campaign_run(campaign_id: str) -> int:
     import arq
 
@@ -395,7 +419,7 @@ async def reenqueue_active_work() -> dict[str, int]:
             for campaign in campaigns:
                 status = campaign.status
                 if status in (CampaignStatus.scraping, CampaignStatus.scraping_and_running):
-                    await _enqueue_scrape_with_redis(redis, campaign.id)
+                    await _enqueue_collection_with_redis(redis, campaign.id, campaign.source_type)
                     counts["scrape_jobs"] += 1
                 if status in (CampaignStatus.running, CampaignStatus.scraping_and_running):
                     dm_count = await _enqueue_dm_workers_with_redis(redis, campaign.id)

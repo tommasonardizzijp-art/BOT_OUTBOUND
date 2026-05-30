@@ -170,7 +170,7 @@ export default function LeadsPage() {
             >
               <option value="">Tutte le campagne</option>
               {campaigns?.map(c => (
-                <option key={c.id} value={c.id}>{c.name} (@{c.target_username})</option>
+                <option key={c.id} value={c.id}>{c.name} ({c.source_type === 'import' ? 'lista importata' : `@${c.target_username}`})</option>
               ))}
             </select>
             <select

@@ -12,7 +12,7 @@ from app.models.account import AccountStatus, InstagramAccount
 from app.models.activity_log import ActivityLog
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.campaign_account import CampaignAccount
-from app.services.work_enqueue import enqueue_campaign_run, enqueue_scrape
+from app.services.work_enqueue import enqueue_campaign_run, enqueue_collection
 
 
 PAUSABLE_STATUSES = (
@@ -192,7 +192,7 @@ async def resume_campaign_control(
         enqueue_error: str | None = None
         try:
             if campaign.status in (CampaignStatus.scraping, CampaignStatus.scraping_and_running):
-                await enqueue_scrape(campaign_id)
+                await enqueue_collection(campaign_id, campaign.source_type)
                 counts["scrape_jobs"] += 1
             if campaign.status in (CampaignStatus.running, CampaignStatus.scraping_and_running):
                 counts["dm_jobs"] += await enqueue_campaign_run(campaign_id)

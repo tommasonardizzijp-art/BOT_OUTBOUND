@@ -145,7 +145,7 @@ export default function CampaignsPage() {
                           {STATUS_LABELS[c.status]}
                         </Badge>
                       </div>
-                      <p className="text-gray-400 text-sm">@{c.target_username}</p>
+                      <p className="text-gray-400 text-sm">{c.source_type === 'import' ? 'Lista importata' : `@${c.target_username}`}</p>
                     </div>
                   </div>
 

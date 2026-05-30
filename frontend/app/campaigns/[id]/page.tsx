@@ -596,8 +596,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Square className="w-4 h-4 mr-1" />Ferma scraping</>}
             </Button>
           )}
-          {/* Avvia DM in parallelo mentre scraping gira */}
-          {campaign.status === 'scraping' && !campaign.scrape_completed_at && (campaignAccounts?.some(ca => ca.is_active && (ca.role === 'dm' || ca.role === 'both')) ?? false) && (
+          {/* Avvia DM in parallelo mentre scraping gira (non per import: fase singola) */}
+          {campaign.source_type !== 'import' && campaign.status === 'scraping' && !campaign.scrape_completed_at && (campaignAccounts?.some(ca => ca.is_active && (ca.role === 'dm' || ca.role === 'both')) ?? false) && (
             <Button size="sm" className="bg-green-700 hover:bg-green-600 text-white"
               onClick={() => action(() => api.campaigns.startDmAuto(id))} disabled={loadingAction}
               title="Avvia invio DM mentre lo scraping continua in background (auto-gen)">
