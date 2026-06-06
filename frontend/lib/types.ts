@@ -175,7 +175,7 @@ export interface Follower {
   phone: string | null
   email: string | null
   whatsapp: string | null
-  bio_links: { url: string; title: string | null }[]
+  bio_links: string | null
   status: FollowerStatus
   skip_reason: string | null
   generated_text: string | null
