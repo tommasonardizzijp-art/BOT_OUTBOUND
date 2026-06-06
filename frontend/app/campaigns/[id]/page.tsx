@@ -19,7 +19,8 @@ import {
   ArrowLeft, Play, Pause, Square, Loader2, Users, CheckCircle,
   XCircle, Clock, Trash2, RotateCcw, SkipForward, RefreshCw,
   UserPlus, Pencil, X, AlertTriangle, Shield, Zap, ChevronLeft, ChevronRight,
-  ThumbsUp, ThumbsDown, MessageSquare, Activity, ArrowUpDown, MinusCircle, Filter
+  ThumbsUp, ThumbsDown, MessageSquare, Activity, ArrowUpDown, MinusCircle, Filter,
+  Settings
 } from 'lucide-react'
 import type { Campaign, Follower, FollowerStatus, CampaignAccount, Account, AccountStatus, ABStats, ApprovalQueueItem, ApprovalQueue, WorkerEvent, AccountRole, ImportStatusResponse } from '@/lib/types'
 
@@ -46,19 +47,7 @@ const ACCOUNT_STATUS_COLORS: Record<AccountStatus, string> = {
 const FOLLOWER_PAGE_SIZE = 50
 
 function ScrapeBreakPanel({ breakUntil, onResume, loading }: { breakUntil: string; onResume: () => void; loading: boolean }) {
-  const [remaining, setRemaining] = useState('')
-
-  useEffect(() => {
-    const tick = () => {
-      const diff = Math.max(0, new Date(breakUntil).getTime() - Date.now())
-      const m = Math.floor(diff / 60000)
-      const s = Math.floor((diff % 60000) / 1000)
-      setRemaining(diff === 0 ? 'Ripresa...' : `${m}:${s.toString().padStart(2, '0')}`)
-    }
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => clearInterval(id)
-  }, [breakUntil])
+  const remaining = useCountdown(breakUntil)
 
   return (
     <div className="mx-6 mb-4 bg-amber-950/40 border border-amber-700/50 rounded-lg p-4 flex items-center justify-between gap-4">
@@ -71,6 +60,24 @@ function ScrapeBreakPanel({ breakUntil, onResume, loading }: { breakUntil: strin
       </Button>
     </div>
   )
+}
+
+// Live mm:ss countdown verso `until` (ISO). Mostra 'Ripresa...' a zero.
+function useCountdown(until: string | null | undefined): string {
+  const [remaining, setRemaining] = useState('')
+  useEffect(() => {
+    if (!until) { setRemaining(''); return }
+    const tick = () => {
+      const diff = Math.max(0, new Date(until).getTime() - Date.now())
+      const m = Math.floor(diff / 60000)
+      const s = Math.floor((diff % 60000) / 1000)
+      setRemaining(diff === 0 ? 'Ripresa...' : `${m}:${s.toString().padStart(2, '0')}`)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [until])
+  return remaining
 }
 
 export default function CampaignDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -103,6 +110,9 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     { refreshInterval: 5000 }
   )
 
+  // Countdown live verso la fine della pausa sessione (mostrato anche nel badge header)
+  const breakRemaining = useCountdown(campaign?.status === 'scraping_break' ? campaign?.scrape_break_until : null)
+
   const [loadingAction, setLoadingAction] = useState(false)
   const [loadingFollowerId, setLoadingFollowerId] = useState<string | null>(null)
   const [loadingAccountId, setLoadingAccountId] = useState<string | null>(null)
@@ -123,12 +133,86 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   const [editDailyLimitValue, setEditDailyLimitValue] = useState('')
   const [savingDailyLimit, setSavingDailyLimit] = useState(false)
 
-  // M3: edit template (draft/ready only)
+  // Edit template/messaging toggle (also used to convert lead-only campaigns after scraping)
   const [editTemplateOpen, setEditTemplateOpen] = useState(false)
   const [editTemplateValue, setEditTemplateValue] = useState('')
   const [editTemplateBValue, setEditTemplateBValue] = useState('')
   const [editContextValue, setEditContextValue] = useState('')
+  const [editMessagingEnabled, setEditMessagingEnabled] = useState(true)
   const [savingTemplate, setSavingTemplate] = useState(false)
+
+  // Campaign settings modal
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsForm, setSettingsForm] = useState({
+    name: '',
+    daily_limit: '',
+    scrape_session_size: '',
+    scrape_break_minutes_min: '',
+    scrape_break_minutes_max: '',
+    bio_fetch_delay_min: '',
+    bio_fetch_delay_max: '',
+    scrape_daily_limit: '',
+    messaging_enabled: true,
+    base_message_template: '',
+    ai_prompt_context: '',
+    require_approval: false,
+    approval_sample_size: '5',
+  })
+  const [savingSettings, setSavingSettings] = useState(false)
+
+  const openSettings = () => {
+    if (!campaign) return
+    setSettingsForm({
+      name: campaign.name,
+      daily_limit: campaign.daily_limit != null ? String(campaign.daily_limit) : '',
+      scrape_session_size: String(campaign.scrape_session_size ?? 250),
+      scrape_break_minutes_min: String(campaign.scrape_break_minutes_min ?? 30),
+      scrape_break_minutes_max: String(campaign.scrape_break_minutes_max ?? 45),
+      bio_fetch_delay_min: String(campaign.bio_fetch_delay_min ?? 5),
+      bio_fetch_delay_max: String(campaign.bio_fetch_delay_max ?? 8),
+      scrape_daily_limit: campaign.scrape_daily_limit != null ? String(campaign.scrape_daily_limit) : '',
+      messaging_enabled: campaign.messaging_enabled,
+      base_message_template: campaign.base_message_template ?? '',
+      ai_prompt_context: campaign.ai_prompt_context ?? '',
+      require_approval: campaign.require_approval,
+      approval_sample_size: String(campaign.approval_sample_size ?? 5),
+    })
+    setSettingsOpen(true)
+  }
+
+  const saveSettings = async () => {
+    if (!campaign) return
+    setSavingSettings(true)
+    try {
+      type Payload = Parameters<typeof api.campaigns.update>[1]
+      const payload: Payload = {
+        name: settingsForm.name,
+        daily_limit: settingsForm.daily_limit ? parseInt(settingsForm.daily_limit) : null,
+        scrape_session_size: parseInt(settingsForm.scrape_session_size) || undefined,
+        scrape_break_minutes_min: parseInt(settingsForm.scrape_break_minutes_min) || undefined,
+        scrape_break_minutes_max: parseInt(settingsForm.scrape_break_minutes_max) || undefined,
+        bio_fetch_delay_min: parseFloat(settingsForm.bio_fetch_delay_min) || undefined,
+        bio_fetch_delay_max: parseFloat(settingsForm.bio_fetch_delay_max) || undefined,
+        scrape_daily_limit: settingsForm.scrape_daily_limit ? parseInt(settingsForm.scrape_daily_limit) : null,
+      }
+      const msgEditable = ['draft', 'ready', 'paused', 'completed', 'error'].includes(campaign.status as string)
+      if (msgEditable) {
+        payload.messaging_enabled = settingsForm.messaging_enabled
+        payload.base_message_template = settingsForm.base_message_template || null
+        payload.ai_prompt_context = settingsForm.ai_prompt_context || undefined
+        payload.require_approval = settingsForm.require_approval
+        payload.approval_sample_size = parseInt(settingsForm.approval_sample_size) || 5
+      }
+      await api.campaigns.update(id, payload)
+      await mutateCampaign()
+      setSettingsOpen(false)
+      toast.success('Impostazioni salvate')
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Errore salvataggio')
+    } finally {
+      setSavingSettings(false)
+    }
+  }
 
   // M14: pre-generate messages
   const [pregenLoading, setPregenLoading] = useState(false)
@@ -348,14 +432,19 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   }
 
   const handleSaveTemplate = async () => {
+    if (editMessagingEnabled && editTemplateValue.trim().length < 10) {
+      toast.error('Inserisci un template di almeno 10 caratteri')
+      return
+    }
     setSavingTemplate(true)
     try {
       await api.campaigns.update(id, {
-        base_message_template: editTemplateValue,
-        ai_prompt_context: editContextValue || undefined,
-        message_template_b: editTemplateBValue.trim() || null,
+        messaging_enabled: editMessagingEnabled,
+        base_message_template: editMessagingEnabled ? editTemplateValue : null,
+        ai_prompt_context: editMessagingEnabled ? (editContextValue || undefined) : undefined,
+        message_template_b: editMessagingEnabled ? (editTemplateBValue.trim() || null) : null,
       })
-      toast.success('Template aggiornato')
+      toast.success(editMessagingEnabled ? 'Messaggistica aggiornata' : 'Messaggistica disattivata')
       setEditTemplateOpen(false)
       await mutateCampaign()
     } catch (e: unknown) {
@@ -533,10 +622,13 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               campaign.status === 'scraping_break' ? 'bg-amber-700/80 text-amber-100 border-0' : ''
             }`}>
               {campaign.status === 'scraping_and_running' ? '⚡ Scraping + DM' :
-               campaign.source_type === 'import' && campaign.status === 'scraping' ? 'Risoluzione profili' :
-               campaign.source_type === 'import' && campaign.status === 'scraping_break' ? '⏸ Pausa risoluzione' :
+               campaign.source_type === 'import' && campaign.status === 'scraping' ? 'Scraping lista' :
+               campaign.source_type === 'import' && campaign.status === 'scraping_break' ? '⏸ Pausa scraping' :
                campaign.status === 'scraping_break' ? '⏸ Pausa sessione' :
                campaign.status}
+              {campaign.status === 'scraping_break' && breakRemaining && (
+                <span className="ml-1.5 font-mono font-bold">· {breakRemaining}</span>
+              )}
             </Badge>
           </div>
           <div className="flex items-center gap-2 mt-1">
@@ -563,10 +655,10 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           {campaign.status === 'draft' && (
             <Button size="sm" variant="outline" className="border-gray-700 text-gray-300"
               onClick={() => action(() => api.campaigns.startScrape(id))} disabled={loadingAction}>
-              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : (campaign.source_type === 'import' ? 'Avvia risoluzione' : 'Avvia scraping')}
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Avvia scraping'}
             </Button>
           )}
-          {campaign.status === 'ready' && (
+          {campaign.status === 'ready' && campaign.messaging_enabled && (
             <Button size="sm" className="bg-green-600 hover:bg-green-700"
               onClick={() => action(() => api.campaigns.start(id))} disabled={loadingAction}>
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />Avvia</>}
@@ -578,7 +670,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Pause className="w-4 h-4 mr-1" />Pausa</>}
             </Button>
           )}
-          {(campaign.status === 'paused' || (campaign.status === 'completed' && campaign.messages_pending > 0)) && (
+          {campaign.messaging_enabled && (campaign.status === 'paused' || (campaign.status === 'completed' && campaign.messages_pending > 0)) && (
             <Button size="sm" className="bg-green-600 hover:bg-green-700"
               onClick={() => action(() => api.campaigns.resume(id))} disabled={loadingAction}>
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />{campaign.scrape_completed_at ? 'Riprendi' : 'Riprendi scraping'}</>}
@@ -597,7 +689,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             </Button>
           )}
           {/* Avvia DM in parallelo mentre scraping gira (non per import: fase singola) */}
-          {campaign.source_type !== 'import' && campaign.status === 'scraping' && !campaign.scrape_completed_at && (campaignAccounts?.some(ca => ca.is_active && (ca.role === 'dm' || ca.role === 'both')) ?? false) && (
+          {campaign.messaging_enabled && campaign.source_type !== 'import' && campaign.status === 'scraping' && !campaign.scrape_completed_at && (campaignAccounts?.some(ca => ca.is_active && (ca.role === 'dm' || ca.role === 'both')) ?? false) && (
             <Button size="sm" className="bg-green-700 hover:bg-green-600 text-white"
               onClick={() => action(() => api.campaigns.startDmAuto(id))} disabled={loadingAction}
               title="Avvia invio DM mentre lo scraping continua in background (auto-gen)">
@@ -640,7 +732,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             </Button>
           )}
           {/* M14: pre-generate messages button — only for ready/paused */}
-          {(campaign.status === 'ready' || campaign.status === 'paused') && (
+          {campaign.messaging_enabled && (campaign.status === 'ready' || campaign.status === 'paused') && (
             <Button size="sm" variant="outline" className="border-blue-700 text-blue-400 hover:bg-blue-900/20"
               onClick={handlePreGenerate} disabled={pregenLoading || loadingAction}
               title="Pre-genera messaggi AI per tutti i follower prima di avviare">
@@ -666,6 +758,10 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Trash2 className="w-4 h-4 mr-1" />Elimina</>}
             </Button>
           )}
+          <Button size="sm" variant="outline" className="border-gray-700 text-gray-400 hover:text-white hover:border-gray-500"
+            onClick={openSettings} title="Impostazioni campagna">
+            <Settings className="w-4 h-4" />
+          </Button>
         </div>
       </div>
 
@@ -996,17 +1092,18 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 <Badge variant="outline" className="ml-2 text-xs border-purple-700 text-purple-400">A/B</Badge>
               )}
             </CardTitle>
-            {(campaign.status === 'draft' || campaign.status === 'ready') && (
+            {(['draft', 'ready', 'paused', 'completed'] as Campaign['status'][]).includes(campaign.status) && (
               <button
                 className="text-gray-600 hover:text-gray-300 flex items-center gap-1 text-xs"
                 onClick={() => {
                   setEditTemplateValue(campaign.base_message_template ?? '')
                   setEditTemplateBValue(campaign.message_template_b ?? '')
                   setEditContextValue(campaign.ai_prompt_context ?? '')
+                  setEditMessagingEnabled(campaign.messaging_enabled)
                   setEditTemplateOpen(true)
                 }}
               >
-                <Pencil className="w-3 h-3" />Modifica
+                <Pencil className="w-3 h-3" />{campaign.messaging_enabled ? 'Modifica' : 'Abilita messaggi'}
               </button>
             )}
           </div>
@@ -1015,7 +1112,11 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           {campaign.message_template_b && (
             <p className="text-xs text-gray-500 mb-1">Template A</p>
           )}
-          <p className="text-sm text-gray-300 whitespace-pre-wrap">{campaign.base_message_template}</p>
+          {campaign.messaging_enabled && campaign.base_message_template ? (
+            <p className="text-sm text-gray-300 whitespace-pre-wrap">{campaign.base_message_template}</p>
+          ) : (
+            <p className="text-sm text-gray-500">Messaggistica disattivata. I lead restano disponibili per export o attivazione successiva.</p>
+          )}
           {campaign.message_template_b && (
             <>
               <Separator className="my-3 bg-gray-800" />
@@ -1515,6 +1616,188 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         onConfirm={confirmDialog.onConfirm}
       />
 
+      {/* ── Settings Dialog ─────────────────────────────────────────── */}
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="bg-gray-900 border-gray-700 text-white max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-white flex items-center gap-2">
+              <Settings className="w-4 h-4 text-gray-400" />
+              Impostazioni campagna
+            </DialogTitle>
+          </DialogHeader>
+
+          {campaign && (() => {
+            const msgEditable = ['draft', 'ready', 'paused', 'completed', 'error'].includes(campaign.status as string)
+            const sf = settingsForm
+            const set = (k: keyof typeof settingsForm, v: string | boolean) =>
+              setSettingsForm(f => ({ ...f, [k]: v }))
+
+            return (
+              <div className="space-y-6 py-2">
+
+                {/* ── Sezione: Generale ── */}
+                <div className="space-y-3">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 border-b border-gray-800 pb-1">Generale</h3>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="col-span-2 space-y-1">
+                      <label className="text-xs text-gray-400">Nome campagna</label>
+                      <Input value={sf.name} onChange={e => set('name', e.target.value)}
+                        className="bg-gray-800 border-gray-700 text-white text-sm h-8" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-400">Limite DM/giorno <span className="text-gray-600">(vuoto = illimitato)</span></label>
+                      <Input type="number" value={sf.daily_limit} onChange={e => set('daily_limit', e.target.value)}
+                        placeholder="es. 20" min={1} max={500}
+                        className="bg-gray-800 border-gray-700 text-white text-sm h-8" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-400">Cap lookup/giorno per account <span className="text-gray-600">(vuoto = default 180)</span></label>
+                      <Input type="number" value={sf.scrape_daily_limit} onChange={e => set('scrape_daily_limit', e.target.value)}
+                        placeholder="es. 180" min={1} max={2000}
+                        className="bg-gray-800 border-gray-700 text-white text-sm h-8" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── Sezione: Scraping ── */}
+                <div className="space-y-3">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 border-b border-gray-800 pb-1">
+                    Scraping
+                    <span className="ml-2 normal-case font-normal text-green-600">modificabile anche durante scraping</span>
+                  </h3>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="col-span-2 space-y-1">
+                      <label className="text-xs text-gray-400">Profili per sessione</label>
+                      <Input type="number" value={sf.scrape_session_size} onChange={e => set('scrape_session_size', e.target.value)}
+                        min={10} max={5000}
+                        className="bg-gray-800 border-gray-700 text-white text-sm h-8" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-400">Pausa sessione min (min)</label>
+                      <Input type="number" value={sf.scrape_break_minutes_min} onChange={e => set('scrape_break_minutes_min', e.target.value)}
+                        min={5} max={240}
+                        className="bg-gray-800 border-gray-700 text-white text-sm h-8" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-400">Pausa sessione max (min)</label>
+                      <Input type="number" value={sf.scrape_break_minutes_max} onChange={e => set('scrape_break_minutes_max', e.target.value)}
+                        min={5} max={240}
+                        className="bg-gray-800 border-gray-700 text-white text-sm h-8" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-400">Delay fetch bio min (sec)</label>
+                      <Input type="number" step="0.5" value={sf.bio_fetch_delay_min} onChange={e => set('bio_fetch_delay_min', e.target.value)}
+                        min={1} max={60}
+                        className="bg-gray-800 border-gray-700 text-white text-sm h-8" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-400">Delay fetch bio max (sec)</label>
+                      <Input type="number" step="0.5" value={sf.bio_fetch_delay_max} onChange={e => set('bio_fetch_delay_max', e.target.value)}
+                        min={1} max={120}
+                        className="bg-gray-800 border-gray-700 text-white text-sm h-8" />
+                    </div>
+                    <p className="col-span-2 text-xs text-amber-500/90 bg-amber-950/30 border border-amber-800/40 rounded px-2 py-1.5">
+                      ⚠️ <strong>I delay valgono per OGNI lead, condivisi tra tutti gli account scraping.</strong>{' '}
+                      Con N account ogni account aspetta circa N× questo valore tra i suoi lead. Con 2 account, per ~6–10s
+                      effettivi per account imposta <strong>3–5s</strong>.
+                    </p>
+                  </div>
+                </div>
+
+                {/* ── Sezione: Messaggi ── */}
+                <div className="space-y-3">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 border-b border-gray-800 pb-1">
+                    Messaggi
+                    {!msgEditable && <span className="ml-2 normal-case font-normal text-amber-600">metti in pausa per modificare</span>}
+                  </h3>
+                  <div className="flex items-center justify-between rounded-md border border-gray-700 bg-gray-800/40 px-3 py-2">
+                    <div>
+                      <p className="text-sm text-gray-300 font-medium">Invia messaggi</p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {sf.messaging_enabled ? 'Campagna genera e invia DM.' : 'Solo raccolta lead, nessun DM.'}
+                      </p>
+                    </div>
+                    <button type="button" disabled={!msgEditable}
+                      onClick={() => set('messaging_enabled', !sf.messaging_enabled)}
+                      className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full transition-colors ${sf.messaging_enabled ? 'bg-purple-600' : 'bg-gray-600'} ${!msgEditable ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${sf.messaging_enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                    </button>
+                  </div>
+                  {sf.messaging_enabled && (
+                    <>
+                      <div className="space-y-1">
+                        <label className="text-xs text-gray-400">Template base *</label>
+                        <textarea value={sf.base_message_template}
+                          onChange={e => set('base_message_template', e.target.value)}
+                          disabled={!msgEditable} rows={5}
+                          className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                          placeholder="Template messaggio..." />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs text-gray-400">Contesto AI <span className="text-gray-600">(opzionale)</span></label>
+                        <textarea value={sf.ai_prompt_context}
+                          onChange={e => set('ai_prompt_context', e.target.value)}
+                          disabled={!msgEditable} rows={2}
+                          className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                          placeholder="Contesto opzionale..." />
+                      </div>
+                      <div className="flex items-center justify-between rounded-md border border-gray-700 bg-gray-800/40 px-3 py-2">
+                        <div>
+                          <p className="text-sm text-gray-300 font-medium">Approvazione messaggi</p>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            {sf.require_approval
+                              ? `Revisione campione: ${sf.approval_sample_size} messaggi prima di iniziare.`
+                              : 'Auto-invio senza revisione.'}
+                          </p>
+                        </div>
+                        <button type="button" disabled={!msgEditable}
+                          onClick={() => set('require_approval', !sf.require_approval)}
+                          className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full transition-colors ${sf.require_approval ? 'bg-purple-600' : 'bg-gray-600'} ${!msgEditable ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+                          <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${sf.require_approval ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                        </button>
+                      </div>
+                      {sf.require_approval && (
+                        <div className="space-y-1">
+                          <label className="text-xs text-gray-400">Dimensione campione approvazione</label>
+                          <Input type="number" value={sf.approval_sample_size}
+                            onChange={e => set('approval_sample_size', e.target.value)}
+                            disabled={!msgEditable} min={1} max={50}
+                            className="bg-gray-800 border-gray-700 text-white text-sm h-8 w-24 disabled:opacity-40" />
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* ── Info sola lettura ── */}
+                <div className="space-y-2 rounded-md border border-gray-800 bg-gray-800/20 px-3 py-2">
+                  <p className="text-xs text-gray-600 font-medium uppercase tracking-wider">Impostato alla creazione (non modificabile)</p>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                    <span className="text-gray-500">Sorgente</span>
+                    <span className="text-gray-400">{campaign.source_type === 'import' ? 'Lista importata' : `@${campaign.target_username}`}</span>
+                    {campaign.source_type === 'scrape' && <>
+                      <span className="text-gray-500">Modalità</span>
+                      <span className="text-gray-400">{campaign.scrape_mode === 'following' ? 'Following' : 'Follower'}</span>
+                    </>}
+                  </div>
+                </div>
+
+              </div>
+            )
+          })()}
+
+          <DialogFooter>
+            <Button variant="outline" className="border-gray-700 text-gray-300" onClick={() => setSettingsOpen(false)}>
+              Annulla
+            </Button>
+            <Button className="bg-purple-600 hover:bg-purple-700" onClick={saveSettings} disabled={savingSettings}>
+              {savingSettings ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+              Salva
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* ── M3: Edit Template Dialog ────────────────────────────────── */}
       <Dialog open={editTemplateOpen} onOpenChange={setEditTemplateOpen}>
         <DialogContent className="bg-gray-900 border-gray-700 text-white max-w-lg">
@@ -1523,6 +1806,24 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           </DialogHeader>
 
           <div className="space-y-4 py-2">
+            <div className="flex items-center justify-between rounded-md border border-gray-700 bg-gray-800/40 px-3 py-2">
+              <div>
+                <p className="text-sm text-gray-300 font-medium">Invia messaggi</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {editMessagingEnabled
+                    ? 'La campagna potra generare e inviare DM.'
+                    : 'Modalita solo raccolta lead: nessun DM verra inviato.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditMessagingEnabled(v => !v)}
+                className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full transition-colors ${editMessagingEnabled ? 'bg-purple-600' : 'bg-gray-600'}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${editMessagingEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+            {editMessagingEnabled && (<>
             <div className="space-y-1.5">
               <label className="text-sm text-gray-300 font-medium">Template base *</label>
               <textarea
@@ -1557,6 +1858,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 placeholder="Contesto opzionale per l'AI..."
               />
             </div>
+            </>)}
           </div>
 
           <DialogFooter>
@@ -1567,7 +1869,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             <Button
               className="bg-purple-600 hover:bg-purple-700"
               onClick={handleSaveTemplate}
-              disabled={!editTemplateValue.trim() || savingTemplate}
+              disabled={(editMessagingEnabled && editTemplateValue.trim().length < 10) || savingTemplate}
             >
               {savingTemplate ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
               Salva
