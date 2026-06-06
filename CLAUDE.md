@@ -87,7 +87,8 @@ d:\BOT OUTBOUND\
 │   │   │   ├── leads.py              # Lead database + export CSV
 │   │   │   └── health.py             # Health check sistema
 │   │   ├── services/
-│   │   │   ├── account_manager.py    # Rotazione account, warm-up, cooldown, reset giornaliero
+│   │   │   ├── account_manager.py    # Rotazione account, warm-up, cooldown, reset giornaliero; has_scrape_budget/increment_scrape_lookup
+│   │   │   ├── global_contact_service.py  # upsert_lead + merge contatti cross-campagna in global_contacts
 │   │   │   ├── scraper.py            # instagrapi: login (session restore only), scrape follower/following, fetch bio
 │   │   │   ├── ai_personalizer.py    # Multi-provider LLM: generate, validate, fallback, batch, approval sampling
 │   │   │   ├── dm_sender.py          # Patchright: invio singolo DM
@@ -109,7 +110,8 @@ d:\BOT OUTBOUND\
 │   │       ├── timing.py             # Log-normal delay generator
 │   │       ├── exceptions.py         # Custom exceptions hierarchy
 │   │       ├── retry.py              # Retry decorator con exponential backoff
-│   │       └── events.py             # Sistema eventi Redis per live log frontend
+│   │       ├── events.py             # Sistema eventi Redis per live log frontend
+│   │       └── contact_extract.py    # Estrazione contatti IG (campi business + regex bio + WhatsApp)
 │   ├── alembic/
 │   │   ├── env.py
 │   │   └── versions/
@@ -168,6 +170,7 @@ Stato degli account Instagram usati per inviare DM.
 - `warmup_day`: 0 = non in warm-up. Incrementato ogni giorno. Controlla il limite giornaliero dinamico.
 - `session_data`: JSON serializzato di instagrapi (evita re-login)
 - `encrypted_password`: Fernet-encrypted, mai in chiaro
+- `scrape_lookups_today`: contatore lookup `user_info_by_username_v1` eseguiti oggi; resettato dal cron `daily_reset`. Usato per il cap anti-ban (vedi `SCRAPE_DAILY_LIMIT`).
 
 ### `campaigns`
 Una campagna = una sorgente di profili + un template messaggio.
@@ -176,6 +179,7 @@ Una campagna = una sorgente di profili + un template messaggio.
   - `scraping_break`: scraper in pausa sessione (con countdown), riprendibile manualmente
   - `scraping_and_running`: scraper + worker DM attivi simultaneamente (account separati per ruolo)
 - `total_followers` / `messages_sent/failed/pending`: contatori denormalizzati per performance UI
+- `base_message_template`: template principale (ora **nullable** — NULL consentito quando `messaging_enabled=False`; non può essere vuoto/NULL se `messaging_enabled=True`)
 - `message_template_b`: template B opzionale per A/B testing (M10)
 - `daily_limit`: limite DM/giorno per l'intera campagna
 - `require_approval` + `approval_sample_size`: approvazione messaggi a campione (M15)
@@ -186,6 +190,8 @@ Una campagna = una sorgente di profili + un template messaggio.
 - `auto_generate`: se True, i worker DM generano messaggi AI on-the-fly (no pre-gen manuale)
 - `scrape_break_until`: timestamp fine pausa sessione attiva (null se non in pausa)
 - `scrape_break_prev_status`: status da ripristinare al termine della pausa
+- `messaging_enabled`: bool (default True) — se False, la campagna fa solo scraping/raccolta contatti senza inviare DM; `/start` e `/start-dm-auto` restituiscono 400 se disattivata. Campagne scraping-only terminano in `completed` al termine dello scraping.
+- `scrape_daily_limit`: int nullable — override del cap lookup per questa campagna (sovrascrive `SCRAPE_DAILY_LIMIT` da `.env`). NULL = usa il default globale.
 
 ### `campaign_accounts`
 Join table campagne ↔ account Instagram.
@@ -198,6 +204,7 @@ Ogni riga è un follower della pagina target in una campagna specifica.
 - `status` enum: `pending → bio_scraped → message_generated → pending_approval → sent | failed | skipped | replied`
 - Unique constraint: `(campaign_id, ig_user_id)` — previene duplicati nella stessa campagna
 - `locked_by_account_id` + `locked_at`: optimistic locking per multi-worker (auto-released dopo 20 min)
+- Colonne contatto (aggiunte in migrazione 014): `phone`, `email`, `whatsapp` (stringhe nullable), `bio_links` (JSON nullable — lista link dal profilo IG), `contact_source` (JSON nullable — quale campo/metodo ha estratto ogni dato), `contact_extra` (JSON nullable — dati grezzi aggiuntivi). Popolati da `contact_extract.py` a scrape-time o a resolve-time (import).
 
 ### `imported_profiles`
 Tabella di staging per la modalità `source_type='import'` (migrazione 013). Ogni riga = un profilo IG fornito dall'utente via file, in attesa di risoluzione in `Follower`. Serve perché `Follower.ig_user_id` è NOT NULL + unique ma all'import si ha solo lo username (il `pk` arriva dopo la call IG).
@@ -214,12 +221,15 @@ Ogni DM (generato o inviato) è una riga separata.
 - Permette retry granulare
 
 ### `global_contacts`
-Lead database + deduplicazione cross-campagna. Previene di inviare DM due volte allo stesso utente.
+Lead database + deduplicazione cross-campagna. Previene di inviare DM due volte allo stesso utente. Un profilo diventa un "lead visto" (`last_contacted_at=NULL`) nel momento dello scraping, anche se la messaggistica è disattivata — la colonna `last_contacted_at` viene popolata solo al primo invio DM riuscito.
 - `ig_user_id` UNIQUE
 - `username`, `full_name`, `biography`: dati profilo lead aggiornati ad ogni invio
 - `contacted_by_campaign_ids`: JSON array di campaign_id (legacy, per backward compat)
 - `contact_history`: JSON array ricco — ogni entry `{campaign_id, campaign_name, account_id, account_username, contacted_at}`
 - Le colonne nuove (`username`, `full_name`, `biography`, `contact_history`) sono aggiunte via migrazione inline al boot (`ALTER TABLE ADD COLUMN` con try/except in `database.py`)
+- Colonne contatto (aggiunte in migrazione 014): `phone`, `email`, `whatsapp`, `external_url` (stringhe nullable), `bio_links` (JSON nullable), `contact_source` (JSON nullable), `contact_extra` (JSON nullable). Merge cross-campagna con gap-fill: un campo viene aggiornato solo se era NULL e il nuovo valore è non-vuoto.
+- `scrape_sources`: JSON array NOT NULL (default `[]`) — elenco delle sorgenti (campaign_id + timestamp) da cui il profilo è stato visto durante lo scraping, anche senza DM inviato.
+- `first_seen_at`: timestamp del primo scraping (NULL su righe pre-014).
 
 ### `activity_logs`
 Audit trail di tutte le azioni significative: login, scrape, dm_sent, dm_failed, rate_limited, challenge, cooldown_start/end, account_banned.
@@ -243,6 +253,7 @@ Variabili chiave:
 - `AI_BASE_URL`: override endpoint OpenAI-compatible (vuoto = default provider)
 - `AI_SYSTEM_PROMPT`: override system prompt completo (vuoto = usa default ottimizzato hardcoded)
 - `AI_TEMPERATURE`: temperatura sampling, default `0.35` (più bassa = messaggi più consistenti)
+- `SCRAPE_DAILY_LIMIT`: cap lookup `user_info_by_username_v1` per account/giorno durante scraping (default `180`). Override per-campagna disponibile su `campaigns.scrape_daily_limit`. Quando l'account raggiunge il cap, lo scraper ruota su un account alternativo o mette la campagna in pausa (`scrape_capped`).
 
 ---
 
@@ -391,6 +402,14 @@ Il layer browser in `app/browser/` gestisce:
 - `campaign_control.py` centralizza pausa/ripresa per API web e Telegram, con pre-check Redis prima di portare una campagna a running.
 - Problemi su singolo account non fermano tutto il bot: `cooldown`, `challenge_required` e `banned` isolano l'account; vengono pausate solo le campagne che non hanno altri account DM utilizzabili. Il kill-switch resta per problemi sistemici o comando manuale.
 
+### Scraping avanzato + raccolta contatti (✅ IMPLEMENTATA)
+- **Estrazione contatti in 1 call IG**: modulo puro `app/utils/contact_extract.py` legge campi business IG (`public_phone_number`, `public_email`, `whatsapp_number`, link profilo) + regex su bio (telefono, email, WhatsApp) e restituisce un `ContactData`. Consumato da scraper (`scraper.py`) e resolver import (`import_resolver.py`).
+- **Lead visto a scrape-time**: ogni profilo scrapato/risolto viene fatto confluire in `global_contacts` via `app/services/global_contact_service.py` (`upsert_lead` + merge gap-fill). Il record diventa visibile nei lead anche prima che venga inviato qualsiasi DM (`last_contacted_at=NULL`). I campi contatto vengono arricchiti a send-time in `campaign_orchestrator._mark_globally_contacted`.
+- **Messaggistica opzionale**: toggle `campaigns.messaging_enabled` — se False, la campagna termina come `completed` dopo lo scraping senza inviare DM. Guard in `/start` e `/start-dm-auto` (HTTP 400 se disattivata o template mancante). Frontend: toggle "Invia messaggi" nel form nuova campagna.
+- **Cap anti-ban per-account**: `SCRAPE_DAILY_LIMIT` (env) + `campaigns.scrape_daily_limit` (override). Contatore `instagram_accounts.scrape_lookups_today` aggiornato dopo ogni `user_info` call; `has_scrape_budget`/`increment_scrape_lookup` in `account_manager.py`. Al raggiungimento del cap, lo scraper/resolver ruota su account alternativo o mette la campagna in pausa (`scrape_capped`). Contatore resettato dal cron `daily_reset`.
+- **Export leads filtrabile**: endpoint `/leads` e `/leads/export` estesi con filtri `campaign_ids[]`, `scraping_account_ids[]`, `has_phone`, `has_email` — nessuna cross-client data leak. Frontend: multi-select filtri + colonne contatto nella pagina leads.
+- Piani/spec: `docs/superpowers/plans/` (branch `feature/advanced-scraping`). Migrazione: `014_advanced_scraping_contacts.py`.
+
 ### Multi-campagna parallela (Fase 7B — da implementare)
 - Aggiungere `current_campaign_id` a `InstagramAccount`
 - UI di assegnazione account → campagna
@@ -455,6 +474,7 @@ Vedi `docs/project/PROGRESS.md` per lo stato aggiornato di ogni fase.
 | 7C | Lead database + export CSV | ✅ Completata |
 | 7D | Scraping + DM parallelo, ruoli account, session break configurabile | ✅ Completata |
 | 7E | Import profili da lista (source_type=import, imported_profiles, resolve worker) | ✅ Completata |
+| 7F | Scraping avanzato: contatti (telefono/email/whatsapp/link) + messaggistica opzionale + cap scraping | ✅ Completata |
 | 7B | Multi-campagna parallela | Da fare |
 
 ---

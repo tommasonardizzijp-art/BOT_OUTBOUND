@@ -43,11 +43,14 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 | Migliorie | Browser overlap fix, auto-pause al boot, AI quote fix, pre-gen events, UI performance, DM count fix | 2026-04-16 |
 | Control-plane remoto | Kill-switch web completo + Telegram pause/resume per campagna con bottoni inline | 2026-05-11 |
 | Supabase auth fix | Pooler-safe asyncpg + admin dashboard ricreato su Supabase | 2026-05-11 |
+| 7E | Import profili da lista (source_type=import, imported_profiles, resolve worker) | 2026-05-30 |
+| 7F | Scraping avanzato: contatti (phone/email/whatsapp/link) + messaggistica opzionale + cap scraping | 2026-06-06 |
 
 ### Da fare ☐
 
 | Priorità | Task | Note |
 |---|---|---|
+| **ALTA** | Applicare migrazione 014 a Supabase | `python -m scripts.migrate` con bot fermo; verificare no `idle in transaction` su campaigns/followers |
 | **MEDIA** | Fase 7B: multi-campagna parallela | 1 account = 1 campagna alla volta |
 | **BASSA** | Test unitari | timing, account_manager, ai_personalizer |
 | **BASSA** | Migrazione Alembic | attualmente create_all + inline ALTER |
@@ -117,9 +120,9 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 
 | File | Scopo | Aggiornato |
 |---|---|---|
-| `INDEX.md` | Navigazione, stato globale, ordine lettura | 2026-05-23 |
-| `CLAUDE.md` | Architettura completa, stack, schema DB, anti-detection | 2026-05-23 |
-| `docs/project/PROGRESS.md` | Log cronologico implementazioni + riferimento audit | 2026-05-23 |
+| `INDEX.md` | Navigazione, stato globale, ordine lettura | 2026-06-06 |
+| `CLAUDE.md` | Architettura completa, stack, schema DB, anti-detection | 2026-06-06 |
+| `docs/project/PROGRESS.md` | Log cronologico implementazioni + riferimento audit | 2026-06-06 |
 | `docs/audits/AUDIT.md` | Ultimo audit codice — **sempre sovrascritto** | 2026-04-16 |
 | `docs/audits/AUDIT_UNIFICATO.md` | Audit unificato Fase 0/1/2 | 2026-05-18 |
 | `docs/architecture/FUTURE_IMPROVEMENTS.md` | Miglioramenti proposti (da audit v2) | 2026-04-16 |

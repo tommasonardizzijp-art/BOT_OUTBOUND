@@ -890,6 +890,57 @@ Branch: `feature/import-profiles`. Permette a una campagna di partire da una lis
 
 ---
 
+## [2026-06-06] Fase 7F — Scraping avanzato + contatti + messaggistica opzionale ✅ COMPLETATA
+
+Branch: `feature/advanced-scraping`. 12 task implementativi + QA E2E (62 test passati).
+
+### Migrazione DB
+- `014_advanced_scraping_contacts.py` — **non ancora applicata a Supabase** (operatore: eseguire `python -m scripts.migrate` con bot fermo; verificare prima assenza di connessioni `idle in transaction` su `campaigns`/`followers`).
+  - `followers`: +`phone`, `email`, `whatsapp`, `bio_links(JSON)`, `contact_source(JSON)`, `contact_extra(JSON)`
+  - `global_contacts`: +`phone`, `email`, `whatsapp`, `external_url`, `bio_links(JSON)`, `contact_source(JSON)`, `contact_extra(JSON)`, `scrape_sources(JSON NOT NULL default [])`, `first_seen_at`
+  - `campaigns`: +`messaging_enabled(bool default True)`, +`scrape_daily_limit(int nullable)`; `base_message_template` reso nullable
+  - `instagram_accounts`: +`scrape_lookups_today(int default 0)`
+
+### Backend
+
+| File | Contenuto |
+|---|---|
+| `backend/alembic/versions/014_advanced_scraping_contacts.py` | Migrazione (vedi sopra) |
+| `backend/app/utils/contact_extract.py` | Modulo puro: estrae `ContactData` da campi business IG + regex bio + WhatsApp |
+| `backend/app/services/global_contact_service.py` | `upsert_lead` + merge gap-fill in `global_contacts`; crea "lead visto" a scrape-time |
+| `backend/app/models/follower.py` | +colonne contatto (phone/email/whatsapp/bio_links/contact_source/contact_extra) |
+| `backend/app/models/global_contact.py` | +colonne contatto + scrape_sources + first_seen_at |
+| `backend/app/models/campaign.py` | base_message_template nullable, +messaging_enabled, +scrape_daily_limit |
+| `backend/app/models/account.py` | +scrape_lookups_today |
+| `backend/app/services/account_manager.py` | +`has_scrape_budget`, `increment_scrape_lookup`; `daily_reset` resetta `scrape_lookups_today` |
+| `backend/app/services/scraper.py` | Integra `contact_extract` + `upsert_lead` + cap scraping con rotazione/pausa |
+| `backend/app/services/import_resolver.py` | Mirror delle integrazioni scraper: cap, estrazione contatti, upsert lead |
+| `backend/app/services/campaign_orchestrator.py` | `_mark_globally_contacted` propaga campi contatto da `Follower` a `GlobalContact` a send-time |
+| `backend/app/schemas/campaign.py` | `base_message_template` nullable; +`messaging_enabled`, +`scrape_daily_limit` in Create/Update/Response |
+| `backend/app/api/campaigns.py` | Guard: `/start` e `/start-dm-auto` → 400 se `messaging_enabled=False` o template vuoto |
+| `backend/app/api/leads.py` | Filtri aggiuntivi: `campaign_ids[]`, `scraping_account_ids[]`, `has_phone`, `has_email` (list + export) |
+
+### Frontend
+
+| File | Contenuto |
+|---|---|
+| Form nuova campagna | Toggle "Invia messaggi" (`messaging_enabled`) + campo cap scraping (`scrape_daily_limit`) |
+| Pagina leads | Colonne contatto (telefono/email/whatsapp) + filtri multi-select campagna/account/has_phone/has_email |
+
+### Decisioni chiave
+
+- **Lead visto a scrape-time**: ogni profilo scrapato entra in `global_contacts` anche con `messaging_enabled=False`; `last_contacted_at` resta NULL finché non si invia un DM. Questa separazione consente campagne di solo scouting senza DM.
+- **Merge gap-fill cross-campagna**: i campi contatto di `global_contacts` vengono aggiornati solo se il valore precedente era NULL — i dati raccolti prima non vengono sovrascritti da valori vuoti.
+- **Cap anti-ban**: la variabile `SCRAPE_DAILY_LIMIT` (default 180) limita i lookup `user_info` per account/giorno. Superato il cap, lo scraper/resolver ruota su un account alternativo; se nessun account disponibile, mette la campagna in `paused` con outcome `scrape_capped`.
+- **Messaggistica opzionale**: il toggle è backward-compatible — omettere il flag equivale a `True`, il template resta obbligatorio per campagne con messaggistica attiva.
+
+### Verifica
+- Suite completa: **62 test passati, 0 falliti** (aggiunto `test_e2e_advanced_scraping.py`).
+- `npx tsc --noEmit` frontend: 0 errori.
+- `from app.main import app` OK; `python -m compileall backend/app` OK.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |
