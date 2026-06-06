@@ -91,7 +91,7 @@ async def full_batch_generate_task(ctx: dict, campaign_id: str) -> None:
 async def daily_reset(ctx: dict) -> None:
     """
     Cron (daily at midnight UTC):
-    1. Reset daily_message_count for all accounts.
+    1. Reset daily_message_count and scrape_lookups_today for all accounts.
     2. Re-activate accounts whose cooldown has expired.
     3. Advance warmup_day for accounts in warm-up.
     4. Restart workers for campaigns still in 'running' state
@@ -108,7 +108,7 @@ async def daily_reset(ctx: dict) -> None:
     logger.info("[Cron] daily_reset: starting...")
     async with AsyncSessionLocal() as db:
         # ── Reset daily message counters ──────────────────────────────────
-        await db.execute(update(InstagramAccount).values(daily_message_count=0))
+        await db.execute(update(InstagramAccount).values(daily_message_count=0, scrape_lookups_today=0))
 
         # ── Re-activate expired cooldowns ──────────────────────────────────
         await db.execute(
