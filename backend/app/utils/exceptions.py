@@ -42,6 +42,10 @@ class SoftBlockError(ScraperError):
     """Instagram soft-blocked bio fetch requests (community protection response)."""
 
 
+class ScrapeBudgetError(ScraperError):
+    """Raised when no scraping account has remaining daily lookup budget."""
+
+
 class RateLimitError(BotOutboundError):
     """Instagram rate limit hit."""
 

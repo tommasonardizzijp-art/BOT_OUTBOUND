@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     distraction_pause_max_seconds: int = 0   # 0 = auto (10x max_delay, max 900s)
     distraction_pause_probability: float = 0.03  # 3% chance per inter-message gap; set 0 to disable
 
+    # Max user_info lookups/day/account for scraping (anti-ban). Per-campaign override on campaigns.scrape_daily_limit.
+    scrape_daily_limit: int = 180
+
     # Account defaults
     default_daily_limit: int = 20
     warmup_enabled: bool = True

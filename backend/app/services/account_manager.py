@@ -228,3 +228,27 @@ async def release_expired_cooldowns(db: AsyncSession) -> None:
         .values(status=AccountStatus.active, cooldown_until=None)
     )
     await db.commit()
+
+
+def scrape_daily_limit_for(account, campaign) -> int:
+    """Effective lookup cap for this account on this campaign."""
+    override = getattr(campaign, "scrape_daily_limit", None)
+    if override is not None and override > 0:
+        return override
+    return settings.scrape_daily_limit
+
+
+def has_scrape_budget(account, campaign) -> bool:
+    return (getattr(account, "scrape_lookups_today", 0) or 0) < scrape_daily_limit_for(account, campaign)
+
+
+async def increment_scrape_lookup(db, account_id: str) -> None:
+    """Atomic +1 on the account's daily scrape lookup counter."""
+    from sqlalchemy import update
+    from app.models.account import InstagramAccount
+    await db.execute(
+        update(InstagramAccount)
+        .where(InstagramAccount.id == account_id)
+        .values(scrape_lookups_today=InstagramAccount.scrape_lookups_today + 1)
+    )
+    await db.commit()
