@@ -7,7 +7,9 @@ class CampaignCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     target_username: str | None = Field(default=None, max_length=255)
     source_type: str = Field(default='scrape', pattern='^(scrape|import)$')
-    base_message_template: str = Field(..., min_length=10)
+    base_message_template: str | None = Field(default=None)
+    messaging_enabled: bool = True
+    scrape_daily_limit: int | None = Field(default=None, ge=1, le=2000)
     ai_prompt_context: str | None = None
     # M10: optional second template for A/B testing
     message_template_b: str | None = Field(default=None, min_length=10)
@@ -29,12 +31,18 @@ class CampaignCreate(BaseModel):
     def _check_source(self):
         if self.source_type == 'scrape' and not (self.target_username and self.target_username.strip()):
             raise ValueError("target_username obbligatorio per source_type='scrape'")
+        if self.messaging_enabled:
+            t = (self.base_message_template or "").strip()
+            if len(t) < 10:
+                raise ValueError("base_message_template obbligatorio (min 10 caratteri) quando messaging_enabled=True")
         return self
 
 
 class CampaignUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    base_message_template: str | None = Field(default=None, min_length=10)
+    base_message_template: str | None = None
+    messaging_enabled: bool | None = None
+    scrape_daily_limit: int | None = Field(default=None, ge=1, le=2000)
     ai_prompt_context: str | None = None
     # M10: can be set to None to disable A/B testing
     message_template_b: str | None = Field(default=None, min_length=10)
@@ -57,7 +65,7 @@ class CampaignResponse(BaseModel):
     target_username: str | None
     source_type: str = 'scrape'
     target_user_id: int | None
-    base_message_template: str
+    base_message_template: str | None
     ai_prompt_context: str | None
     # M10: A/B testing
     message_template_b: str | None
@@ -87,6 +95,8 @@ class CampaignResponse(BaseModel):
     bio_fetch_delay_min: float = 5.0
     bio_fetch_delay_max: float = 8.0
     auto_generate: bool = False
+    messaging_enabled: bool = True
+    scrape_daily_limit: int | None = None
     scrape_break_until: datetime | None = None
     scrape_cursor: str | None = None
     scrape_outcome: str | None = None

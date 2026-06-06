@@ -124,7 +124,9 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         name=data.name,
         target_username=(data.target_username.lstrip("@") if data.target_username else None),
         source_type=data.source_type,
-        base_message_template=data.base_message_template,
+        base_message_template=(data.base_message_template or None),
+        messaging_enabled=data.messaging_enabled,
+        scrape_daily_limit=data.scrape_daily_limit,
         ai_prompt_context=data.ai_prompt_context,
         message_template_b=data.message_template_b,
         daily_limit=data.daily_limit,
@@ -173,8 +175,12 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
 
     if data.name is not None:
         campaign.name = data.name
-    if data.base_message_template is not None:
-        campaign.base_message_template = data.base_message_template
+    if "base_message_template" in data.model_fields_set:
+        campaign.base_message_template = data.base_message_template or None
+    if data.messaging_enabled is not None:
+        campaign.messaging_enabled = data.messaging_enabled
+    if "scrape_daily_limit" in data.model_fields_set:
+        campaign.scrape_daily_limit = data.scrape_daily_limit
     if data.ai_prompt_context is not None:
         campaign.ai_prompt_context = data.ai_prompt_context
     if "message_template_b" in data.model_fields_set:
@@ -374,6 +380,17 @@ async def start_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     if campaign.status not in (CampaignStatus.ready, CampaignStatus.paused):
         raise HTTPException(status_code=400, detail="Campaign must be in ready or paused state to start")
 
+    if not campaign.messaging_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Messaggistica disattivata per questa campagna. Attiva 'Invia messaggi' e imposta un template per inviare DM.",
+        )
+    if not (campaign.base_message_template or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Template messaggio mancante. Imposta il messaggio base prima di avviare l'invio.",
+        )
+
     try:
         await ensure_bot_accepts_work(db)
     except CampaignControlError as exc:
@@ -560,6 +577,12 @@ async def start_dm_auto(campaign_id: str, db: AsyncSession = Depends(get_db)):
     Transitions campaign to scraping_and_running. DM generation happens inline (auto-gen).
     """
     campaign = await _get_or_404(campaign_id, db)
+
+    if not campaign.messaging_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Messaggistica disattivata per questa campagna. Attiva 'Invia messaggi' per usare l'invio automatico.",
+        )
 
     if campaign.source_type == "import":
         # Import è a fase singola: prima si risolvono tutti i profili, poi (ready) si
