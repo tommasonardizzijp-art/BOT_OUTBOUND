@@ -14,6 +14,11 @@ class LeadResponse(BaseModel):
     is_verified: bool = False
     external_url: Optional[str] = None
     profile_pic_url: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    whatsapp: Optional[str] = None
+    bio_links: List[Any] = []
+    scraping_accounts: List[str] = []   # usernames degli account che hanno scrapato il lead
     # Contact info
     contact_history: List[Any] = []  # [{campaign_id, campaign_name, account_username, contacted_at}]
     contacts_count: int = 0          # number of times contacted

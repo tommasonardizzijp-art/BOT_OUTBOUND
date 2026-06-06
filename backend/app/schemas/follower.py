@@ -16,6 +16,10 @@ class FollowerResponse(BaseModel):
     following_count: int | None
     profile_pic_url: str | None
     external_url: str | None
+    phone: str | None = None
+    email: str | None = None
+    whatsapp: str | None = None
+    bio_links: str | None = None  # JSON string
     status: FollowerStatus
     skip_reason: str | None
     # Pre-generated message text (populated from Message table when available)

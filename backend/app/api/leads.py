@@ -70,7 +70,9 @@ def _sources_subquery():
 
 
 def _build_conditions(stats_sq, search, campaign_id, has_replied,
-                      verified_only, min_followers, date_from, date_to):
+                      verified_only, min_followers, date_from, date_to,
+                      campaign_ids=None, scraping_account_ids=None,
+                      has_phone=False, has_email=False):
     """Build WHERE conditions referencing the given stats_sq instance.
     Each query (list, count, insights) must pass its OWN stats_sq — sharing
     a single subquery instance across queries breaks SQLAlchemy FROM resolution.
@@ -92,6 +94,22 @@ def _build_conditions(stats_sq, search, campaign_id, has_replied,
                 )
             )
         )
+    if campaign_ids:
+        conditions.append(
+            exists(select(1).where(
+                Follower.ig_user_id == GlobalContact.ig_user_id,
+                Follower.campaign_id.in_(campaign_ids),
+            ))
+        )
+    if scraping_account_ids:
+        # scrape_sources is a JSON array of objects containing scraping_account_id.
+        conditions.append(or_(*[
+            GlobalContact.scrape_sources.like(f'%"{aid}"%') for aid in scraping_account_ids
+        ]))
+    if has_phone:
+        conditions.append(GlobalContact.phone.isnot(None))
+    if has_email:
+        conditions.append(GlobalContact.email.isnot(None))
     if has_replied is True:
         conditions.append(stats_sq.c.has_replied == 1)
     elif has_replied is False:
@@ -113,12 +131,15 @@ def _build_conditions(stats_sq, search, campaign_id, has_replied,
     return conditions
 
 
-def _filter_args(search, campaign_id, has_replied, verified_only, min_followers, date_from, date_to):
+def _filter_args(search, campaign_id, has_replied, verified_only, min_followers, date_from, date_to,
+                 campaign_ids=None, scraping_account_ids=None, has_phone=False, has_email=False):
     """Bundle filter kwargs for repeated _build_conditions calls."""
     return dict(
         search=search, campaign_id=campaign_id, has_replied=has_replied,
         verified_only=verified_only, min_followers=min_followers,
         date_from=date_from, date_to=date_to,
+        campaign_ids=campaign_ids, scraping_account_ids=scraping_account_ids,
+        has_phone=has_phone, has_email=has_email,
     )
 
 
@@ -130,6 +151,18 @@ def _row_to_lead(row) -> LeadResponse:
         history = []
     sources_str = row.scrape_sources or ""
     scrape_sources = [s.strip() for s in sources_str.split(",") if s.strip()] if sources_str else []
+    try:
+        bio_links = json.loads(gc.bio_links) if gc.bio_links else []
+    except Exception:
+        bio_links = []
+    try:
+        scrape_src_json = json.loads(gc.scrape_sources) if gc.scrape_sources else []
+        scraping_accounts = sorted({
+            e.get("scraping_account_username") for e in scrape_src_json
+            if e.get("scraping_account_username")
+        })
+    except Exception:
+        scraping_accounts = []
     return LeadResponse(
         ig_user_id=gc.ig_user_id,
         username=gc.username,
@@ -138,8 +171,13 @@ def _row_to_lead(row) -> LeadResponse:
         follower_count=row.follower_count,
         following_count=row.following_count,
         is_verified=bool(row.is_verified),
-        external_url=row.external_url,
+        external_url=gc.external_url or row.external_url,
         profile_pic_url=row.profile_pic_url,
+        phone=gc.phone,
+        email=gc.email,
+        whatsapp=gc.whatsapp,
+        bio_links=bio_links,
+        scraping_accounts=scraping_accounts,
         contact_history=history,
         contacts_count=len(history),
         scrape_sources=scrape_sources,
@@ -158,12 +196,18 @@ async def list_leads(
     min_followers: int | None = Query(default=None, ge=0, description="Minimum follower count"),
     date_from: str | None = Query(default=None, description="ISO date — last_contacted_at >="),
     date_to: str | None = Query(default=None, description="ISO date — last_contacted_at <="),
+    campaign_ids: list[str] | None = Query(default=None, description="Filter by multiple campaign ids"),
+    scraping_account_ids: list[str] | None = Query(default=None, description="Filter by scraping account ids"),
+    has_phone: bool = Query(default=False, description="Only leads with a phone"),
+    has_email: bool = Query(default=False, description="Only leads with an email"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
     fargs = _filter_args(search, campaign_id, has_replied, verified_only,
-                         min_followers, date_from, date_to)
+                         min_followers, date_from, date_to,
+                         campaign_ids=campaign_ids, scraping_account_ids=scraping_account_ids,
+                         has_phone=has_phone, has_email=has_email)
 
     # List query: dedicated stats_sq + sources_sq
     stats_sq = _stats_subquery()
@@ -256,11 +300,17 @@ async def export_leads_csv(
     min_followers: int | None = Query(default=None),
     date_from: str | None = Query(default=None),
     date_to: str | None = Query(default=None),
+    campaign_ids: list[str] | None = Query(default=None, description="Filter by multiple campaign ids"),
+    scraping_account_ids: list[str] | None = Query(default=None, description="Filter by scraping account ids"),
+    has_phone: bool = Query(default=False, description="Only leads with a phone"),
+    has_email: bool = Query(default=False, description="Only leads with an email"),
     db: AsyncSession = Depends(get_db),
 ):
     """Export leads as CSV with the same filters as the list endpoint."""
     fargs = _filter_args(search, campaign_id, has_replied, verified_only,
-                         min_followers, date_from, date_to)
+                         min_followers, date_from, date_to,
+                         campaign_ids=campaign_ids, scraping_account_ids=scraping_account_ids,
+                         has_phone=has_phone, has_email=has_email)
 
     stats_sq = _stats_subquery()
     sources_sq = _sources_subquery()
@@ -291,7 +341,8 @@ async def export_leads_csv(
     writer = csv.DictWriter(output, fieldnames=[
         "ig_user_id", "username", "full_name", "biography",
         "follower_count", "following_count", "is_verified",
-        "external_url", "scrape_sources", "contacts_count",
+        "phone", "email", "whatsapp", "external_url", "bio_links",
+        "scrape_sources", "scraping_accounts", "contacts_count",
         "has_replied", "last_contacted_at", "created_at",
     ])
     writer.writeheader()
@@ -306,8 +357,13 @@ async def export_leads_csv(
             "follower_count": lead.follower_count or "",
             "following_count": lead.following_count or "",
             "is_verified": "yes" if lead.is_verified else "no",
+            "phone": lead.phone or "",
+            "email": lead.email or "",
+            "whatsapp": lead.whatsapp or "",
             "external_url": lead.external_url or "",
+            "bio_links": " | ".join(l.get("url", "") for l in lead.bio_links),
             "scrape_sources": ",".join(lead.scrape_sources),
+            "scraping_accounts": ",".join(lead.scraping_accounts),
             "contacts_count": lead.contacts_count,
             "has_replied": "yes" if lead.has_replied else "no",
             "last_contacted_at": lead.last_contacted_at.isoformat() if lead.last_contacted_at else "",
