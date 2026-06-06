@@ -1,7 +1,7 @@
 'use client'
 
 import useSWR from 'swr'
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { api } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -10,9 +10,9 @@ import { Input } from '@/components/ui/input'
 import {
   Database, Download, XCircle, ChevronLeft, ChevronRight,
   CheckCircle2, Users, BadgeCheck, ExternalLink,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, Phone, Mail, MessageCircle, Link2,
 } from 'lucide-react'
-import type { Lead, LeadListResponse, Campaign } from '@/lib/types'
+import type { Lead, LeadListResponse, Campaign, Account } from '@/lib/types'
 import { formatDateTime, formatDistanceToNow } from '@/lib/dateUtils'
 import { Skeleton } from '@/components/ui/skeleton'
 
@@ -29,6 +29,10 @@ export default function LeadsPage() {
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
   const [campaignFilter, setCampaignFilter] = useState('')
+  const [campaignIds, setCampaignIds] = useState<string[]>([])
+  const [scrapingAccountIds, setScrapingAccountIds] = useState<string[]>([])
+  const [hasPhone, setHasPhone] = useState(false)
+  const [hasEmail, setHasEmail] = useState(false)
   const [repliedFilter, setRepliedFilter] = useState<'' | 'true' | 'false'>('')
   const [verifiedOnly, setVerifiedOnly] = useState(false)
   const [minFollowers, setMinFollowers] = useState('')
@@ -36,49 +40,48 @@ export default function LeadsPage() {
   const [dateTo, setDateTo] = useState('')
   const [expandedId, setExpandedId] = useState<number | null>(null)
 
+  // Build shared filter params for both list and export (must match so CSV respects selection).
+  const buildFilters = useCallback(() => ({
+    search: search || undefined,
+    campaign_id: campaignFilter || undefined,
+    campaign_ids: campaignIds.length ? campaignIds : undefined,
+    scraping_account_ids: scrapingAccountIds.length ? scrapingAccountIds : undefined,
+    has_phone: hasPhone || undefined,
+    has_email: hasEmail || undefined,
+    has_replied: repliedFilter === '' ? undefined : repliedFilter === 'true',
+    verified_only: verifiedOnly || undefined,
+    min_followers: minFollowers ? Number(minFollowers) : undefined,
+    date_from: dateFrom || undefined,
+    date_to: dateTo || undefined,
+  }), [search, campaignFilter, campaignIds, scrapingAccountIds, hasPhone, hasEmail, repliedFilter, verifiedOnly, minFollowers, dateFrom, dateTo])
+
   const swrKey = [
-    'leads', page, search, campaignFilter, repliedFilter, verifiedOnly, minFollowers, dateFrom, dateTo
+    'leads', page, search, campaignFilter, campaignIds.join(','), scrapingAccountIds.join(','),
+    hasPhone, hasEmail, repliedFilter, verifiedOnly, minFollowers, dateFrom, dateTo
   ]
 
   const { data, error } = useSWR<LeadListResponse>(
     swrKey,
-    () => api.leads.list({
-      search: search || undefined,
-      campaign_id: campaignFilter || undefined,
-      has_replied: repliedFilter === '' ? undefined : repliedFilter === 'true',
-      verified_only: verifiedOnly || undefined,
-      min_followers: minFollowers ? Number(minFollowers) : undefined,
-      date_from: dateFrom || undefined,
-      date_to: dateTo || undefined,
-      page,
-      page_size: PAGE_SIZE,
-    }),
+    () => api.leads.list({ ...buildFilters(), page, page_size: PAGE_SIZE }),
     { refreshInterval: 30000 }
   )
 
   const { data: campaigns } = useSWR<Campaign[]>('campaigns', api.campaigns.list, { refreshInterval: 60000 })
+  const { data: accounts } = useSWR<Account[]>('accounts', api.accounts.list, { refreshInterval: 60000 })
 
   const totalPages = data ? Math.ceil(data.total / PAGE_SIZE) : 1
 
   const handleFilterChange = useCallback(() => { setPage(1) }, [])
 
   const handleExport = useCallback(async () => {
-    const blob = await api.leads.exportBlob({
-      search: search || undefined,
-      campaign_id: campaignFilter || undefined,
-      has_replied: repliedFilter === '' ? undefined : repliedFilter === 'true',
-      verified_only: verifiedOnly || undefined,
-      min_followers: minFollowers ? Number(minFollowers) : undefined,
-      date_from: dateFrom || undefined,
-      date_to: dateTo || undefined,
-    })
+    const blob = await api.leads.exportBlob(buildFilters())
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     a.download = 'leads.csv'
     a.click()
     window.setTimeout(() => URL.revokeObjectURL(url), 0)
-  }, [search, campaignFilter, repliedFilter, verifiedOnly, minFollowers, dateFrom, dateTo])
+  }, [buildFilters])
 
   const ins = data?.insights
 
@@ -182,6 +185,20 @@ export default function LeadsPage() {
               <option value="true">Solo chi ha risposto</option>
               <option value="false">Solo chi non ha risposto</option>
             </select>
+            <MultiSelect
+              label="Campagne"
+              placeholder="Tutte le campagne"
+              options={(campaigns ?? []).map(c => ({ value: String(c.id), label: c.name }))}
+              selected={campaignIds}
+              onChange={vals => { setCampaignIds(vals); handleFilterChange() }}
+            />
+            <MultiSelect
+              label="Account scraping"
+              placeholder="Tutti gli account"
+              options={(accounts ?? []).map(a => ({ value: String(a.id), label: `@${a.username}` }))}
+              selected={scrapingAccountIds}
+              onChange={vals => { setScrapingAccountIds(vals); handleFilterChange() }}
+            />
             <Input
               type="number"
               placeholder="Min followers (es. 1000)"
@@ -205,7 +222,7 @@ export default function LeadsPage() {
               className="bg-gray-800 border-gray-700 text-white text-sm h-8"
             />
           </div>
-          <div className="flex items-center gap-2 mt-3">
+          <div className="flex items-center gap-4 mt-3 flex-wrap">
             <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
               <input
                 type="checkbox"
@@ -215,13 +232,32 @@ export default function LeadsPage() {
               />
               Solo account verificati
             </label>
-            {(search || campaignFilter || repliedFilter || verifiedOnly || minFollowers || dateFrom || dateTo) && (
+            <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={hasPhone}
+                onChange={e => { setHasPhone(e.target.checked); handleFilterChange() }}
+                className="rounded border-gray-600 bg-gray-800 accent-purple-500"
+              />
+              Solo con telefono
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={hasEmail}
+                onChange={e => { setHasEmail(e.target.checked); handleFilterChange() }}
+                className="rounded border-gray-600 bg-gray-800 accent-purple-500"
+              />
+              Solo con email
+            </label>
+            {(search || campaignFilter || campaignIds.length || scrapingAccountIds.length || hasPhone || hasEmail || repliedFilter || verifiedOnly || minFollowers || dateFrom || dateTo) && (
               <Button
                 size="sm"
                 variant="ghost"
                 className="text-xs text-gray-500 hover:text-gray-300 h-6 px-2"
                 onClick={() => {
-                  setSearch(''); setCampaignFilter(''); setRepliedFilter('')
+                  setSearch(''); setCampaignFilter(''); setCampaignIds([]); setScrapingAccountIds([])
+                  setHasPhone(false); setHasEmail(false); setRepliedFilter('')
                   setVerifiedOnly(false); setMinFollowers(''); setDateFrom(''); setDateTo('')
                   setPage(1)
                 }}
@@ -298,6 +334,75 @@ export default function LeadsPage() {
   )
 }
 
+/* ---------- Multi-select dropdown ---------- */
+
+function MultiSelect({
+  label, placeholder, options, selected, onChange,
+}: {
+  label: string
+  placeholder: string
+  options: { value: string; label: string }[]
+  selected: string[]
+  onChange: (values: string[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function onClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [open])
+
+  const toggle = (value: string) => {
+    onChange(selected.includes(value) ? selected.filter(v => v !== value) : [...selected, value])
+  }
+
+  const summary = selected.length === 0
+    ? placeholder
+    : selected.length === 1
+      ? (options.find(o => o.value === selected[0])?.label ?? `${selected.length} selez.`)
+      : `${label}: ${selected.length}`
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full h-8 text-xs bg-gray-800 border border-gray-700 text-gray-300 rounded-md px-2 flex items-center justify-between gap-2 focus:outline-none focus:ring-1 focus:ring-purple-500"
+      >
+        <span className={`truncate ${selected.length === 0 ? 'text-gray-500' : ''}`}>{summary}</span>
+        <ChevronDown className="w-3.5 h-3.5 flex-shrink-0 text-gray-500" />
+      </button>
+      {open && (
+        <div className="absolute z-20 mt-1 w-full max-h-60 overflow-auto rounded-md border border-gray-700 bg-gray-800 shadow-lg py-1">
+          {options.length === 0 ? (
+            <div className="px-3 py-2 text-xs text-gray-500">Nessuna opzione</div>
+          ) : (
+            options.map(o => (
+              <label
+                key={o.value}
+                className="flex items-center gap-2 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700/60 cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.includes(o.value)}
+                  onChange={() => toggle(o.value)}
+                  className="rounded border-gray-600 bg-gray-900 accent-purple-500"
+                />
+                <span className="truncate">{o.label}</span>
+              </label>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /* ---------- Insight card ---------- */
 
 function InsightCard({
@@ -352,9 +457,38 @@ function LeadRow({ lead, expanded, onToggle }: { lead: Lead; expanded: boolean; 
             {lead.has_replied && (
               <Badge className="bg-green-700 text-white text-xs px-1.5 py-0">Risposto</Badge>
             )}
+            {!lead.last_contacted_at && (
+              <Badge className="bg-gray-700 text-gray-300 text-xs px-1.5 py-0">Non contattato</Badge>
+            )}
           </div>
           {lead.biography && (
             <p className="text-xs text-gray-400 mt-0.5 line-clamp-1">{lead.biography}</p>
+          )}
+
+          {/* Contact columns */}
+          {(lead.phone || lead.email || lead.whatsapp || lead.bio_links.length > 0) && (
+            <div className="flex items-center gap-3 mt-1 text-xs flex-wrap">
+              {lead.phone && (
+                <span className="flex items-center gap-1 text-emerald-400">
+                  <Phone className="w-3 h-3" />{lead.phone}
+                </span>
+              )}
+              {lead.email && (
+                <span className="flex items-center gap-1 text-sky-400">
+                  <Mail className="w-3 h-3" />{lead.email}
+                </span>
+              )}
+              {lead.whatsapp && (
+                <span className="flex items-center gap-1 text-green-400">
+                  <MessageCircle className="w-3 h-3" />{lead.whatsapp}
+                </span>
+              )}
+              {lead.bio_links.length > 0 && (
+                <span className="flex items-center gap-1 text-gray-400">
+                  <Link2 className="w-3 h-3" />{lead.bio_links.length} link
+                </span>
+              )}
+            </div>
           )}
           <div className="flex items-center gap-3 mt-1 text-xs text-gray-500">
             {lead.follower_count != null && (
@@ -402,6 +536,14 @@ function LeadRow({ lead, expanded, onToggle }: { lead: Lead; expanded: boolean; 
             <span className="text-gray-500">Risposta <span className={`font-medium ${lead.has_replied ? 'text-green-400' : 'text-gray-400'}`}>{lead.has_replied ? 'Sì' : 'No'}</span></span>
           </div>
 
+          {(lead.phone || lead.email || lead.whatsapp) && (
+            <div className="flex items-center gap-4 text-xs flex-wrap">
+              {lead.phone && <span className="text-gray-500">Tel: <span className="text-white">{lead.phone}</span></span>}
+              {lead.email && <span className="text-gray-500">Email: <span className="text-white">{lead.email}</span></span>}
+              {lead.whatsapp && <span className="text-gray-500">WhatsApp: <span className="text-white">{lead.whatsapp}</span></span>}
+            </div>
+          )}
+
           {lead.external_url && (
             <div className="text-xs">
               <span className="text-gray-500">Sito: </span>
@@ -409,6 +551,20 @@ function LeadRow({ lead, expanded, onToggle }: { lead: Lead; expanded: boolean; 
                 className="text-purple-400 hover:underline break-all">
                 {lead.external_url}
               </a>
+            </div>
+          )}
+
+          {lead.bio_links.length > 0 && (
+            <div className="text-xs">
+              <span className="text-gray-500">Link bio:</span>
+              <div className="mt-1 space-y-0.5">
+                {lead.bio_links.map((bl, i) => (
+                  <a key={i} href={bl.url} target="_blank" rel="noopener noreferrer"
+                    className="block text-purple-400 hover:underline break-all">
+                    {bl.title || bl.url}
+                  </a>
+                ))}
+              </div>
             </div>
           )}
 
