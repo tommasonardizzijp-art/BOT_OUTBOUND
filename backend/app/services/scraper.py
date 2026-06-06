@@ -321,10 +321,16 @@ async def _switch_scraping_account(
     return client, fallback, (fallback.id if fallback_slot_acquired else current_slot_account_id)
 
 
-async def _scrape_paginated(client, campaign: Campaign, account: InstagramAccount, db, scrape_mode: str = 'followers') -> tuple[int, str]:
+async def _scrape_paginated(pool, campaign: Campaign, db, scrape_mode: str = 'followers') -> tuple[int, str]:
     """Scrape all followers/following with pagination, storing each batch."""
     from instagrapi.exceptions import UserNotFound, LoginRequired
     from sqlalchemy import select
+
+    # La paginazione lista resta su UN account del pool (chiamate cheap, non vanno ruotate).
+    list_sel = pool.next(campaign)
+    if list_sel is None:
+        raise ScrapeBudgetError("Cap raggiunto su tutti gli account scraping (paginazione)")
+    list_account, list_client = list_sel
 
     mode_label = "following" if scrape_mode == "following" else "follower"
     total = 0
@@ -362,7 +368,7 @@ async def _scrape_paginated(client, campaign: Campaign, account: InstagramAccoun
 
             # Fetch a batch of followers/following
             followers_batch, max_id = await asyncio.to_thread(
-                _fetch_followers_chunk, client, campaign.target_user_id, batch_size, max_id, scrape_mode
+                _fetch_followers_chunk, list_client, campaign.target_user_id, batch_size, max_id, scrape_mode
             )
 
             if not followers_batch:
@@ -382,23 +388,18 @@ async def _scrape_paginated(client, campaign: Campaign, account: InstagramAccoun
                 f"(totale: {initial_total + total + len(followers_batch)})",
             )
 
-            # Store this batch — client/account may rotate on 429
-            batch_total, client, account, _scraping_account_id = await _store_followers_batch(
-                followers_batch, campaign, db, client, account, scrape_mode,
-                slot_account_id=_scraping_account_id,
+            # Store this batch — ogni lead usa il prossimo account del pool (round-robin)
+            batch_total = await _store_followers_batch(
+                followers_batch, campaign, db, pool, scrape_mode,
             )
             total += batch_total
             since_last_break += batch_total
 
-            # Update campaign progress in real-time
+            # Salva le sessioni di tutti gli account del pool (commit incluso)
             campaign.total_followers = initial_total + total
             campaign.scrape_cursor = max_id
             campaign.updated_at = datetime.utcnow()
-
-            # Save session for whichever account is currently active
-            account.session_data = json.dumps(client.get_settings())
-            account.last_activity_at = datetime.utcnow()
-            await db.commit()
+            await pool.save_sessions(db)
 
             # If max_id is None, we've reached the end
             if not max_id:
