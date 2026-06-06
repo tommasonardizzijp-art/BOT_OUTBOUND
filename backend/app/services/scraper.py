@@ -512,28 +512,20 @@ def _fetch_followers_chunk(client, user_id: int, amount: int, max_id: str | None
 
 
 async def _store_followers_batch(
-    followers_batch, campaign: Campaign, db, client, account: InstagramAccount,
-    scrape_mode: str = 'followers',
-    *,
-    slot_account_id: str | None = None,
-) -> tuple[int, object, InstagramAccount, str | None]:
+    followers_batch, campaign: Campaign, db, pool, scrape_mode: str = 'followers',
+) -> int:
     """
     Store a batch of followers/following in DB, fetching detailed bio for each.
 
-    S1: if user_info() hits 429, rotates to a fallback account and retries once.
-    S4: lognormal delay between user_info() calls.
-      - followers mode: 3-8s  (median ~4s)
-      - following mode: 8-18s (median ~11s) — business accounts are more monitored
+    Approccio C: ogni lead usa il prossimo account del pool (round-robin). Il cap
+    per-account è gestito da pool.next (salta gli account a cap; None = tutti a cap).
+    Su 429/soft-block si ruota al prossimo account del pool e si riprova una volta.
 
-    Returns (stored_count, active_client, active_account, slot_account_id) — may differ from input
-    if a 429 forced an account rotation mid-batch.
+    Returns stored_count.
     """
     from sqlalchemy import select
 
     stored = 0
-    current_client = client
-    current_account = account
-    current_slot_account_id = slot_account_id
     consecutive_soft_blocks = 0
 
     for user_short in followers_batch:
@@ -541,8 +533,7 @@ async def _store_followers_batch(
             logger.warning(f"[Scraper] Global BOT_HALTED mid-batch - stopping after {stored} profiles")
             raise BotHaltedError("global kill-switch active")
 
-        # Check campaign status before each profile — lets pause/stop take effect
-        # within one profile's processing time (8-18s) instead of one full batch (15min).
+        # Check campaign status before each profile — lets pause/stop take effect quickly.
         await db.refresh(campaign)
         _SCRAPING_STATES = (CampaignStatus.scraping, CampaignStatus.scraping_and_running)
         if campaign.status not in _SCRAPING_STATES:
@@ -550,7 +541,7 @@ async def _store_followers_batch(
                 f"[Scraper] Campaign status='{campaign.status.value}' detected mid-batch "
                 f"after {stored} profiles — stopping immediately."
             )
-            return stored, current_client, current_account
+            return stored
 
         # Check for duplicate
         existing = await db.execute(
@@ -562,41 +553,24 @@ async def _store_followers_batch(
         if existing.scalar_one_or_none():
             continue
 
-        # Fetch full user info — S1: rotate account on 429
+        # Round-robin: prossimo account con budget. None = tutti a cap.
+        sel = pool.next(campaign)
+        if sel is None:
+            raise ScrapeBudgetError(
+                "Cap lookup giornaliero raggiunto su tutti gli account scraping disponibili"
+            )
+        current_account, current_client = sel
+
         biography = None
         is_verified = False
         follower_count = None
         following_count = None
         external_url = None
-
-        # Anti-ban scrape cap: ensure current account still has lookup budget.
-        await db.refresh(current_account)
-        if not has_scrape_budget(current_account, campaign):
-            fallback = await _get_fallback_account(db, exclude_id=current_account.id, campaign_id=campaign.id)
-            if fallback:
-                logger.warning(
-                    f"[Scraper] Cap lookup raggiunto per @{current_account.username} "
-                    f"({current_account.scrape_lookups_today}) — rotazione → @{fallback.username}"
-                )
-                current_client, current_account, current_slot_account_id = await _switch_scraping_account(
-                    db,
-                    current_account=current_account,
-                    fallback=fallback,
-                    current_slot_account_id=current_slot_account_id,
-                )
-                await db.refresh(current_account)
-            if not has_scrape_budget(current_account, campaign):
-                raise ScrapeBudgetError(
-                    "Cap lookup giornaliero raggiunto su tutti gli account scraping disponibili"
-                )
-
         contacts = ContactData()
 
         for attempt in range(2):
             try:
-                # user_info_v1 uses only the authenticated private API (/api/v1/users/{pk}/info/)
-                # Avoids the GQL public fallback that user_info() would trigger on 429,
-                # which doubles the API call count and hits a separate rate limit.
+                # user_info_v1 usa solo l'API privata autenticata (/api/v1/users/{pk}/info/).
                 user_info = await asyncio.to_thread(current_client.user_info_v1, user_short.pk)
                 biography = user_info.biography or None
                 is_verified = getattr(user_info, 'is_verified', False) or False
@@ -614,32 +588,23 @@ async def _store_followers_batch(
                 is_rate_limit = "429" in error_str or "too many" in error_str or "rate" in error_str
                 is_soft_block = "protect" in error_str or "restrict" in error_str or "community" in error_str
                 if (is_rate_limit or is_soft_block) and attempt == 0:
-                    fallback = await _get_fallback_account(db, exclude_id=current_account.id, campaign_id=campaign.id)
                     kind = "Soft block" if is_soft_block else "429"
-                    if fallback:
+                    alt = pool.next(campaign)
+                    if alt is not None and alt[0].id != current_account.id:
                         logger.warning(
                             f"[Scraper] {kind} su user_info @{user_short.username}. "
-                            f"Rotazione: @{current_account.username} → @{fallback.username}"
+                            f"Rotazione pool: @{current_account.username} → @{alt[0].username}"
                         )
-                        try:
-                            current_client, current_account, current_slot_account_id = await _switch_scraping_account(
-                                db,
-                                current_account=current_account,
-                                fallback=fallback,
-                                current_slot_account_id=current_slot_account_id,
-                            )
-                            await asyncio.sleep(random.uniform(30 if is_soft_block else 15, 60 if is_soft_block else 30))
-                        except Exception as login_err:
-                            logger.warning(f"[Scraper] Fallback login fallito: {login_err}")
+                        current_account, current_client = alt
+                        await asyncio.sleep(random.uniform(30 if is_soft_block else 15, 60 if is_soft_block else 30))
                     else:
                         wait = random.uniform(120, 240) if is_soft_block else 60
                         logger.warning(
                             f"[Scraper] {kind} su user_info @{user_short.username}, "
-                            f"nessun account alternativo. Attendo {int(wait)}s..."
+                            f"nessun account alternativo nel pool. Attendo {int(wait)}s..."
                         )
                         await asyncio.sleep(wait)
                 else:
-                    # attempt 1 also failed — store without bio, continue
                     if is_rate_limit or is_soft_block:
                         consecutive_soft_blocks += 1
                         kind = "Soft block" if is_soft_block else "429"
@@ -678,11 +643,9 @@ async def _store_followers_batch(
             status=FollowerStatus.bio_scraped,
         )
         db.add(follower)
-        # Commit per follower — keeps write lock window to milliseconds
         await db.commit()
         stored += 1
 
-        # Register the scraped profile as a "lead visto" in the global registry.
         await upsert_lead(
             db,
             ig_user_id=int(user_short.pk),
@@ -694,10 +657,11 @@ async def _store_followers_batch(
             account=current_account,
         )
 
-        # S4: configurable delay between bio fetches (per-campaign settings)
+        # Delay configurabile tra bio fetch (per-campagna). NB: è GLOBALE per-lead,
+        # condiviso tra gli account del pool (vedi helper text UI).
         delay_min = getattr(campaign, 'bio_fetch_delay_min', 5.0) or 5.0
         delay_max = getattr(campaign, 'bio_fetch_delay_max', 8.0) or 8.0
         delay = random.uniform(delay_min, delay_max)
         await asyncio.sleep(delay)
 
-    return stored, current_client, current_account, current_slot_account_id
+    return stored
