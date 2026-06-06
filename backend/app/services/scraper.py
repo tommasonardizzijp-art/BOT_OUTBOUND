@@ -80,9 +80,10 @@ async def scrape_followers(campaign_id: str) -> None:
         _scraping_account_id = None
         try:
             account = await _get_available_account(db, campaign_id=campaign_id)
-            if not await acquire_scraping_slot(account.id):
+            if await acquire_scraping_slot(account.id):
+                _scraping_account_id = account.id
+            else:
                 logger.warning(f"[Scraper] Slot @{account.username} già occupato (TOCTOU) — condiviso")
-            _scraping_account_id = account.id
             client = await _login(account, db)
             emit_event(campaign_id, "scrape_start", f"Account @{account.username} connesso, inizio raccolta {mode_label}...")
 
@@ -271,7 +272,53 @@ async def _get_fallback_account(db, exclude_id: str, campaign_id: str | None = N
 
     result = await db.execute(query)
     accounts = result.scalars().all()
-    return random.choice(accounts) if accounts else None
+    busy = get_scraping_account_ids()
+    free = [a for a in accounts if a.id not in busy]
+    return random.choice(free or accounts) if accounts else None
+
+
+async def _eligible_scraping_accounts(db, campaign_id: str) -> list[InstagramAccount]:
+    """Tutti gli account attivi con ruolo scraping/both assegnati alla campagna."""
+    from sqlalchemy import select
+    from app.models.campaign_account import CampaignAccount
+
+    eligible_sq = select(CampaignAccount.account_id).where(
+        CampaignAccount.campaign_id == campaign_id,
+        CampaignAccount.is_active == True,
+        CampaignAccount.role.in_(("scraping", "both")),
+    )
+    result = await db.execute(
+        select(InstagramAccount).where(
+            InstagramAccount.status == AccountStatus.active,
+            InstagramAccount.id.in_(eligible_sq),
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def _switch_scraping_account(
+    db,
+    *,
+    current_account: InstagramAccount,
+    fallback: InstagramAccount,
+    current_slot_account_id: str | None,
+):
+    """Move the scraping slot to a fallback account before logging it in."""
+    fallback_slot_acquired = False
+    if fallback.id != current_slot_account_id:
+        fallback_slot_acquired = await acquire_scraping_slot(fallback.id)
+        if not fallback_slot_acquired:
+            logger.warning(f"[Scraper] Slot fallback @{fallback.username} già occupato — rotazione condivisa")
+
+    try:
+        client = await _login(fallback, db)
+    except Exception:
+        if fallback_slot_acquired:
+            await release_scraping_slot(fallback.id)
+        raise
+    if fallback_slot_acquired and current_slot_account_id:
+        await release_scraping_slot(current_slot_account_id)
+    return client, fallback, (fallback.id if fallback_slot_acquired else current_slot_account_id)
 
 
 async def _scrape_paginated(client, campaign: Campaign, account: InstagramAccount, db, scrape_mode: str = 'followers') -> tuple[int, str]:
@@ -336,8 +383,9 @@ async def _scrape_paginated(client, campaign: Campaign, account: InstagramAccoun
             )
 
             # Store this batch — client/account may rotate on 429
-            batch_total, client, account = await _store_followers_batch(
-                followers_batch, campaign, db, client, account, scrape_mode
+            batch_total, client, account, _scraping_account_id = await _store_followers_batch(
+                followers_batch, campaign, db, client, account, scrape_mode,
+                slot_account_id=_scraping_account_id,
             )
             total += batch_total
             since_last_break += batch_total
@@ -466,7 +514,9 @@ def _fetch_followers_chunk(client, user_id: int, amount: int, max_id: str | None
 async def _store_followers_batch(
     followers_batch, campaign: Campaign, db, client, account: InstagramAccount,
     scrape_mode: str = 'followers',
-) -> tuple[int, object, InstagramAccount]:
+    *,
+    slot_account_id: str | None = None,
+) -> tuple[int, object, InstagramAccount, str | None]:
     """
     Store a batch of followers/following in DB, fetching detailed bio for each.
 
@@ -475,7 +525,7 @@ async def _store_followers_batch(
       - followers mode: 3-8s  (median ~4s)
       - following mode: 8-18s (median ~11s) — business accounts are more monitored
 
-    Returns (stored_count, active_client, active_account) — may differ from input
+    Returns (stored_count, active_client, active_account, slot_account_id) — may differ from input
     if a 429 forced an account rotation mid-batch.
     """
     from sqlalchemy import select
@@ -483,6 +533,7 @@ async def _store_followers_batch(
     stored = 0
     current_client = client
     current_account = account
+    current_slot_account_id = slot_account_id
     consecutive_soft_blocks = 0
 
     for user_short in followers_batch:
@@ -505,7 +556,7 @@ async def _store_followers_batch(
         existing = await db.execute(
             select(Follower).where(
                 Follower.campaign_id == campaign.id,
-                Follower.ig_user_id == user_short.pk,
+                Follower.ig_user_id == int(user_short.pk),
             )
         )
         if existing.scalar_one_or_none():
@@ -527,8 +578,12 @@ async def _store_followers_batch(
                     f"[Scraper] Cap lookup raggiunto per @{current_account.username} "
                     f"({current_account.scrape_lookups_today}) — rotazione → @{fallback.username}"
                 )
-                current_client = await _login(fallback, db)
-                current_account = fallback
+                current_client, current_account, current_slot_account_id = await _switch_scraping_account(
+                    db,
+                    current_account=current_account,
+                    fallback=fallback,
+                    current_slot_account_id=current_slot_account_id,
+                )
                 await db.refresh(current_account)
             if not has_scrape_budget(current_account, campaign):
                 raise ScrapeBudgetError(
@@ -567,8 +622,12 @@ async def _store_followers_batch(
                             f"Rotazione: @{current_account.username} → @{fallback.username}"
                         )
                         try:
-                            current_client = await _login(fallback, db)
-                            current_account = fallback
+                            current_client, current_account, current_slot_account_id = await _switch_scraping_account(
+                                db,
+                                current_account=current_account,
+                                fallback=fallback,
+                                current_slot_account_id=current_slot_account_id,
+                            )
                             await asyncio.sleep(random.uniform(30 if is_soft_block else 15, 60 if is_soft_block else 30))
                         except Exception as login_err:
                             logger.warning(f"[Scraper] Fallback login fallito: {login_err}")
@@ -601,7 +660,7 @@ async def _store_followers_batch(
 
         follower = Follower(
             campaign_id=campaign.id,
-            ig_user_id=user_short.pk,
+            ig_user_id=int(user_short.pk),
             username=user_short.username,
             full_name=user_short.full_name,
             biography=biography,
@@ -626,7 +685,7 @@ async def _store_followers_batch(
         # Register the scraped profile as a "lead visto" in the global registry.
         await upsert_lead(
             db,
-            ig_user_id=user_short.pk,
+            ig_user_id=int(user_short.pk),
             username=user_short.username,
             full_name=user_short.full_name,
             biography=biography,
@@ -641,4 +700,4 @@ async def _store_followers_batch(
         delay = random.uniform(delay_min, delay_max)
         await asyncio.sleep(delay)
 
-    return stored, current_client, current_account
+    return stored, current_client, current_account, current_slot_account_id
