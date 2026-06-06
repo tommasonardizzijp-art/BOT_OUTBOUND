@@ -1383,15 +1383,29 @@ async def _mark_globally_contacted(
                 contact.full_name = follower.full_name
             if follower.biography:
                 contact.biography = follower.biography
+            # Merge contact fields (fill gaps; don't clobber existing values).
+            for field_name in ("phone", "email", "whatsapp", "external_url"):
+                fv = getattr(follower, field_name, None)
+                if fv and not getattr(contact, field_name, None):
+                    setattr(contact, field_name, fv)
+            if getattr(follower, "bio_links", None) and not contact.bio_links:
+                contact.bio_links = follower.bio_links
     else:
         contact = GlobalContact(
             ig_user_id=ig_user_id,
             username=follower.username if follower else None,
             full_name=follower.full_name if follower else None,
             biography=follower.biography if follower else None,
+            phone=getattr(follower, "phone", None) if follower else None,
+            email=getattr(follower, "email", None) if follower else None,
+            whatsapp=getattr(follower, "whatsapp", None) if follower else None,
+            external_url=getattr(follower, "external_url", None) if follower else None,
+            bio_links=getattr(follower, "bio_links", None) if follower else None,
             last_contacted_at=now,
+            first_seen_at=now,
             contacted_by_campaign_ids=json.dumps([campaign_id]),
             contact_history=json.dumps([history_entry]),
+            scrape_sources="[]",
         )
         db.add(contact)
     await db.commit()
