@@ -396,6 +396,11 @@ export default function NewCampaignPage() {
                       </div>
                       <p className="text-xs text-gray-600">Default: 5–8 sec</p>
                     </div>
+                    <p className="col-span-2 text-xs text-amber-500/90 bg-amber-950/30 border border-amber-800/40 rounded px-2 py-1.5 mt-1">
+                      ⚠️ <strong>Questi tempi valgono per OGNI lead estratto, condivisi tra tutti gli account scraping.</strong>{' '}
+                      Con più account il delay si applica tra un account e il successivo: ogni singolo account aspetta circa
+                      (n° account × questo valore) tra i suoi lead. Esempio: 2 account e vuoi ~6–10s per account → imposta <strong>3–5s</strong>.
+                    </p>
                   </div>
                 </div>
               )}
