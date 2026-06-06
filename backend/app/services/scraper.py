@@ -35,6 +35,10 @@ from app.utils.instagrapi_client import (
     get_scraping_account_ids,
 )
 from app.services.bot_state_service import is_halted
+from app.utils.contact_extract import extract_contacts, ContactData
+from app.services.global_contact_service import upsert_lead
+from app.services.account_manager import has_scrape_budget, increment_scrape_lookup
+from app.utils.exceptions import ScrapeBudgetError
 
 
 async def scrape_followers(campaign_id: str) -> None:
@@ -140,17 +144,20 @@ async def scrape_followers(campaign_id: str) -> None:
                 )
                 return
 
-            if scrape_outcome == "rate_limited":
+            if scrape_outcome in ("rate_limited", "scrape_capped"):
                 campaign.status = CampaignStatus.paused
                 campaign.total_followers = actual_count
-                campaign.scrape_outcome = "rate_limited"
+                campaign.scrape_outcome = scrape_outcome
                 campaign.updated_at = datetime.utcnow()
                 await db.commit()
+                msg = ("Scraping in pausa: cap lookup giornaliero raggiunto — riprende dopo il reset"
+                       if scrape_outcome == "scrape_capped"
+                       else "Scraping interrotto da rate limit ripetuti — ripristinabile (cursore salvato)")
                 emit_event(
                     campaign_id,
                     "scrape_stopped",
-                    "Scraping interrotto da rate limit ripetuti — ripristinabile (cursore salvato)",
-                    level="error",
+                    msg,
+                    level="warn" if scrape_outcome == "scrape_capped" else "error",
                 )
                 logger.warning(
                     f"Scrape rate-limited: {total_scraped} new followers stored "
@@ -161,6 +168,8 @@ async def scrape_followers(campaign_id: str) -> None:
             # Determine final status: if DM workers are already running, transition to running
             if campaign.status == CampaignStatus.scraping_and_running:
                 campaign.status = CampaignStatus.running
+            elif not campaign.messaging_enabled:
+                campaign.status = CampaignStatus.completed
             else:
                 campaign.status = CampaignStatus.ready
             campaign.total_followers = actual_count
@@ -388,6 +397,10 @@ async def _scrape_paginated(client, campaign: Campaign, account: InstagramAccoun
                     logger.info(f"[Scraper] Campaign stopped during break — saved {total}")
                     return total, "partial"
 
+        except ScrapeBudgetError as e:
+            logger.warning(f"[Scraper] {e} — scraping in pausa fino al reset giornaliero.")
+            return total, "scrape_capped"
+
         except SoftBlockError as e:
             logger.error(f"[Scraper] {e} — scraping interrotto per proteggere l'account.")
             raise
@@ -505,6 +518,25 @@ async def _store_followers_batch(
         following_count = None
         external_url = None
 
+        # Anti-ban scrape cap: ensure current account still has lookup budget.
+        await db.refresh(current_account)
+        if not has_scrape_budget(current_account, campaign):
+            fallback = await _get_fallback_account(db, exclude_id=current_account.id, campaign_id=campaign.id)
+            if fallback:
+                logger.warning(
+                    f"[Scraper] Cap lookup raggiunto per @{current_account.username} "
+                    f"({current_account.scrape_lookups_today}) — rotazione → @{fallback.username}"
+                )
+                current_client = await _login(fallback, db)
+                current_account = fallback
+                await db.refresh(current_account)
+            if not has_scrape_budget(current_account, campaign):
+                raise ScrapeBudgetError(
+                    "Cap lookup giornaliero raggiunto su tutti gli account scraping disponibili"
+                )
+
+        contacts = ContactData()
+
         for attempt in range(2):
             try:
                 # user_info_v1 uses only the authenticated private API (/api/v1/users/{pk}/info/)
@@ -517,6 +549,9 @@ async def _store_followers_batch(
                 following_count = getattr(user_info, 'following_count', None)
                 ext = getattr(user_info, 'external_url', None)
                 external_url = str(ext) if ext else None
+                contacts = extract_contacts(user_info)
+                await increment_scrape_lookup(db, current_account.id)
+                current_account.scrape_lookups_today = (current_account.scrape_lookups_today or 0) + 1
                 consecutive_soft_blocks = 0
                 break
             except Exception as e:
@@ -574,14 +609,31 @@ async def _store_followers_batch(
             is_verified=is_verified,
             follower_count=follower_count,
             following_count=following_count,
-            external_url=external_url,
+            external_url=contacts.external_url or external_url,
             profile_pic_url=str(user_short.profile_pic_url) if user_short.profile_pic_url else None,
+            phone=contacts.phone,
+            email=contacts.email,
+            whatsapp=contacts.whatsapp,
+            bio_links=json.dumps(contacts.bio_links) if contacts.bio_links else None,
+            contact_source=json.dumps(contacts.sources) if contacts.sources else None,
             status=FollowerStatus.bio_scraped,
         )
         db.add(follower)
         # Commit per follower — keeps write lock window to milliseconds
         await db.commit()
         stored += 1
+
+        # Register the scraped profile as a "lead visto" in the global registry.
+        await upsert_lead(
+            db,
+            ig_user_id=user_short.pk,
+            username=user_short.username,
+            full_name=user_short.full_name,
+            biography=biography,
+            contacts=contacts,
+            campaign=campaign,
+            account=current_account,
+        )
 
         # S4: configurable delay between bio fetches (per-campaign settings)
         delay_min = getattr(campaign, 'bio_fetch_delay_min', 5.0) or 5.0
