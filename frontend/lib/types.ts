@@ -36,8 +36,12 @@ export interface Campaign {
   // 'scrape' = scrape follower/following pagina; 'import' = lista profili da file
   source_type: 'scrape' | 'import'
   target_user_id: number | null
-  base_message_template: string
+  base_message_template: string | null
   ai_prompt_context: string | null
+  // Solo raccolta lead quando false — nessun DM viene inviato
+  messaging_enabled: boolean
+  // Cap lookup/giorno per account durante lo scraping (anti-ban); null = nessun cap
+  scrape_daily_limit: number | null
   // M10: A/B testing — second template (optional)
   message_template_b: string | null
   status: CampaignStatus
@@ -94,9 +98,11 @@ export interface CampaignCreate {
   name: string
   target_username?: string | null
   source_type?: 'scrape' | 'import'
-  base_message_template: string
+  base_message_template?: string | null
   ai_prompt_context?: string
   message_template_b?: string | null
+  messaging_enabled?: boolean
+  scrape_daily_limit?: number | null
   daily_limit?: number | null
   require_approval?: boolean
   approval_sample_size?: number
@@ -166,6 +172,10 @@ export interface Follower {
   following_count: number | null
   profile_pic_url: string | null
   external_url: string | null
+  phone: string | null
+  email: string | null
+  whatsapp: string | null
+  bio_links: { url: string; title: string | null }[]
   status: FollowerStatus
   skip_reason: string | null
   generated_text: string | null
@@ -289,6 +299,11 @@ export interface Lead {
   is_verified: boolean
   external_url: string | null
   profile_pic_url: string | null
+  phone: string | null
+  email: string | null
+  whatsapp: string | null
+  bio_links: { url: string; title: string | null }[]
+  scraping_accounts: string[]
   contact_history: ContactHistoryEntry[]
   contacts_count: number
   scrape_sources: string[]

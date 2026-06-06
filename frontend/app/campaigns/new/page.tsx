@@ -27,9 +27,11 @@ export default function NewCampaignPage() {
     message_template_b: '',
     ai_prompt_context: '',
     daily_limit: '',
+    scrape_daily_limit: '',
     require_approval: false,
     approval_sample_size: '5',
   })
+  const [messagingEnabled, setMessagingEnabled] = useState(true)
   const [advancedConfig, setAdvancedConfig] = useState({
     scrape_session_size: '250',
     scrape_break_minutes_min: '30',
@@ -54,8 +56,9 @@ export default function NewCampaignPage() {
     } else if (!importFile) {
       errs.import_file = 'Carica un file con i profili da contattare'
     }
-    if (!form.base_message_template.trim()) errs.base_message_template = 'Il template è obbligatorio'
+    if (messagingEnabled && !form.base_message_template.trim()) errs.base_message_template = 'Il template è obbligatorio'
     if (form.daily_limit && Number(form.daily_limit) < 1) errs.daily_limit = 'Il limite deve essere almeno 1'
+    if (form.scrape_daily_limit && Number(form.scrape_daily_limit) < 1) errs.scrape_daily_limit = 'Il cap deve essere almeno 1'
     return errs
   }
 
@@ -71,10 +74,12 @@ export default function NewCampaignPage() {
         source_type: sourceType,
         target_username: sourceType === 'scrape' ? form.target_username.replace(/^@/, '').trim() : null,
         scrape_mode: form.scrape_mode,
-        base_message_template: form.base_message_template,
-        message_template_b: showTemplateB && form.message_template_b ? form.message_template_b : null,
-        ai_prompt_context: form.ai_prompt_context || undefined,
+        messaging_enabled: messagingEnabled,
+        base_message_template: messagingEnabled ? form.base_message_template : null,
+        message_template_b: messagingEnabled && showTemplateB && form.message_template_b ? form.message_template_b : null,
+        ai_prompt_context: messagingEnabled && form.ai_prompt_context ? form.ai_prompt_context : undefined,
         daily_limit: form.daily_limit ? Number(form.daily_limit) : null,
+        scrape_daily_limit: form.scrape_daily_limit ? Number(form.scrape_daily_limit) : null,
         require_approval: form.require_approval,
         approval_sample_size: form.approval_sample_size ? Number(form.approval_sample_size) : 5,
         scrape_session_size: Number(advancedConfig.scrape_session_size) || 250,
@@ -203,6 +208,28 @@ export default function NewCampaignPage() {
               </div>
             )}
 
+            {/* Messaging toggle — quando OFF la campagna raccoglie solo lead */}
+            <div className="space-y-2 rounded-lg border border-gray-700/50 bg-gray-800/30 p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-gray-300 font-medium">Invia messaggi</p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {messagingEnabled
+                      ? 'I profili raccolti riceveranno un DM personalizzato'
+                      : 'Campagna solo raccolta lead — nessun messaggio verrà inviato'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setMessagingEnabled(v => !v); setErrors(er => ({ ...er, base_message_template: '' })) }}
+                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full transition-colors ${messagingEnabled ? 'bg-purple-600' : 'bg-gray-600'}`}
+                >
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${messagingEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                </button>
+              </div>
+            </div>
+
+            {messagingEnabled && (<>
             <div className="space-y-1.5">
               <label className="text-sm text-gray-300 font-medium">Template messaggio base *</label>
               <Textarea
@@ -260,6 +287,7 @@ export default function NewCampaignPage() {
               />
               <p className="text-xs text-gray-500">Opzionale. Aiuta l&apos;AI a capire il contesto del brand e il tono desiderato</p>
             </div>
+            </>)}
 
             <div className="space-y-1.5">
               <label className="text-sm text-gray-300 font-medium">Limite DM giornaliero campagna</label>
@@ -323,6 +351,17 @@ export default function NewCampaignPage() {
               {showAdvanced && (
                 <div className="px-3 pb-3 space-y-3 border-t border-gray-700/50 pt-3">
                   <p className="text-xs text-gray-500">Controlla velocità e pause durante la raccolta profili (anti-ban)</p>
+                  <div className="space-y-1">
+                    <label className="text-xs text-gray-400">Cap lookup/giorno per account (anti-ban)</label>
+                    <Input type="number" placeholder="Vuoto = nessun cap"
+                      value={form.scrape_daily_limit}
+                      onChange={e => { setForm(f => ({ ...f, scrape_daily_limit: e.target.value })); setErrors(er => ({ ...er, scrape_daily_limit: '' })) }}
+                      min={1} max={5000}
+                      className={`bg-gray-800 border-gray-700 text-white h-8 text-xs ${errors.scrape_daily_limit ? 'border-red-600' : ''}`} />
+                    {errors.scrape_daily_limit
+                      ? <p className="text-xs text-red-400">{errors.scrape_daily_limit}</p>
+                      : <p className="text-xs text-gray-600">Opzionale. Numero massimo di profili risolti/giorno per ogni account scraping.</p>}
+                  </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
                       <label className="text-xs text-gray-400">Profili per sessione</label>

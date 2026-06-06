@@ -1000,7 +1000,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               <button
                 className="text-gray-600 hover:text-gray-300 flex items-center gap-1 text-xs"
                 onClick={() => {
-                  setEditTemplateValue(campaign.base_message_template)
+                  setEditTemplateValue(campaign.base_message_template ?? '')
                   setEditTemplateBValue(campaign.message_template_b ?? '')
                   setEditContextValue(campaign.ai_prompt_context ?? '')
                   setEditTemplateOpen(true)

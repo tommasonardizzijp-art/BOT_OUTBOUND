@@ -15,6 +15,11 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api'
 
 const TOKEN_STORAGE_KEY = 'bot_outbound_token'
 
+// Appends repeated query keys for array filters (es. campaign_ids[]).
+function appendArray(params: URLSearchParams, key: string, values?: string[]) {
+  (values || []).forEach((v) => params.append(key, v))
+}
+
 export function getAuthToken(): string | null {
   if (typeof window === 'undefined') return null
   try {
@@ -219,6 +224,10 @@ export const api = {
     list: (params?: {
       search?: string
       campaign_id?: string
+      campaign_ids?: string[]
+      scraping_account_ids?: string[]
+      has_phone?: boolean
+      has_email?: boolean
       has_replied?: boolean
       verified_only?: boolean
       min_followers?: number
@@ -230,6 +239,10 @@ export const api = {
       const q = new URLSearchParams()
       if (params?.search) q.set('search', params.search)
       if (params?.campaign_id) q.set('campaign_id', params.campaign_id)
+      appendArray(q, 'campaign_ids', params?.campaign_ids)
+      appendArray(q, 'scraping_account_ids', params?.scraping_account_ids)
+      if (params?.has_phone !== undefined) q.set('has_phone', String(params.has_phone))
+      if (params?.has_email !== undefined) q.set('has_email', String(params.has_email))
       if (params?.has_replied !== undefined) q.set('has_replied', String(params.has_replied))
       if (params?.verified_only) q.set('verified_only', 'true')
       if (params?.min_followers !== undefined) q.set('min_followers', String(params.min_followers))
@@ -240,13 +253,19 @@ export const api = {
       return request<LeadListResponse>(`/leads?${q}`)
     },
     exportBlob: async (params?: {
-      search?: string; campaign_id?: string; has_replied?: boolean
+      search?: string; campaign_id?: string
+      campaign_ids?: string[]; scraping_account_ids?: string[]
+      has_phone?: boolean; has_email?: boolean; has_replied?: boolean
       verified_only?: boolean; min_followers?: number
       date_from?: string; date_to?: string
     }) => {
       const q = new URLSearchParams()
       if (params?.search) q.set('search', params.search)
       if (params?.campaign_id) q.set('campaign_id', params.campaign_id)
+      appendArray(q, 'campaign_ids', params?.campaign_ids)
+      appendArray(q, 'scraping_account_ids', params?.scraping_account_ids)
+      if (params?.has_phone !== undefined) q.set('has_phone', String(params.has_phone))
+      if (params?.has_email !== undefined) q.set('has_email', String(params.has_email))
       if (params?.has_replied !== undefined) q.set('has_replied', String(params.has_replied))
       if (params?.verified_only) q.set('verified_only', 'true')
       if (params?.min_followers !== undefined) q.set('min_followers', String(params.min_followers))
