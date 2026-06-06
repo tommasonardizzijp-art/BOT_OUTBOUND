@@ -25,6 +25,9 @@ from app.utils.instagrapi_client import (
 from app.services.scraper import _get_available_account, _get_fallback_account
 from app.services.bot_state_service import is_halted
 from app.utils.events import emit as emit_event
+from app.utils.contact_extract import extract_contacts
+from app.services.global_contact_service import upsert_lead
+from app.services.account_manager import has_scrape_budget, increment_scrape_lookup
 
 
 def classify_resolution(user_info, error) -> tuple[str, bool]:
@@ -160,7 +163,31 @@ async def resolve_imports(campaign_id: str) -> None:
                 if row is None:
                     break  # finito
 
+                await db.refresh(account)
+                if not has_scrape_budget(account, campaign):
+                    fb = await _get_fallback_account(db, exclude_id=account.id, campaign_id=campaign.id)
+                    if fb:
+                        logger.warning(f"[Import] Cap lookup per @{account.username} — rotazione → @{fb.username}")
+                        await release_scraping_slot(account.id)
+                        account = fb
+                        await acquire_scraping_slot(account.id)
+                        acct_id = account.id
+                        client = await _login(account, db)
+                        await db.refresh(account)
+                    if not has_scrape_budget(account, campaign):
+                        campaign.status = CampaignStatus.paused
+                        campaign.scrape_outcome = "scrape_capped"
+                        campaign.updated_at = datetime.utcnow()
+                        await db.commit()
+                        emit_event(campaign_id, "scrape_stopped",
+                                   "Risoluzione in pausa: cap lookup giornaliero raggiunto — riprende dopo il reset",
+                                   level="warn")
+                        return
+
                 info, err, client, account = await _resolve_one(db, campaign, row.username, client, account)
+                if info is not None:
+                    await increment_scrape_lookup(db, account.id)
+                    account.scrape_lookups_today = (account.scrape_lookups_today or 0) + 1
                 status, create = classify_resolution(info, err)
                 row.status = status
                 row.error = (str(err)[:255] if err and status == "error" else None)
@@ -170,22 +197,39 @@ async def resolve_imports(campaign_id: str) -> None:
                         Follower.campaign_id == campaign_id, Follower.ig_user_id == info.pk,
                     ))).scalar_one_or_none()
                     if dup is None:
-                        ext = getattr(info, "external_url", None)
+                        contacts = extract_contacts(info)
+                        biography = getattr(info, "biography", None) or None
                         db.add(Follower(
                             campaign_id=campaign_id,
                             ig_user_id=info.pk,
                             username=info.username,
                             full_name=getattr(info, "full_name", None),
-                            biography=getattr(info, "biography", None) or None,
+                            biography=biography,
                             is_private=getattr(info, "is_private", False),
                             is_verified=getattr(info, "is_verified", False),
                             follower_count=getattr(info, "follower_count", None),
                             following_count=getattr(info, "following_count", None),
-                            external_url=str(ext) if ext else None,
+                            external_url=contacts.external_url,
                             profile_pic_url=str(info.profile_pic_url) if getattr(info, "profile_pic_url", None) else None,
+                            phone=contacts.phone,
+                            email=contacts.email,
+                            whatsapp=contacts.whatsapp,
+                            bio_links=json.dumps(contacts.bio_links) if contacts.bio_links else None,
+                            contact_source=json.dumps(contacts.sources) if contacts.sources else None,
                             status=FollowerStatus.bio_scraped,
                         ))
                         resolved += 1
+                        await db.commit()
+                        await upsert_lead(
+                            db,
+                            ig_user_id=info.pk,
+                            username=info.username,
+                            full_name=getattr(info, "full_name", None),
+                            biography=biography,
+                            contacts=contacts,
+                            campaign=campaign,
+                            account=account,
+                        )
                 await db.commit()
 
                 since_break += 1
@@ -234,7 +278,7 @@ async def resolve_imports(campaign_id: str) -> None:
             if campaign.status == CampaignStatus.scraping_and_running:
                 campaign.status = CampaignStatus.running
             elif campaign.status in _RESOLVING:
-                campaign.status = CampaignStatus.ready
+                campaign.status = CampaignStatus.completed if not campaign.messaging_enabled else CampaignStatus.ready
             campaign.total_followers = total
             campaign.messages_pending = total
             campaign.scrape_outcome = "completed"
