@@ -27,7 +27,7 @@ class Campaign(Base):
     # 'scrape' = scrape follower/following di una pagina; 'import' = lista profili caricata da file
     source_type: Mapped[str] = mapped_column(String(20), nullable=False, default='scrape')
     target_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    base_message_template: Mapped[str] = mapped_column(Text, nullable=False)
+    base_message_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_prompt_context: Mapped[str | None] = mapped_column(Text, nullable=True)
     # M10: optional second template for A/B testing (50/50 random split)
     message_template_b: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -53,6 +53,10 @@ class Campaign(Base):
     bio_fetch_delay_min: Mapped[float] = mapped_column(Float, default=5.0, nullable=False)
     bio_fetch_delay_max: Mapped[float] = mapped_column(Float, default=8.0, nullable=False)
     auto_generate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # If False, this is a scraping-only campaign: no DM workers, no AI generation.
+    messaging_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Per-campaign override of SCRAPE_DAILY_LIMIT (lookups/day/account). NULL = use .env default.
+    scrape_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scrape_break_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     scrape_break_prev_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     scrape_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)

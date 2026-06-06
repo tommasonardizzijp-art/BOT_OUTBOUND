@@ -36,6 +36,13 @@ class Follower(Base):
     following_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     profile_pic_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     external_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Contact info (advanced scraping). Populated from user_info at scrape time.
+    phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    whatsapp: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bio_links: Mapped[str | None] = mapped_column(Text, nullable=True)        # JSON: [{"url","title"}]
+    contact_source: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON: {"phone":"ig_business",...}
+    contact_extra: Mapped[str | None] = mapped_column(Text, nullable=True)    # JSON, reserved Fase 2
     status: Mapped[FollowerStatus] = mapped_column(
         SAEnum(FollowerStatus, native_enum=False), nullable=False, default=FollowerStatus.pending
     )
