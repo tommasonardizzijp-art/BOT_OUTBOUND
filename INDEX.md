@@ -93,6 +93,7 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 | `backend/app/main.py` | FastAPI app, CORS, lifespan |
 | `backend/app/services/campaign_orchestrator.py` | Loop principale campagna, state machine, multi-worker |
 | `backend/app/services/scraper.py` | Scraping follower + session restore (login sicuro) |
+| `backend/app/services/scraping_pool.py` | Pool round-robin account scraping multi-account (Approccio C): pre-login, next(), build/release/save_sessions |
 | `backend/app/services/ai_personalizer.py` | Generazione messaggi via Ollama + batch + approval sampling |
 | `backend/app/services/reply_checker.py` | Cron: scansione inbox DM per risposte |
 | `backend/app/services/bot_state_service.py` | Kill-switch globale halt/resume |
@@ -130,6 +131,7 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 | `docs/guides/GUIDA.md` | Guida utente operativa | 2026-05-11 |
 | `docs/architecture/ANTI_DETECTION.md` | Guida detection IG, proxy, ban | 2026-04-14 |
 | `docs/setup/TELEGRAM_SETUP.md` | Setup BotFather e comandi Telegram remoti | 2026-05-11 |
+| `docs/setup/PROXY_MOBILE_SETUP.md` | Setup IP residenziale + mobile per profilo (USB tethering, iProxy, VPS tunnel) | 2026-06-06 |
 
 ---
 

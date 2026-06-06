@@ -941,6 +941,31 @@ Branch: `feature/advanced-scraping`. 12 task implementativi + QA E2E (62 test pa
 
 ---
 
+## 2026-06-06 — Multi-account round-robin scraping (Approccio C)
+
+Con 2+ account `scraping`/`both` su una campagna, il carico è ora condiviso dall'inizio: il bio-fetch alterna gli account per-lead (round-robin) invece di usare un solo account fino al cap/429. Utile ora che il proxy mobile dà a ogni account un IP distinto.
+
+### Cosa è stato fatto
+- Nuova classe `ScrapingPool` (`backend/app/services/scraping_pool.py`): pre-login di tutti gli account scraping della campagna (1 slot + 1 client con proxy proprio ciascuno), `next(campaign)` round-robin con skip dei capped, `build`/`release`/`save_sessions`.
+- `_store_followers_batch` ora prende un `pool` e fa `pool.next()` per ogni lead; rotazione 429/soft-block verso il prossimo account del pool senza re-login.
+- `_scrape_paginated` usa il pool: paginazione lista su 1 account (chiamate cheap), bio-fetch round-robin; salva le sessioni di tutti gli account del pool a ogni batch.
+- `scrape_followers` costruisce il pool, lo passa giù, lo rilascia in `finally` (`save_sessions` + `release`). Gestito `ScrapingPoolEmpty` → campagna in `error`. Rimosso il morto `_switch_scraping_account`.
+- Frontend: helper text esplicito accanto ai delay bio-fetch (form nuova campagna + modale impostazioni): «i tempi valgono per OGNI lead, condivisi tra gli account; con 2 account dimezza (3-5s per ~6-10s effettivi)».
+
+### Decisioni chiave
+- **Break campagna-level invariato**: il box "Pausa sessione" + countdown restano come prima (no break per-account).
+- **Cap per-account via pool**: il bump in-memory di `scrape_lookups_today` è visibile a `pool.next` grazie a `expire_on_commit=False` (accoppiamento sottile, documentato).
+- **Compat mono-account**: pool di 1 elemento = comportamento identico a prima (test `test_single_account_always_same`).
+- **Import mode fuori scope**: `import_resolver.py` resta seriale single-account.
+
+### Verifica
+- `tests/test_scraping_pool.py`: 7 passati (round-robin, skip capped, all-capped→None, mono-account, integrazione `_store_followers_batch` alterna A,B,A,B).
+- Suite backend completa: **93 passati, 0 falliti**.
+- `npx tsc --noEmit` frontend: 0 errori.
+- QA e2e: PASS su 8 check (call-chain, identità oggetto per cap-skip, no slot leak, mono-account no off-by-one, break preservato, isolamento proxy per-account).
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |
