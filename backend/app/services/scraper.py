@@ -37,6 +37,7 @@ from app.utils.instagrapi_client import (
 from app.services.bot_state_service import is_halted
 from app.utils.contact_extract import extract_contacts, ContactData
 from app.services.global_contact_service import upsert_lead
+from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty
 from app.services.account_manager import has_scrape_budget, increment_scrape_lookup
 from app.utils.exceptions import ScrapeBudgetError
 
@@ -77,15 +78,17 @@ async def scrape_followers(campaign_id: str) -> None:
         from app.utils.events import emit as emit_event
         emit_event(campaign_id, "scrape_start", f"Scraping avviato per @{campaign.target_username} (modalità: {mode_label})")
 
-        _scraping_account_id = None
+        pool = None
         try:
-            account = await _get_available_account(db, campaign_id=campaign_id)
-            if await acquire_scraping_slot(account.id):
-                _scraping_account_id = account.id
-            else:
-                logger.warning(f"[Scraper] Slot @{account.username} già occupato (TOCTOU) — condiviso")
-            client = await _login(account, db)
-            emit_event(campaign_id, "scrape_start", f"Account @{account.username} connesso, inizio raccolta {mode_label}...")
+            pool = await ScrapingPool.build(db, campaign)
+            sel = pool.next(campaign)
+            if sel is None:
+                raise ScrapeBudgetError("Cap raggiunto su tutti gli account scraping all'avvio")
+            account, client = sel  # usato per la risoluzione target
+            emit_event(
+                campaign_id, "scrape_start",
+                f"{pool.size} account scraping connessi, inizio raccolta {mode_label}...",
+            )
 
             # Resolve target user via private API (avoids public endpoint 429)
             # user_info_by_username_v1 uses /api/v1/users/lookup/ (authenticated),
@@ -120,7 +123,7 @@ async def scrape_followers(campaign_id: str) -> None:
             logger.info(f"Target @{campaign.target_username} has pk={target_user.pk}")
 
             # Scrape followers/following in batches
-            total_scraped, scrape_outcome = await _scrape_paginated(client, campaign, account, db, scrape_mode)
+            total_scraped, scrape_outcome = await _scrape_paginated(pool, campaign, db, scrape_mode)
 
             # Refresh: user may have paused/stopped during scraping
             await db.refresh(campaign)
@@ -211,14 +214,24 @@ async def scrape_followers(campaign_id: str) -> None:
             campaign.status = CampaignStatus.error
             await db.commit()
 
+        except ScrapingPoolEmpty as e:
+            logger.error(f"Scrape non avviato: {e}")
+            campaign.status = CampaignStatus.error
+            await db.commit()
+            emit_event(campaign_id, "scrape_stopped", f"Scraping non avviato: {e}", level="error")
+
         except Exception as e:
             logger.error(f"Scrape failed for campaign {campaign_id}: {e}")
             campaign.status = CampaignStatus.error
             await db.commit()
 
         finally:
-            if _scraping_account_id:
-                await release_scraping_slot(_scraping_account_id)
+            if pool is not None:
+                try:
+                    await pool.save_sessions(db)
+                except Exception as exc:
+                    logger.warning(f"[Scraper] save_sessions finale fallito: {exc}")
+                await pool.release()
 
 
 async def _get_available_account(db, campaign_id: str | None = None) -> InstagramAccount:
@@ -294,31 +307,6 @@ async def _eligible_scraping_accounts(db, campaign_id: str) -> list[InstagramAcc
         )
     )
     return list(result.scalars().all())
-
-
-async def _switch_scraping_account(
-    db,
-    *,
-    current_account: InstagramAccount,
-    fallback: InstagramAccount,
-    current_slot_account_id: str | None,
-):
-    """Move the scraping slot to a fallback account before logging it in."""
-    fallback_slot_acquired = False
-    if fallback.id != current_slot_account_id:
-        fallback_slot_acquired = await acquire_scraping_slot(fallback.id)
-        if not fallback_slot_acquired:
-            logger.warning(f"[Scraper] Slot fallback @{fallback.username} già occupato — rotazione condivisa")
-
-    try:
-        client = await _login(fallback, db)
-    except Exception:
-        if fallback_slot_acquired:
-            await release_scraping_slot(fallback.id)
-        raise
-    if fallback_slot_acquired and current_slot_account_id:
-        await release_scraping_slot(current_slot_account_id)
-    return client, fallback, (fallback.id if fallback_slot_acquired else current_slot_account_id)
 
 
 async def _scrape_paginated(pool, campaign: Campaign, db, scrape_mode: str = 'followers') -> tuple[int, str]:
