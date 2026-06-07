@@ -739,6 +739,14 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {pregenLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><RefreshCw className="w-4 h-4 mr-1" />Pre-genera</>}
             </Button>
           )}
+          {/* Ripresa dopo errore: riavvia senza perdere il progresso già raccolto */}
+          {campaign.status === 'error' && (
+            <Button size="sm" className="bg-green-600 hover:bg-green-700"
+              onClick={() => action(() => api.campaigns.startScrape(id))} disabled={loadingAction}
+              title="Riprende la campagna dall'errore senza perdere i profili già raccolti (i profili non ancora risolti vengono ripresi)">
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />{campaign.source_type === 'import' ? 'Riprendi risoluzione' : 'Riavvia scraping'}</>}
+            </Button>
+          )}
           {(campaign.status === 'error' || campaign.status === 'completed' || campaign.status === 'paused' || campaign.status === 'scraping' || campaign.status === 'scraping_and_running' || campaign.status === 'scraping_break') && (
             <Button size="sm" variant="outline" className="border-cyan-700 text-cyan-400 hover:bg-cyan-900/20"
               onClick={() => openConfirm(

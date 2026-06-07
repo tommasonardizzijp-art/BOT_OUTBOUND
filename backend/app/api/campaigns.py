@@ -17,6 +17,7 @@ from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignRespons
 from app.services.campaign_control import (
     CampaignControlError,
     check_redis_reachable,
+    ensure_campaign_can_send_messages,
     ensure_bot_accepts_work,
     has_active_role_account,
     pause_campaign_control,
@@ -164,13 +165,41 @@ async def get_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
 async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSession = Depends(get_db)):
     campaign = await _get_or_404(campaign_id, db)
 
-    # daily_limit can be changed at any time (workers check it live on each iteration)
+    # daily_limit and scraping runtime params can be changed at any time —
+    # workers and scraper read them fresh on each iteration.
+    always_editable = {
+        "daily_limit",
+        "scrape_session_size",
+        "scrape_break_minutes_min",
+        "scrape_break_minutes_max",
+        "bio_fetch_delay_min",
+        "bio_fetch_delay_max",
+        "scrape_daily_limit",
+    }
     if "daily_limit" in data.model_fields_set:
         campaign.daily_limit = data.daily_limit
 
-    # Other fields require draft/ready/paused state
-    other_fields = data.model_fields_set - {"daily_limit"}
-    if other_fields and campaign.status not in (CampaignStatus.draft, CampaignStatus.ready, CampaignStatus.paused):
+    # Other fields require draft/ready/paused state. A completed scraping-only
+    # campaign can still be converted into a DM campaign by editing message config.
+    other_fields = data.model_fields_set - always_editable
+    completed_message_fields = {
+        "base_message_template",
+        "message_template_b",
+        "ai_prompt_context",
+        "messaging_enabled",
+        "require_approval",
+        "approval_sample_size",
+    }
+    completed_message_update = (
+        campaign.status == CampaignStatus.completed
+        and other_fields
+        and other_fields.issubset(completed_message_fields)
+    )
+    if (
+        other_fields
+        and not completed_message_update
+        and campaign.status not in (CampaignStatus.draft, CampaignStatus.ready, CampaignStatus.paused)
+    ):
         raise HTTPException(status_code=400, detail="Only draft/ready/paused campaigns can have name/template/context updated")
 
     if data.name is not None:
@@ -206,6 +235,15 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         raise HTTPException(status_code=400, detail="scrape_break_minutes_min > max")
     if campaign.bio_fetch_delay_min > campaign.bio_fetch_delay_max:
         raise HTTPException(status_code=400, detail="bio_fetch_delay_min > max")
+    if campaign.messaging_enabled and len((campaign.base_message_template or "").strip()) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail="Template messaggio obbligatorio (min 10 caratteri) quando la messaggistica e' attiva",
+        )
+    if completed_message_update and campaign.messaging_enabled:
+        campaign.status = CampaignStatus.ready
+        campaign.completed_at = None
+        db.add(ActivityLog(campaign_id=campaign.id, action="messaging_enabled_after_scrape"))
 
     campaign.updated_at = datetime.utcnow()
     await db.commit()
@@ -298,8 +336,12 @@ async def import_status(campaign_id: str, db: AsyncSession = Depends(get_db)):
 async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
     campaign = await _get_or_404(campaign_id, db)
 
-    if campaign.status not in (CampaignStatus.draft,):
-        raise HTTPException(status_code=400, detail="Only draft campaigns can be scraped")
+    # draft = avvio normale; error = ripresa dopo un errore (es. proxy/USB caduto).
+    # In entrambi i casi il progresso esistente è preservato: per import il resolver
+    # riprende dalle righe ancora 'pending' (le 'resolved' restano), per scrape la
+    # paginazione riparte dal cursore e i follower già salvati sono dedotti.
+    if campaign.status not in (CampaignStatus.draft, CampaignStatus.error):
+        raise HTTPException(status_code=400, detail="Only draft or error campaigns can be (re)started")
 
     try:
         await ensure_bot_accepts_work(db)
@@ -380,16 +422,10 @@ async def start_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     if campaign.status not in (CampaignStatus.ready, CampaignStatus.paused):
         raise HTTPException(status_code=400, detail="Campaign must be in ready or paused state to start")
 
-    if not campaign.messaging_enabled:
-        raise HTTPException(
-            status_code=400,
-            detail="Messaggistica disattivata per questa campagna. Attiva 'Invia messaggi' e imposta un template per inviare DM.",
-        )
-    if not (campaign.base_message_template or "").strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Template messaggio mancante. Imposta il messaggio base prima di avviare l'invio.",
-        )
+    try:
+        ensure_campaign_can_send_messages(campaign)
+    except CampaignControlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
         await ensure_bot_accepts_work(db)
@@ -578,11 +614,10 @@ async def start_dm_auto(campaign_id: str, db: AsyncSession = Depends(get_db)):
     """
     campaign = await _get_or_404(campaign_id, db)
 
-    if not campaign.messaging_enabled:
-        raise HTTPException(
-            status_code=400,
-            detail="Messaggistica disattivata per questa campagna. Attiva 'Invia messaggi' per usare l'invio automatico.",
-        )
+    try:
+        ensure_campaign_can_send_messages(campaign)
+    except CampaignControlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if campaign.source_type == "import":
         # Import è a fase singola: prima si risolvono tutti i profili, poi (ready) si
@@ -706,6 +741,10 @@ async def pre_generate_messages(
             status_code=400,
             detail="Solo campagne in stato 'ready' o 'paused' possono essere pre-generate",
         )
+    try:
+        ensure_campaign_can_send_messages(campaign)
+    except CampaignControlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     background_tasks.add_task(_enqueue_pregen, campaign_id)
     return await _enrich_campaign(campaign, db, include_today=True)
