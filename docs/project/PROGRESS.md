@@ -966,6 +966,39 @@ Con 2+ account `scraping`/`both` su una campagna, il carico è ora condiviso dal
 
 ---
 
+## 2026-06-06 — Round-robin esteso al resolver import + restart da errore
+
+### Round-robin import
+`import_resolver.py` ora usa lo stesso `ScrapingPool` dello scraper: pre-login di tutti gli account scraping/both, `pool.next()` per ogni riga `imported_profiles` (round-robin A,B,A,B), rotazione 429/soft-block verso il prossimo account del pool senza re-login, cap per-account via `pool.next` (tutti a cap → pausa `scrape_capped`). Break campagna-level invariato (`scrape_break` + countdown). `_resolve_one` rifirmato `(db, campaign, username, pool, current_account, current_client) -> (info, err, account_used)`. Rimossi gli helper single-account ora inutilizzati dal resolver (`_get_available_account`/`_get_fallback_account`/slot manuali). `ScrapingPoolEmpty` → campagna `error`.
+
+### Restart da errore
+`POST /campaigns/{id}/start-scrape` accetta ora `status='error'` oltre a `draft`. Riprende senza perdere progresso (import: righe `pending` residue; scrape: cursore + dedup). Frontend: nuovo bottone verde "Riprendi risoluzione"/"Riavvia scraping" sullo stato `error`. Risolve il caso "proxy/USB caduto → errore → solo Reset disponibile" (Reset per import saltava a `ready` abbandonando i pending).
+
+### Verifica
+- `tests/test_import_resolver_roundrobin.py`: 3 test (rotazione `_resolve_one` su 429, no-rotation su successo, **e2e loop** `resolve_imports` su 4 righe → alternanza A,B,A,B + chiusura `ready`).
+- Suite backend completa: **96 passati, 0 falliti**.
+- `npx tsc --noEmit` frontend: 0 errori.
+
+---
+
+## 2026-06-08 — Test connessione per-account + log per-lead
+
+### Pulsante "Testa IP" sui profili
+Nuovo `backend/app/utils/proxy_probe.py` (`probe_egress(proxy)`): manda una richiesta a ipify+ip-api **attraverso il proxy dell'account** (o diretta se nessun proxy) → rivela IP/ISP/ASN/mobile reali di uscita, esattamente l'egress che vede Instagram per quell'account. Endpoint `POST /accounts/{id}/test-connection` (`accounts.py`, dietro auth + `_get_or_404`, probe in thread). Frontend: bottone "Testa IP" su ogni card account (`accounts/page.tsx`) + `TestResultPanel` (mostra IP, badge via proxy/WiFi + mobile, ISP/ASN/geo, oppure errore pulito se proxy giù). Caso d'uso: confermare a colpo d'occhio che l'account col proxy esce su IP mobile diverso dal WiFi del PC.
+
+### Log per-lead con account (visibilità round-robin)
+Aggiunte righe `logger.info` ASCII-only:
+- `[Import] @user -> status via @account (lookups oggi: N)` in `import_resolver.py`
+- `[Scraper] @user bio via @account (lookups oggi: N)` in `scraper.py`
+Così nel log del worker si vede quale account ha fatto ogni singolo lead (prima si vedeva solo il pool build). ASCII obbligatorio: console Windows cp1252 crasherebbe su `→`.
+
+### Verifica
+- `tests/test_proxy_probe.py`: 4 test (direct, proxy passato+mobile, proxy down→errore pulito, geo-fail→IP comunque).
+- Suite backend completa: **100 passati, 0 falliti**. `npx tsc --noEmit`: 0 errori. `import app.main`: OK.
+- QA e2e su tutta la sessione: PASS (round-robin scraper+resolver, restart-da-errore, probe+endpoint, log per-lead, nessuna regressione). Egress live confermato distinto: WiFi `77.39.171.16` (UNIDATA) vs mobile `2.195.139.187` (Telecom Italia Mobile).
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |
