@@ -275,6 +275,24 @@ async def force_cancel_cooldown(account_id: str, db: AsyncSession = Depends(get_
     return account
 
 
+@router.post("/{account_id}/test-connection")
+async def test_connection(account_id: str, db: AsyncSession = Depends(get_db)):
+    """Probe the account's real egress IP/ISP through its proxy (or WiFi if none).
+
+    Same egress path the bot uses for this account: request via the account's
+    proxy reveals the public IP Instagram would see. Lets the operator confirm
+    proxied accounts exit on a different (mobile) IP than the PC's WiFi.
+    """
+    import asyncio
+    from app.utils.proxy_probe import probe_egress
+
+    account = await _get_or_404(account_id, db)
+    result = await asyncio.to_thread(probe_egress, account.proxy)
+    result["account_id"] = account.id
+    result["username"] = account.username
+    return result
+
+
 @router.post("/{account_id}/verify-challenge", response_model=AccountResponse)
 async def verify_challenge(account_id: str, data: ChallengeVerify, db: AsyncSession = Depends(get_db)):
     account = await _get_or_404(account_id, db)

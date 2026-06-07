@@ -14,9 +14,9 @@ import { toast } from 'sonner'
 import {
   Plus, Trash2, Loader2, ShieldAlert, Clock, Ban, CheckCircle,
   LogIn, Globe, Pencil, Power, PowerOff, BarChart2, ChevronDown, ChevronUp,
-  Inbox, RefreshCw, Eraser, AlertTriangle
+  Inbox, RefreshCw, Eraser, AlertTriangle, Wifi, Smartphone
 } from 'lucide-react'
-import type { Account, AccountStatus, AccountMetrics, DMCount } from '@/lib/types'
+import type { Account, AccountStatus, AccountMetrics, DMCount, ProxyTestResult } from '@/lib/types'
 import { formatDistanceToNow, formatTime } from '@/lib/dateUtils'
 import { Skeleton } from '@/components/ui/skeleton'
 
@@ -60,6 +60,30 @@ export default function AccountsPage() {
   const [dmOpenId, setDmOpenId] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [form, setForm] = useState({ username: '', password: '', proxy: '', daily_message_limit: 20, notes: '' })
+  const [testResult, setTestResult] = useState<Record<string, ProxyTestResult | 'loading'>>({})
+
+  const handleTest = async (acc: Account) => {
+    setTestResult(r => ({ ...r, [acc.id]: 'loading' }))
+    try {
+      const res = await api.accounts.testConnection(acc.id)
+      setTestResult(r => ({ ...r, [acc.id]: res }))
+      if (res.ok) {
+        toast.success(`@${acc.username}: ${res.egress_ip}${res.mobile ? ' · mobile' : ''}`)
+      } else {
+        toast.error(`@${acc.username}: ${res.error}`)
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Errore'
+      setTestResult(r => ({
+        ...r,
+        [acc.id]: {
+          ok: false, via: acc.proxy ? 'proxy' : 'direct', proxy: acc.proxy ?? null,
+          account_id: acc.id, username: acc.username, error: msg,
+        },
+      }))
+      toast.error(msg)
+    }
+  }
 
   const isValidProxy = (url: string) =>
     /^https?:\/\/([^@]+@)?[^:]+:\d+$/.test(url)
@@ -302,6 +326,15 @@ export default function AccountsPage() {
                     <BrowseSessionButton accountId={acc.id} username={acc.username} />
                   )}
 
+                  {/* Testa connessione: IP/egress reale via proxy (o WiFi se nessun proxy) */}
+                  <Button size="sm" variant="outline" className="border-cyan-800 text-cyan-400 hover:bg-cyan-900/20"
+                    onClick={() => handleTest(acc)} disabled={testResult[acc.id] === 'loading'}
+                    title="Verifica l'IP di uscita reale di questo account (proxy o WiFi)">
+                    {testResult[acc.id] === 'loading'
+                      ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" />Test...</>
+                      : <><Wifi className="w-4 h-4 mr-1" />Testa IP</>}
+                  </Button>
+
                   {/* Reset session — wipe browser profile + instagrapi session */}
                   <ResetSessionButton
                     accountId={acc.id}
@@ -342,6 +375,11 @@ export default function AccountsPage() {
               {/* M9: Metrics panel */}
               {metricsOpenId === acc.id && (
                 <AccountMetricsPanel accountId={acc.id} />
+              )}
+
+              {/* Risultato test connessione */}
+              {testResult[acc.id] && testResult[acc.id] !== 'loading' && (
+                <TestResultPanel result={testResult[acc.id] as ProxyTestResult} />
               )}
             </CardContent>
           </Card>
@@ -683,6 +721,40 @@ function ResetSessionButton({
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/* ---------- Test Connection Result Panel ---------- */
+
+function TestResultPanel({ result }: { result: ProxyTestResult }) {
+  if (!result.ok) {
+    return (
+      <div className="mt-3 p-3 bg-red-900/15 border border-red-800/50 rounded-lg text-xs">
+        <p className="text-red-400 font-medium flex items-center gap-1">
+          <AlertTriangle className="w-3 h-3" />Connessione fallita ({result.via === 'proxy' ? 'via proxy' : 'diretta'})
+        </p>
+        <p className="text-red-200/80 mt-1 leading-relaxed">{result.error}</p>
+      </div>
+    )
+  }
+  return (
+    <div className="mt-3 p-3 bg-cyan-900/10 border border-cyan-800/40 rounded-lg text-xs space-y-1.5">
+      <p className="text-cyan-400 font-medium flex items-center gap-1.5">
+        {result.mobile ? <Smartphone className="w-3 h-3" /> : <Wifi className="w-3 h-3" />}
+        Egress: <span className="font-mono text-white">{result.egress_ip}</span>
+        {result.via === 'proxy'
+          ? <Badge variant="outline" className="text-[10px] border-cyan-700 text-cyan-300">via proxy</Badge>
+          : <Badge variant="outline" className="text-[10px] border-gray-700 text-gray-400">diretta (WiFi)</Badge>}
+        {result.mobile === true && <Badge variant="outline" className="text-[10px] border-green-700 text-green-400">mobile</Badge>}
+      </p>
+      <div className="text-gray-400">
+        {result.isp && <span>{result.isp}</span>}
+        {result.asn && <span className="text-gray-600"> · {result.asn}</span>}
+        {(result.city || result.country) && (
+          <span className="text-gray-600"> · {[result.city, result.country].filter(Boolean).join(', ')}</span>
+        )}
+      </div>
+    </div>
   )
 }
 

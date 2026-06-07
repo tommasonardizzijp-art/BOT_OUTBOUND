@@ -5,7 +5,7 @@ import type {
   FollowerListResponse, MessageListResponse, MessageStats, DashboardStats,
   ActivityLogListResponse, TimelineResponse, HealthStatus,
   LeadListResponse, AccountRole, BotState,
-  ImportStatusResponse, ImportUploadResponse,
+  ImportStatusResponse, ImportUploadResponse, ProxyTestResult,
 } from './types'
 
 // Re-export for consumers
@@ -100,6 +100,14 @@ export const api = {
     },
     resetSession: (id: string) =>
       request<Account>(`/accounts/${id}/reset-session`, { method: 'POST' }),
+    testConnection: (id: string) => {
+      // Probe can take a few seconds (proxy round-trip + geo lookup)
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 40_000)
+      return request<ProxyTestResult>(`/accounts/${id}/test-connection`, {
+        method: 'POST', signal: controller.signal,
+      }).finally(() => clearTimeout(timeout))
+    },
     browseSession: (id: string, maxMinutes = 60) => {
       // Browser stays open until user closes it or maxMinutes elapse.
       // Add 60s slack to client timeout so server can close cleanly first.

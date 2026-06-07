@@ -267,6 +267,22 @@ export interface DMCount {
   checked_at: string
 }
 
+// Test connessione: egress reale (IP/ISP) via proxy dell'account
+export interface ProxyTestResult {
+  ok: boolean
+  via: 'proxy' | 'direct'
+  proxy: string | null
+  account_id: string
+  username: string
+  egress_ip?: string
+  isp?: string | null
+  asn?: string | null
+  mobile?: boolean | null
+  country?: string | null
+  city?: string | null
+  error?: string
+}
+
 // M9: Account metrics
 export interface AccountMetrics {
   today_sent: number
