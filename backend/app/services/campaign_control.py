@@ -32,6 +32,20 @@ class CampaignControlError(Exception):
     """Expected campaign-control failure that can be shown to an operator."""
 
 
+def ensure_campaign_can_send_messages(campaign: Campaign) -> None:
+    """Validate the shared preconditions for AI generation and DM workers."""
+    if not campaign.messaging_enabled:
+        raise CampaignControlError(
+            "Messaggistica disattivata per questa campagna. "
+            "Attiva 'Invia messaggi' e imposta un template prima di inviare DM."
+        )
+    if len((campaign.base_message_template or "").strip()) < 10:
+        raise CampaignControlError(
+            "Template messaggio mancante o troppo corto. "
+            "Imposta un messaggio base di almeno 10 caratteri prima di inviare DM."
+        )
+
+
 async def ensure_bot_accepts_work(db: AsyncSession) -> None:
     """Block operator start/resume commands while the global kill-switch is active."""
     from app.services.bot_state_service import is_halted
@@ -151,6 +165,8 @@ async def resume_campaign_control(
         has_dm_account = await has_active_role_account(
             db, campaign_id, ("dm", "both")
         )
+        if campaign.auto_generate:
+            ensure_campaign_can_send_messages(campaign)
         if not has_scrape_account:
             raise CampaignControlError(
                 "Nessun account attivo con ruolo scraping/both. "
@@ -169,6 +185,7 @@ async def resume_campaign_control(
             campaign.status = CampaignStatus.scraping
             action = "scrape_resumed"
     else:
+        ensure_campaign_can_send_messages(campaign)
         if not await has_active_role_account(db, campaign_id, ("dm", "both")):
             raise CampaignControlError(
                 "Nessun account attivo con ruolo DM/both. "

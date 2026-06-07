@@ -41,6 +41,7 @@ from app.services.ai_personalizer import generate_message
 from app.services.human_behavior import SessionManager
 from app.services.anomaly_detector import report_anomaly
 from app.services.bot_state_service import is_halted
+from app.services.campaign_control import CampaignControlError, ensure_campaign_can_send_messages
 from app.config import settings
 from app.utils.exceptions import (
     AccountBannedError, AccountChallengeError,
@@ -264,6 +265,12 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                     f"[Worker] Campaign {campaign_id} status={campaign.status.value}, stopping"
                 )
                 emit_event(campaign_id, "worker_stopped", f"Campagna {campaign.status.value} — worker fermato", level="warn")
+                return
+            try:
+                ensure_campaign_can_send_messages(campaign)
+            except CampaignControlError as exc:
+                logger.warning(f"[Worker] Campaign {campaign_id} cannot send messages: {exc}")
+                emit_event(campaign_id, "worker_stopped", str(exc), level="warn")
                 return
 
             # ── 1b. Role check: exit if account's role changed to scraping-only ──

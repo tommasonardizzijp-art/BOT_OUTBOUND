@@ -19,6 +19,9 @@ Covered cases (see Step 2 of the QA brief):
      "Messaggistica disattivata" (fires before the Redis check).
   4. Leads list/export filters: has_phone returns only phone-bearing lead;
      export CSV header includes phone,email,whatsapp.
+  5. A completed scraping-only campaign can be converted to `ready` by enabling
+     messaging with a valid template.
+  6. Resume cannot bypass messaging_enabled=False on completed lead-only campaigns.
 """
 import asyncio
 import tempfile
@@ -179,6 +182,67 @@ def test_start_guard_rejects_messaging_disabled(client, temp_db):
     resp = client.post(f"/api/campaigns/{campaign_id}/start")
     # Guard order in start_campaign: status check → messaging_enabled guard → ...
     # → Redis check. messaging_enabled=False fires the 400 BEFORE Redis is touched.
+    assert resp.status_code == 400, resp.text
+    assert "Messaggistica disattivata" in resp.json()["detail"]
+
+
+def test_completed_scraping_only_can_be_converted_to_ready(client, temp_db):
+    _, session_factory = temp_db
+
+    resp = client.post("/api/campaigns", json={
+        "name": "Lead only completed",
+        "source_type": "scrape",
+        "target_username": "leadshop",
+        "messaging_enabled": False,
+    })
+    assert resp.status_code == 201, resp.text
+    campaign_id = resp.json()["id"]
+
+    async def _force_completed(db):
+        c = await db.get(Campaign, campaign_id)
+        c.status = CampaignStatus.completed
+        c.scrape_completed_at = datetime.utcnow()
+        c.messages_pending = 12
+        await db.commit()
+    _run(session_factory, _force_completed)
+
+    resp = client.put(f"/api/campaigns/{campaign_id}", json={
+        "messaging_enabled": True,
+        "base_message_template": "Ciao, ti scrivo per presentarti una proposta dedicata.",
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["messaging_enabled"] is True
+    assert body["status"] == "ready"
+
+
+def test_resume_completed_lead_only_rejects_before_dm_workers(client, temp_db, monkeypatch):
+    from app.services import campaign_control
+
+    async def _redis_ok():
+        return True
+
+    monkeypatch.setattr(campaign_control, "check_redis_reachable", _redis_ok)
+    _, session_factory = temp_db
+
+    resp = client.post("/api/campaigns", json={
+        "name": "Lead only resume blocked",
+        "source_type": "scrape",
+        "target_username": "blockedshop",
+        "messaging_enabled": False,
+    })
+    assert resp.status_code == 201, resp.text
+    campaign_id = resp.json()["id"]
+
+    async def _force_completed(db):
+        c = await db.get(Campaign, campaign_id)
+        c.status = CampaignStatus.completed
+        c.scrape_completed_at = datetime.utcnow()
+        c.messages_pending = 4
+        await db.commit()
+    _run(session_factory, _force_completed)
+
+    resp = client.post(f"/api/campaigns/{campaign_id}/resume")
     assert resp.status_code == 400, resp.text
     assert "Messaggistica disattivata" in resp.json()["detail"]
 

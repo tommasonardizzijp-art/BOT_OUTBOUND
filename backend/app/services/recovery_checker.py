@@ -13,7 +13,8 @@ For each stale 'sending' row (updated_at older than 10 minutes):
   2. Fetch the DM thread with the target user.
   3. Search for an outgoing message whose text matches Message.generated_text.
   4. Match found   -> status=sent, Follower.status=sent, log dm_recovered.
-  5. No match      -> if retry_count < 1: status=retry, retry_count += 1,
+  5. Parse error   -> leave as 'sending' (inconclusive), no anomaly spam.
+  6. No match      -> if retry_count < 1: status=retry, retry_count += 1,
                       log dm_recovery_no_evidence.
                       if retry_count >= 1: leave as 'sending' for human inspection.
 """
@@ -32,6 +33,32 @@ from app.models.message import Message, MessageStatus
 from app.models.activity_log import ActivityLog
 from app.utils.instagrapi_client import login as _login
 from app.utils.events import emit as emit_event
+
+
+class _InstagrapiParseError(Exception):
+    """Raised when instagrapi fails to parse IG response (e.g. MediaXma.video_url=None).
+
+    Distinct from auth/network errors: delivery status is UNKNOWN, not failed.
+    Callers should leave the message as 'sending' and suppress anomaly spam.
+    """
+
+
+# Dedup table: { (account_id, kind) -> last_reported_at }
+# Prevents Telegram/notification spam when the same structural error fires for
+# every stale 'sending' message on the same account.
+_anomaly_last_reported: dict[tuple[str, str], datetime] = {}
+_ANOMALY_DEDUP_SECONDS = 1800  # 30 minutes
+
+
+def _should_report_anomaly(account_id: str | None, kind: str) -> bool:
+    """Return True if enough time has passed since the last report of this kind/account."""
+    key = (account_id or "", kind)
+    last = _anomaly_last_reported.get(key)
+    now = datetime.utcnow()
+    if last and (now - last).total_seconds() < _ANOMALY_DEDUP_SECONDS:
+        return False
+    _anomaly_last_reported[key] = now
+    return True
 
 
 def _normalize(text: str) -> str:
@@ -121,17 +148,39 @@ async def _recover_one(msg: Message, db) -> str:
 
     try:
         delivered = await _check_dm_delivered(account, follower.ig_user_id, msg.generated_text, db)
+    except _InstagrapiParseError as exc:
+        # IG returned a media object we can't parse (e.g. MediaXma.video_url=None).
+        # Delivery status is UNKNOWN — leave as 'sending' for the next cron pass.
+        # Report at most once per account per 30 min to avoid Telegram spam.
+        logger.warning(f"[Recovery] {msg.id} @{follower.username}: parse error (inconclusive) — {exc}")
+        if _should_report_anomaly(account_id, "dm_recovery_instagrapi_error"):
+            try:
+                from app.services.anomaly_detector import report_anomaly
+                await report_anomaly(
+                    db, kind="dm_recovery_instagrapi_error", severity="warn",
+                    campaign_id=msg.campaign_id, account_id=account_id,
+                    details={
+                        "message_id": msg.id,
+                        "follower": follower.username,
+                        "error": str(exc)[:200],
+                        "note": "parse error — delivery unknown, message left as 'sending'",
+                    },
+                )
+            except Exception:
+                pass
+        return "skipped"
     except Exception as exc:
         logger.warning(f"[Recovery] {msg.id}: instagrapi check failed: {exc}")
-        try:
-            from app.services.anomaly_detector import report_anomaly
-            await report_anomaly(
-                db, kind="dm_recovery_instagrapi_error", severity="warn",
-                campaign_id=msg.campaign_id, account_id=account_id,
-                details={"message_id": msg.id, "follower": follower.username, "error": str(exc)[:200]},
-            )
-        except Exception:
-            pass
+        if _should_report_anomaly(account_id, "dm_recovery_instagrapi_error"):
+            try:
+                from app.services.anomaly_detector import report_anomaly
+                await report_anomaly(
+                    db, kind="dm_recovery_instagrapi_error", severity="warn",
+                    campaign_id=msg.campaign_id, account_id=account_id,
+                    details={"message_id": msg.id, "follower": follower.username, "error": str(exc)[:200]},
+                )
+            except Exception:
+                pass
         return "error"
 
     if delivered:
@@ -312,6 +361,8 @@ async def _resume_dm_worker_after_recovery(
 
 
 async def _check_dm_delivered(account, ig_user_id, generated_text, db) -> bool:
+    from pydantic import ValidationError as PydanticValidationError
+
     client = await _login(account, db, skip_gql_verify=True)
     own_pk = int(client.user_id)
     target_pk = int(ig_user_id)
@@ -319,6 +370,11 @@ async def _check_dm_delivered(account, ig_user_id, generated_text, db) -> bool:
 
     try:
         threads = await asyncio.to_thread(client.direct_threads, amount=100)
+    except PydanticValidationError as exc:
+        # IG thread list contains a media object that fails pydantic validation
+        # (e.g. MediaXma.video_url=None after the monkey-patch also failed or
+        # a similar new field). Delivery is UNKNOWN — caller decides what to do.
+        raise _InstagrapiParseError(str(exc)) from exc
     except Exception as exc:
         logger.warning(f"[Recovery] direct_threads failed: {exc}")
         raise

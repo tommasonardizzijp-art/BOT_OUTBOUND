@@ -133,6 +133,8 @@ async def _scan_inbox(account: InstagramAccount, sent_followers: dict, db) -> in
     A reply is detected when a thread contains a message NOT sent by us.
     Returns count of newly marked replied followers.
     """
+    from pydantic import ValidationError as PydanticValidationError
+
     # skip_gql_verify: the GQL ping is only needed before mobile scraping to avoid
     # UFAC challenge — it fails with 400 on some sessions and is not needed for
     # reading the DM inbox, which uses a different API surface.
@@ -140,10 +142,23 @@ async def _scan_inbox(account: InstagramAccount, sent_followers: dict, db) -> in
     own_pk = int(client.user_id)
 
     # Fetch recent inbox threads — direct_threads() returns list[DirectThread]
-    threads = await asyncio.to_thread(client.direct_threads, amount=200)
+    # Guard against ValidationError: IG sometimes returns media objects (e.g.
+    # MediaXma) with null fields that pydantic rejects. Treat as inconclusive
+    # rather than crashing the entire reply-check run for this account.
+    try:
+        threads = await asyncio.to_thread(client.direct_threads, amount=200)
+    except PydanticValidationError as exc:
+        logger.warning(
+            f"[ReplyChecker] @{account.username}: direct_threads parse error "
+            f"(MediaXma or similar) — skipping inbox scan for this account. "
+            f"Error: {str(exc)[:200]}"
+        )
+        return 0
     try:
         pending = await asyncio.to_thread(client.direct_pending_inbox, 100)
         threads = list(threads) + list(pending)
+    except PydanticValidationError as exc:
+        logger.debug(f"[ReplyChecker] pending inbox parse error, using main inbox only: {exc}")
     except Exception as e:
         logger.debug(f"[ReplyChecker] pending inbox non disponibile: {e}")
 
