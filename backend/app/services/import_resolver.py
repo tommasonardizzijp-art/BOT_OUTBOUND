@@ -19,15 +19,12 @@ from app.models.follower import Follower, FollowerStatus
 from app.models.activity_log import ActivityLog
 from app.utils.ig_username import parse_lines
 from app.utils.exceptions import BotHaltedError, ScraperError
-from app.utils.instagrapi_client import (
-    login as _login, acquire_scraping_slot, release_scraping_slot,
-)
-from app.services.scraper import _get_available_account, _get_fallback_account
+from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty
 from app.services.bot_state_service import is_halted
 from app.utils.events import emit as emit_event
 from app.utils.contact_extract import extract_contacts
 from app.services.global_contact_service import upsert_lead
-from app.services.account_manager import has_scrape_budget, increment_scrape_lookup
+from app.services.account_manager import increment_scrape_lookup
 
 
 def classify_resolution(user_info, error) -> tuple[str, bool]:
@@ -86,35 +83,34 @@ async def store_imported_lines(db, campaign_id: str, raw: str) -> dict:
     }
 
 
-async def _resolve_one(db, campaign, username, current_client, current_account):
-    """Resolve a single username → (user_info | None, error | None, client, account).
-    Rotates to a fallback account once on 429/soft-block."""
+async def _resolve_one(db, campaign, username, pool, current_account, current_client):
+    """Resolve a single username → (user_info | None, error | None, account_used).
+
+    Approccio C: su 429/soft-block ruota al prossimo account del pool (già loggato,
+    niente re-login). Il client per-riga è scelto dal chiamante via pool.next.
+    """
     for attempt in range(2):
         try:
             info = await asyncio.to_thread(current_client.user_info_by_username_v1, username)
-            return info, None, current_client, current_account
+            return info, None, current_account
         except UserNotFound as e:
-            return None, e, current_client, current_account
+            return None, e, current_account
         except Exception as e:
             es = str(e).lower()
             is_rate = "429" in es or "too many" in es or "rate" in es
             is_soft = "protect" in es or "restrict" in es or "community" in es
             if (is_rate or is_soft) and attempt == 0:
-                fb = await _get_fallback_account(db, exclude_id=current_account.id, campaign_id=campaign.id)
-                if fb:
+                alt = pool.next(campaign)
+                if alt is not None and alt[0].id != current_account.id:
                     logger.warning(f"[Import] {'soft-block' if is_soft else '429'} su @{username}; "
-                                   f"rotazione @{current_account.username} → @{fb.username}")
-                    try:
-                        current_client = await _login(fb, db)
-                        current_account = fb
-                        await asyncio.sleep(random.uniform(30 if is_soft else 15, 60 if is_soft else 30))
-                    except Exception as le:
-                        logger.warning(f"[Import] fallback login fallito: {le}")
+                                   f"rotazione pool @{current_account.username} → @{alt[0].username}")
+                    current_account, current_client = alt
+                    await asyncio.sleep(random.uniform(30 if is_soft else 15, 60 if is_soft else 30))
                 else:
                     await asyncio.sleep(random.uniform(120, 240) if is_soft else 60)
                 continue
-            return None, e, current_client, current_account
-    return None, RuntimeError("resolve retry esaurito"), current_client, current_account
+            return None, e, current_account
+    return None, RuntimeError("resolve retry esaurito"), current_account
 
 
 async def resolve_imports(campaign_id: str) -> None:
@@ -136,13 +132,12 @@ async def resolve_imports(campaign_id: str) -> None:
             return
 
         emit_event(campaign_id, "scrape_start", "Risoluzione profili importati avviata...")
-        acct_id = None
+        pool = None
         try:
-            account = await _get_available_account(db, campaign_id=campaign_id)
-            await acquire_scraping_slot(account.id)
-            acct_id = account.id
-            client = await _login(account, db)
-            emit_event(campaign_id, "scrape_start", f"Account @{account.username} connesso, risolvo i profili...")
+            # Approccio C: tutti gli account scraping/both pre-loggati nel pool, round-robin per-riga.
+            pool = await ScrapingPool.build(db, campaign)
+            emit_event(campaign_id, "scrape_start",
+                       f"{pool.size} account scraping connessi, risolvo i profili...")
 
             since_break = 0
             resolved = 0
@@ -163,45 +158,43 @@ async def resolve_imports(campaign_id: str) -> None:
                 if row is None:
                     break  # finito
 
-                await db.refresh(account)
-                if not has_scrape_budget(account, campaign):
-                    fb = await _get_fallback_account(db, exclude_id=account.id, campaign_id=campaign.id)
-                    if fb:
-                        logger.warning(f"[Import] Cap lookup per @{account.username} — rotazione → @{fb.username}")
-                        await release_scraping_slot(account.id)
-                        account = fb
-                        await acquire_scraping_slot(account.id)
-                        acct_id = account.id
-                        client = await _login(account, db)
-                        await db.refresh(account)
-                    if not has_scrape_budget(account, campaign):
-                        campaign.status = CampaignStatus.paused
-                        campaign.scrape_outcome = "scrape_capped"
-                        campaign.updated_at = datetime.utcnow()
-                        await db.commit()
-                        emit_event(campaign_id, "scrape_stopped",
-                                   "Risoluzione in pausa: cap lookup giornaliero raggiunto — riprende dopo il reset",
-                                   level="warn")
-                        return
+                # Round-robin: prossimo account con budget. None = tutti a cap.
+                sel = pool.next(campaign)
+                if sel is None:
+                    campaign.status = CampaignStatus.paused
+                    campaign.scrape_outcome = "scrape_capped"
+                    campaign.updated_at = datetime.utcnow()
+                    await db.commit()
+                    emit_event(campaign_id, "scrape_stopped",
+                               "Risoluzione in pausa: cap lookup giornaliero raggiunto su tutti gli account — riprende dopo il reset",
+                               level="warn")
+                    return
+                current_account, current_client = sel
 
-                info, err, client, account = await _resolve_one(db, campaign, row.username, client, account)
+                info, err, account = await _resolve_one(db, campaign, row.username, pool, current_account, current_client)
                 if info is not None:
                     await increment_scrape_lookup(db, account.id)
                     account.scrape_lookups_today = (account.scrape_lookups_today or 0) + 1
                 status, create = classify_resolution(info, err)
                 row.status = status
                 row.error = (str(err)[:255] if err and status == "error" else None)
+                # Log per-lead con l'account che ha eseguito il lookup (visibilita' round-robin).
+                logger.info(
+                    f"[Import] @{row.username} -> {status} via @{account.username} "
+                    f"(lookups oggi: {account.scrape_lookups_today})"
+                )
                 if create and info is not None:
-                    row.ig_user_id = info.pk
+                    ig_pk = int(info.pk)
+                    row.ig_user_id = ig_pk
                     dup = (await db.execute(select(Follower).where(
-                        Follower.campaign_id == campaign_id, Follower.ig_user_id == info.pk,
+                        Follower.campaign_id == campaign_id, Follower.ig_user_id == ig_pk,
                     ))).scalar_one_or_none()
                     if dup is None:
                         contacts = extract_contacts(info)
                         biography = getattr(info, "biography", None) or None
                         db.add(Follower(
                             campaign_id=campaign_id,
-                            ig_user_id=info.pk,
+                            ig_user_id=ig_pk,
                             username=info.username,
                             full_name=getattr(info, "full_name", None),
                             biography=biography,
@@ -222,7 +215,7 @@ async def resolve_imports(campaign_id: str) -> None:
                         await db.commit()
                         await upsert_lead(
                             db,
-                            ig_user_id=info.pk,
+                            ig_user_id=ig_pk,
                             username=info.username,
                             full_name=getattr(info, "full_name", None),
                             biography=biography,
@@ -252,6 +245,7 @@ async def resolve_imports(campaign_id: str) -> None:
                     campaign.status = CampaignStatus.scraping_break
                     campaign.scrape_break_until = wake
                     await db.commit()
+                    await pool.save_sessions(db)  # persisti le sessioni di tutti gli account prima della pausa
                     emit_event(campaign_id, "scrape_break", f"Pausa sessione ({int(minutes)} min) dopo {resolved} profili")
                     while datetime.utcnow() < wake:
                         await asyncio.sleep(10)
@@ -295,6 +289,11 @@ async def resolve_imports(campaign_id: str) -> None:
             campaign.updated_at = datetime.utcnow()
             await db.commit()
             emit_event(campaign_id, "scrape_stopped", "Bot in pausa globale — risoluzione interrotta", level="warn")
+        except ScrapingPoolEmpty as e:
+            logger.error(f"[Import] resolve non avviato: {e}")
+            campaign.status = CampaignStatus.error
+            await db.commit()
+            emit_event(campaign_id, "scrape_stopped", f"Risoluzione non avviata: {e}", level="error")
         except ScraperError as e:
             logger.error(f"[Import] {e}")
             campaign.status = CampaignStatus.error
@@ -306,5 +305,9 @@ async def resolve_imports(campaign_id: str) -> None:
             await db.commit()
             emit_event(campaign_id, "scrape_stopped", f"Errore risoluzione: {str(e)[:120]}", level="error")
         finally:
-            if acct_id:
-                await release_scraping_slot(acct_id)
+            if pool is not None:
+                try:
+                    await pool.save_sessions(db)
+                except Exception as exc:
+                    logger.warning(f"[Import] save_sessions finale fallito: {exc}")
+                await pool.release()

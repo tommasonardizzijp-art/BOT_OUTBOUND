@@ -635,6 +635,12 @@ async def _store_followers_batch(
         await db.commit()
         stored += 1
 
+        # Log per-lead con l'account che ha fatto il lookup (visibilita' round-robin).
+        logger.info(
+            f"[Scraper] @{user_short.username} bio via @{current_account.username} "
+            f"(lookups oggi: {current_account.scrape_lookups_today})"
+        )
+
         await upsert_lead(
             db,
             ig_user_id=int(user_short.pk),
