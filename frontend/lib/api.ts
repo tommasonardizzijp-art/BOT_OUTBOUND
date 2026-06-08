@@ -156,6 +156,14 @@ export const api = {
       request<Campaign>(`/campaigns/${id}/start-dm-auto`, { method: 'POST' }),
     resumeBreak: (id: string) =>
       request<Campaign>(`/campaigns/${id}/resume-break`, { method: 'POST' }),
+    startList: (id: string, target?: number | null) =>
+      request<Campaign>(`/campaigns/${id}/list/start`, { method: 'POST', body: JSON.stringify({ target: target ?? null }) }),
+    stopList: (id: string) =>
+      request<Campaign>(`/campaigns/${id}/list/stop`, { method: 'POST' }),
+    startBios: (id: string, target?: number | null) =>
+      request<Campaign>(`/campaigns/${id}/bios/start`, { method: 'POST', body: JSON.stringify({ target: target ?? null }) }),
+    stopBios: (id: string) =>
+      request<Campaign>(`/campaigns/${id}/bios/stop`, { method: 'POST' }),
     // Import profili da lista (file .txt/.csv) — usa fetch diretto perché request() forza
     // Content-Type: application/json, incompatibile con FormData (serve boundary multipart).
     importProfiles: async (id: string, file: File): Promise<ImportUploadResponse> => {

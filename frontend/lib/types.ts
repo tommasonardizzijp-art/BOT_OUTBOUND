@@ -27,7 +27,7 @@ export interface AccountCreate {
 }
 
 // Campaign types
-export type CampaignStatus = 'draft' | 'scraping' | 'scraping_break' | 'scraping_and_running' | 'ready' | 'running' | 'paused' | 'completed' | 'error'
+export type CampaignStatus = 'draft' | 'listing' | 'listing_break' | 'scraping' | 'scraping_break' | 'scraping_and_running' | 'ready' | 'running' | 'paused' | 'completed' | 'error'
 
 export interface Campaign {
   id: string
@@ -74,6 +74,10 @@ export interface Campaign {
   scrape_break_until: string | null
   scrape_cursor: string | null
   scrape_outcome: string | null
+  list_target?: number | null
+  bio_target?: number | null
+  list_progress?: { done: number; target: number | null } | null
+  bio_progress?: { done: number; target: number | null } | null
 }
 
 // M15 rev: approval queue item
