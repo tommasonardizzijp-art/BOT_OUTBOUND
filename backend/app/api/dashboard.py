@@ -23,7 +23,14 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     # Campaigns
     total_campaigns = await _count(db, Campaign)
     running_campaigns = await _count(
-        db, Campaign, Campaign.status.in_([CampaignStatus.running, CampaignStatus.scraping])
+        db, Campaign, Campaign.status.in_([
+            CampaignStatus.running,
+            CampaignStatus.listing,
+            CampaignStatus.listing_break,
+            CampaignStatus.scraping,
+            CampaignStatus.scraping_and_running,
+            CampaignStatus.scraping_break,
+        ])
     )
 
     # Messages

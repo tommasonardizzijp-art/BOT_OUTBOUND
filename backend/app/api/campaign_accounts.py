@@ -23,6 +23,8 @@ router = APIRouter(prefix="/campaigns/{campaign_id}/accounts", tags=["campaign-a
 
 ACTIVE_CAMPAIGN_STATUSES = (
     CampaignStatus.running,
+    CampaignStatus.listing,
+    CampaignStatus.listing_break,
     CampaignStatus.scraping,
     CampaignStatus.scraping_and_running,
     CampaignStatus.scraping_break,
@@ -119,6 +121,8 @@ async def assign_account(
                 CampaignAccount.is_active == True,
                 CampaignModel.status.in_([
                     CampaignStatus.running, CampaignStatus.paused,
+                    CampaignStatus.listing, CampaignStatus.listing_break,
+                    CampaignStatus.scraping,
                     CampaignStatus.scraping_and_running, CampaignStatus.scraping_break,
                 ]),
             )

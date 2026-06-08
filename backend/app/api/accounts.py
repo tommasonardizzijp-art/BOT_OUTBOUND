@@ -25,6 +25,8 @@ async def _active_campaign_names_for_account(account_id: str, db: AsyncSession) 
             Campaign.status.in_(
                 (
                     CampaignStatus.running,
+                    CampaignStatus.listing,
+                    CampaignStatus.listing_break,
                     CampaignStatus.scraping,
                     CampaignStatus.scraping_and_running,
                     CampaignStatus.scraping_break,
@@ -552,6 +554,8 @@ async def reset_session(account_id: str, db: AsyncSession = Depends(get_db)):
 
     # Block if account is in any campaign currently using a live session
     active_statuses = (
+        CampaignStatus.listing,
+        CampaignStatus.listing_break,
         CampaignStatus.scraping,
         CampaignStatus.scraping_break,
         CampaignStatus.scraping_and_running,

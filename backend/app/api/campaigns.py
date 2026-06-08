@@ -284,6 +284,8 @@ async def delete_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     campaign = await _get_or_404(campaign_id, db)
     if campaign.status in (
         CampaignStatus.running,
+        CampaignStatus.listing,
+        CampaignStatus.listing_break,
         CampaignStatus.scraping,
         CampaignStatus.scraping_and_running,
         CampaignStatus.scraping_break,
@@ -405,7 +407,10 @@ async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
             detail="Redis non raggiungibile. Avviare Redis prima dello scraping.",
         )
 
-    campaign.status = CampaignStatus.scraping
+    # import => resolve (status scraping); scrape => Fase Lista (status listing).
+    # Status impostato PRIMA del commit per evitare una finestra in cui un campaign
+    # scrape resta su 'scraping' (uno crash tra due commit lo bloccherebbe).
+    campaign.status = CampaignStatus.scraping if is_import else CampaignStatus.listing
     campaign.updated_at = datetime.utcnow()
 
     log = ActivityLog(
@@ -422,10 +427,6 @@ async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
         if is_import:
             await enqueue_resolve(campaign_id)
         else:
-            # source_type=scrape ora usa la Fase Lista (two-phase). Imposta listing.
-            campaign.status = CampaignStatus.listing
-            campaign.updated_at = datetime.utcnow()
-            await db.commit()
             await enqueue_list(campaign_id)
     except Exception as exc:
         campaign.status = CampaignStatus.draft
@@ -649,6 +650,7 @@ async def stop_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
 
     if campaign.status not in (
         CampaignStatus.running, CampaignStatus.paused,
+        CampaignStatus.listing, CampaignStatus.listing_break,
         CampaignStatus.scraping, CampaignStatus.scraping_and_running,
         CampaignStatus.scraping_break,
     ):
@@ -673,6 +675,7 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
 
     if campaign.status not in (
         CampaignStatus.error, CampaignStatus.completed, CampaignStatus.paused,
+        CampaignStatus.listing, CampaignStatus.listing_break,
         CampaignStatus.scraping, CampaignStatus.scraping_and_running, CampaignStatus.scraping_break,
     ):
         raise HTTPException(status_code=400, detail="Only error, completed, paused or stuck scraping campaigns can be reset")
