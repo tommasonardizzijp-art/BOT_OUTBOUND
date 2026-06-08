@@ -80,6 +80,108 @@ function useCountdown(until: string | null | undefined): string {
   return remaining
 }
 
+function TwoPhasePanel({ campaign, id, action, loadingAction }: {
+  campaign: Campaign
+  id: string
+  action: (fn: () => Promise<Campaign>) => void
+  loadingAction: boolean
+}) {
+  const [listTarget, setListTarget] = useState<string>('')
+  const [bioTarget, setBioTarget] = useState<string>('')
+  const lp = campaign.list_progress
+  const bp = campaign.bio_progress
+  const listing = campaign.status === 'listing' || campaign.status === 'listing_break'
+  const bioing = campaign.status === 'scraping' || campaign.status === 'scraping_break'
+
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      {/* Fase 1 — Lista follower */}
+      <Card className="bg-gray-900 border-gray-800">
+        <CardContent className="pt-4 space-y-3">
+          <div className="font-semibold text-sm text-gray-200">Fase 1 — Lista follower</div>
+          <div className="text-sm text-gray-400">
+            Lista: {lp?.done ?? 0}{lp?.target ? ` / ${lp.target}` : ''}
+            {campaign.status === 'listing_break' && <span className="ml-1 text-amber-400">(pausa)</span>}
+            {campaign.status === 'listing' && <span className="ml-1 text-blue-400 animate-pulse">in corso…</span>}
+          </div>
+          <Input
+            type="number"
+            placeholder="Target (vuoto = tutta la lista)"
+            value={listTarget}
+            onChange={(e) => setListTarget(e.target.value)}
+            disabled={listing}
+            className="bg-gray-800 border-gray-700 text-white text-sm h-8 disabled:opacity-50"
+          />
+          {!listing ? (
+            <Button
+              size="sm"
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+              disabled={loadingAction}
+              onClick={() => action(() => api.campaigns.startList(id, listTarget ? Number(listTarget) : null))}
+            >
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Play className="w-4 h-4 mr-1" />}
+              Avvia Fase Lista
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              className="w-full border-orange-700 text-orange-400"
+              disabled={loadingAction}
+              onClick={() => action(() => api.campaigns.stopList(id))}
+            >
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Square className="w-4 h-4 mr-1" />}
+              Ferma Fase Lista
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Fase 2 — Scraping bio/contatti */}
+      <Card className="bg-gray-900 border-gray-800">
+        <CardContent className="pt-4 space-y-3">
+          <div className="font-semibold text-sm text-gray-200">Fase 2 — Scraping bio/contatti</div>
+          <div className="text-sm text-gray-400">
+            Bio: {bp?.done ?? 0}{bp?.target ? ` / ${bp.target}` : ''}
+            {campaign.status === 'scraping_break' && <span className="ml-1 text-amber-400">(pausa)</span>}
+            {campaign.status === 'scraping' && <span className="ml-1 text-green-400 animate-pulse">in corso…</span>}
+          </div>
+          <Input
+            type="number"
+            placeholder="Target (vuoto = tutti i pending)"
+            value={bioTarget}
+            onChange={(e) => setBioTarget(e.target.value)}
+            disabled={bioing}
+            className="bg-gray-800 border-gray-700 text-white text-sm h-8 disabled:opacity-50"
+          />
+          {!bioing ? (
+            <Button
+              size="sm"
+              className="w-full bg-green-600 hover:bg-green-700 text-white"
+              disabled={loadingAction}
+              onClick={() => action(() => api.campaigns.startBios(id, bioTarget ? Number(bioTarget) : null))}
+            >
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Play className="w-4 h-4 mr-1" />}
+              Avvia Fase Bio
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              className="w-full border-orange-700 text-orange-400"
+              disabled={loadingAction}
+              onClick={() => action(() => api.campaigns.stopBios(id))}
+            >
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Square className="w-4 h-4 mr-1" />}
+              Ferma Fase Bio
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
 export default function CampaignDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const [followerPage, setFollowerPage] = useState(1)
@@ -111,7 +213,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   )
 
   // Countdown live verso la fine della pausa sessione (mostrato anche nel badge header)
-  const breakRemaining = useCountdown(campaign?.status === 'scraping_break' ? campaign?.scrape_break_until : null)
+  const breakRemaining = useCountdown((campaign?.status === 'scraping_break' || campaign?.status === 'listing_break') ? campaign?.scrape_break_until : null)
 
   const [loadingAction, setLoadingAction] = useState(false)
   const [loadingFollowerId, setLoadingFollowerId] = useState<string | null>(null)
@@ -258,6 +360,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     const isActive = campaign.status === 'running'
       || campaign.status === 'scraping'
       || campaign.status === 'scraping_and_running'
+      || campaign.status === 'listing'
     const interval = isActive ? 2000 : 10000
 
     const poll = async () => {
@@ -619,14 +722,18 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             <h1 className="text-3xl font-bold text-white">{campaign.name}</h1>
             <Badge className={`text-sm ${
               campaign.status === 'scraping_and_running' ? 'bg-gradient-to-r from-blue-700 to-green-700 text-white border-0' :
-              campaign.status === 'scraping_break' ? 'bg-amber-700/80 text-amber-100 border-0' : ''
+              campaign.status === 'scraping_break' ? 'bg-amber-700/80 text-amber-100 border-0' :
+              campaign.status === 'listing' ? 'bg-blue-800/80 text-blue-100 border-0' :
+              campaign.status === 'listing_break' ? 'bg-amber-700/80 text-amber-100 border-0' : ''
             }`}>
               {campaign.status === 'scraping_and_running' ? '⚡ Scraping + DM' :
+               campaign.status === 'listing' ? 'In lista' :
+               campaign.status === 'listing_break' ? '⏸ Lista in pausa' :
                campaign.source_type === 'import' && campaign.status === 'scraping' ? 'Scraping lista' :
                campaign.source_type === 'import' && campaign.status === 'scraping_break' ? '⏸ Pausa scraping' :
                campaign.status === 'scraping_break' ? '⏸ Pausa sessione' :
                campaign.status}
-              {campaign.status === 'scraping_break' && breakRemaining && (
+              {(campaign.status === 'scraping_break' || campaign.status === 'listing_break') && breakRemaining && (
                 <span className="ml-1.5 font-mono font-bold">· {breakRemaining}</span>
               )}
             </Badge>
@@ -747,7 +854,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />{campaign.source_type === 'import' ? 'Riprendi risoluzione' : 'Riavvia scraping'}</>}
             </Button>
           )}
-          {(campaign.status === 'error' || campaign.status === 'completed' || campaign.status === 'paused' || campaign.status === 'scraping' || campaign.status === 'scraping_and_running' || campaign.status === 'scraping_break') && (
+          {(campaign.status === 'error' || campaign.status === 'completed' || campaign.status === 'paused' || campaign.status === 'scraping' || campaign.status === 'scraping_and_running' || campaign.status === 'scraping_break' || campaign.status === 'listing' || campaign.status === 'listing_break') && (
             <Button size="sm" variant="outline" className="border-cyan-700 text-cyan-400 hover:bg-cyan-900/20"
               onClick={() => openConfirm(
                 'Reset campagna',
@@ -760,7 +867,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><RotateCcw className="w-4 h-4 mr-1" />Reset</>}
             </Button>
           )}
-          {(campaign.status === 'draft' || campaign.status === 'error' || campaign.status === 'completed' || campaign.status === 'scraping') && (
+          {(campaign.status === 'draft' || campaign.status === 'error' || campaign.status === 'completed' || campaign.status === 'scraping' || campaign.status === 'listing') && (
             <Button size="sm" variant="outline" className="border-red-800 text-red-400 hover:bg-red-900/20"
               onClick={handleDelete} disabled={loadingAction}>
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Trash2 className="w-4 h-4 mr-1" />Elimina</>}
@@ -801,6 +908,11 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             Nessun account attivo assegnato. Assegna almeno un account prima di avviare la campagna.
           </p>
         </div>
+      )}
+
+      {/* Two-phase scraping panel (Fase Lista + Fase Bio) — solo campagne scrape */}
+      {campaign.source_type === 'scrape' && (
+        <TwoPhasePanel campaign={campaign} id={id} action={action} loadingAction={loadingAction} />
       )}
 
       {/* Pre-approval workflow guide */}
@@ -1316,7 +1428,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
       )}
 
       {/* Live worker log */}
-      {(campaign.status === 'running' || campaign.status === 'scraping' || campaign.status === 'scraping_and_running' || campaign.status === 'paused' || liveEvents.length > 0) && (
+      {(campaign.status === 'running' || campaign.status === 'scraping' || campaign.status === 'scraping_and_running' || campaign.status === 'paused' || campaign.status === 'listing' || campaign.status === 'listing_break' || liveEvents.length > 0) && (
         <Card className="bg-gray-900 border-gray-800">
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">

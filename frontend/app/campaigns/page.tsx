@@ -15,6 +15,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 
 const STATUS_COLORS: Record<CampaignStatus, string> = {
   draft: 'bg-gray-600',
+  listing: 'bg-blue-700',
+  listing_break: 'bg-amber-700',
   scraping: 'bg-blue-600',
   scraping_break: 'bg-amber-600',
   scraping_and_running: 'bg-teal-600',
@@ -27,6 +29,8 @@ const STATUS_COLORS: Record<CampaignStatus, string> = {
 
 const STATUS_LABELS: Record<CampaignStatus, string> = {
   draft: 'Bozza',
+  listing: 'In lista',
+  listing_break: 'Lista in pausa',
   scraping: 'Scraping...',
   scraping_break: 'Pausa sessione',
   scraping_and_running: 'Scraping + DM',
