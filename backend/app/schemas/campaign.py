@@ -100,5 +100,9 @@ class CampaignResponse(BaseModel):
     scrape_break_until: datetime | None = None
     scrape_cursor: str | None = None
     scrape_outcome: str | None = None
+    list_target: int | None = None
+    bio_target: int | None = None
+    list_progress: dict | None = None
+    bio_progress: dict | None = None
 
     model_config = {"from_attributes": True}

@@ -27,6 +27,27 @@ from app.services.campaign_control import (
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
 
+def compute_phase_progress(counts: dict, list_target: int | None, bio_target: int | None) -> tuple[dict, dict]:
+    """Progressi derivati dai conteggi follower per-status.
+
+    Lista done = TUTTI i follower (pending + ogni stato a valle = sono gia' in lista).
+    Bio done = follower con bio fatta (bio_scraped + message_generated + pending_approval + sent + replied + failed).
+    """
+    list_done = sum(counts.values())
+    bio_done = (
+        counts.get(FollowerStatus.bio_scraped, 0)
+        + counts.get(FollowerStatus.message_generated, 0)
+        + counts.get(FollowerStatus.pending_approval, 0)
+        + counts.get(FollowerStatus.sent, 0)
+        + counts.get(FollowerStatus.replied, 0)
+        + counts.get(FollowerStatus.failed, 0)
+    )
+    return (
+        {"done": list_done, "target": list_target},
+        {"done": bio_done, "target": bio_target},
+    )
+
+
 async def _enrich_campaign(campaign: Campaign, db: AsyncSession, include_today: bool = False) -> CampaignResponse:
     """Build CampaignResponse with live-reconciled counters from Follower.status GROUP BY."""
     counts_result = await db.execute(
@@ -51,6 +72,7 @@ async def _enrich_campaign(campaign: Campaign, db: AsyncSession, include_today: 
     replied = counts.get(FollowerStatus.replied, 0)
     sent_total = sent_only + replied
     reply_rate = (replied / sent_total) if sent_total else 0.0
+    list_progress, bio_progress = compute_phase_progress(counts, campaign.list_target, campaign.bio_target)
 
     return CampaignResponse.model_validate(campaign).model_copy(update={
         "total_followers": sum(counts.values()),
@@ -66,6 +88,8 @@ async def _enrich_campaign(campaign: Campaign, db: AsyncSession, include_today: 
             + counts.get(FollowerStatus.pending_approval, 0)
         ),
         "messages_sent_today": sent_today,
+        "list_progress": list_progress,
+        "bio_progress": bio_progress,
     })
 
 
@@ -107,6 +131,7 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
             + s.get(FollowerStatus.message_generated, 0)
             + s.get(FollowerStatus.pending_approval, 0)
         )
+        list_progress, bio_progress = compute_phase_progress(s, c.list_target, c.bio_target)
         enriched.append(CampaignResponse.model_validate(c).model_copy(update={
             "total_followers": total,
             "messages_sent": sent,
@@ -115,6 +140,8 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
             "messages_failed": failed,
             "messages_skipped": skipped,
             "messages_pending": pending,
+            "list_progress": list_progress,
+            "bio_progress": bio_progress,
         }))
     return enriched
 
