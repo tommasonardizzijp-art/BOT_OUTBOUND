@@ -65,11 +65,9 @@ async def scrape_bios(campaign_id: str) -> None:
                     logger.info(f"[Bio] Nessun pending rimasto ({done} fatti)")
                     break
 
-                # account is tracked for challenge handler in except block
-                sel = pool.next(campaign)
-                account = sel[0] if sel else None
-
-                outcome = await fetch_and_store_bio(follower, campaign, db, pool)
+                # fetch_and_store_bio ritorna l'account REALE usato per la lookup
+                # (rotazione pool interna): serve per isolare quello giusto su challenge.
+                outcome, account, err = await fetch_and_store_bio(follower, campaign, db, pool)
 
                 if outcome == "capped":
                     campaign.status = CampaignStatus.paused
@@ -77,6 +75,10 @@ async def scrape_bios(campaign_id: str) -> None:
                     campaign.updated_at = datetime.utcnow()
                     await db.commit()
                     emit_event(campaign_id, "scrape_stopped", "Cap giornaliero raggiunto — riprende dopo reset", level="warn")
+                    return
+
+                if outcome == "challenge":
+                    await isolate_challenged_account(db, campaign, account, err)
                     return
 
                 if outcome == "soft_block":

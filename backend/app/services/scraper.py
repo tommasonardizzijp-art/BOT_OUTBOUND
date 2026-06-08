@@ -279,25 +279,36 @@ async def scrape_followers(campaign_id: str) -> None:
                 await pool.release()
 
 
-async def fetch_and_store_bio(follower, campaign, db, pool) -> str:
+async def fetch_and_store_bio(follower, campaign, db, pool):
     """Estrae bio+contatti per UN follower gia' in DB (status pending) e lo porta
-    a bio_scraped. Ritorna esito: 'done' | 'soft_block' | 'capped' | 'error'.
+    a bio_scraped.
+
+    Ritorna una tupla ``(outcome, account_used, error)``:
+      - outcome: 'done' | 'soft_block' | 'capped' | 'challenge' | 'error'
+      - account_used: l'account che ha eseguito la chiamata IG (None se 'capped')
+      - error: l'eccezione catturata su 'challenge'/'error' (None altrimenti)
+
+    Il chiamante riceve cosi' l'account REALE usato per la chiamata: indispensabile
+    per isolare l'account giusto su challenge (con la rotazione pool round-robin il
+    chiamante non puo' indovinare quale account ha fatto la lookup).
     Riusa rotazione pool / cap / extract_contacts come _store_followers_batch.
     """
     sel = pool.next(campaign)
     if sel is None:
-        return "capped"
+        return "capped", None, None
     current_account, current_client = sel
     try:
         user_info = await asyncio.to_thread(current_client.user_info_v1, follower.ig_user_id)
     except Exception as e:
+        if is_challenge_exception(e):
+            return "challenge", current_account, e
         es = str(e).lower()
         if "protect" in es or "restrict" in es or "community" in es:
-            return "soft_block"
+            return "soft_block", current_account, None
         if "429" in es or "too many" in es or "rate" in es:
-            return "soft_block"
+            return "soft_block", current_account, None
         logger.warning(f"[Bio] user_info @{follower.username} fallito: {e}")
-        return "error"
+        return "error", current_account, e
 
     from app.utils.contact_extract import extract_contacts
     contacts = extract_contacts(user_info)
@@ -333,7 +344,7 @@ async def fetch_and_store_bio(follower, campaign, db, pool) -> str:
         f"[Bio] @{follower.username} via @{current_account.username} "
         f"(lookups oggi: {current_account.scrape_lookups_today})"
     )
-    return "done"
+    return "done", current_account, None
 
 
 async def _get_available_account(db, campaign_id: str | None = None) -> InstagramAccount:
