@@ -4,6 +4,7 @@ from app.services.work_enqueue import ARQ_MAIN_QUEUE, arq_redis_settings
 from app.workers.scrape_worker import scrape_followers_task
 from app.workers.message_worker import run_campaign_task
 from app.workers.import_worker import resolve_imports_task
+from app.workers.lead_qualification_worker import qualify_leads_task
 
 
 async def pre_generate_messages_task(ctx: dict, campaign_id: str) -> None:
@@ -280,6 +281,7 @@ class WorkerSettings:
         pre_generate_messages_task,
         full_batch_generate_task,
         resolve_imports_task,
+        qualify_leads_task,
     ]
     cron_jobs = []
     queue_name = ARQ_MAIN_QUEUE

@@ -6,6 +6,9 @@ import type {
   ActivityLogListResponse, TimelineResponse, HealthStatus,
   LeadListResponse, AccountRole, BotState,
   ImportStatusResponse, ImportUploadResponse, ProxyTestResult,
+  LeadTargetProfile, LeadTargetProfileCreate, CompileProfileResponse,
+  LeadQualificationEstimate, LeadQualificationFilters, LeadQualificationRun,
+  LeadQualificationResultList,
 } from './types'
 
 // Re-export for consumers
@@ -285,6 +288,85 @@ export const api = {
       })
       if (!res.ok) throw new Error(`Export failed: HTTP ${res.status}`)
       return res.blob()
+    },
+  },
+
+  leadQualification: {
+    profiles: {
+      list: () => request<LeadTargetProfile[]>('/lead-qualification/profiles'),
+      compile: (description: string) =>
+        request<CompileProfileResponse>('/lead-qualification/profiles/compile', {
+          method: 'POST',
+          body: JSON.stringify({ description }),
+        }),
+      create: (data: LeadTargetProfileCreate) =>
+        request<LeadTargetProfile>('/lead-qualification/profiles', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+      get: (id: string) => request<LeadTargetProfile>(`/lead-qualification/profiles/${id}`),
+      update: (id: string, data: Partial<LeadTargetProfileCreate>) =>
+        request<LeadTargetProfile>(`/lead-qualification/profiles/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify(data),
+        }),
+      delete: (id: string) => request<void>(`/lead-qualification/profiles/${id}`, { method: 'DELETE' }),
+    },
+    runs: {
+      estimate: (data: { target_profile_id: string; filters: LeadQualificationFilters }) =>
+        request<LeadQualificationEstimate>('/lead-qualification/runs/estimate', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+      create: (data: { target_profile_id: string; filters: LeadQualificationFilters }) =>
+        request<LeadQualificationRun>('/lead-qualification/runs', {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+      list: (targetProfileId?: string) => {
+        const q = new URLSearchParams()
+        if (targetProfileId) q.set('target_profile_id', targetProfileId)
+        return request<LeadQualificationRun[]>(`/lead-qualification/runs?${q}`)
+      },
+      get: (id: string) => request<LeadQualificationRun>(`/lead-qualification/runs/${id}`),
+      cancel: (id: string) => request<LeadQualificationRun>(`/lead-qualification/runs/${id}/cancel`, { method: 'POST' }),
+    },
+    results: {
+      list: (params?: {
+        target_profile_id?: string
+        run_id?: string
+        status?: string
+        min_score?: number
+        page?: number
+        page_size?: number
+      }) => {
+        const q = new URLSearchParams()
+        if (params?.target_profile_id) q.set('target_profile_id', params.target_profile_id)
+        if (params?.run_id) q.set('run_id', params.run_id)
+        if (params?.status) q.set('status', params.status)
+        if (params?.min_score !== undefined) q.set('min_score', String(params.min_score))
+        if (params?.page) q.set('page', String(params.page))
+        if (params?.page_size) q.set('page_size', String(params.page_size))
+        return request<LeadQualificationResultList>(`/lead-qualification/results?${q}`)
+      },
+      exportBlob: async (params: {
+        target_profile_id: string
+        run_id?: string
+        status?: string
+        min_score?: number
+      }) => {
+        const q = new URLSearchParams()
+        q.set('target_profile_id', params.target_profile_id)
+        if (params.run_id) q.set('run_id', params.run_id)
+        if (params.status) q.set('status', params.status)
+        if (params.min_score !== undefined) q.set('min_score', String(params.min_score))
+        const token = getAuthToken()
+        const res = await fetch(`${BASE_URL}/lead-qualification/results/export?${q}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        })
+        if (!res.ok) throw new Error(`Export failed: HTTP ${res.status}`)
+        return res.blob()
+      },
     },
   },
 

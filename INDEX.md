@@ -45,12 +45,13 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 | Supabase auth fix | Pooler-safe asyncpg + admin dashboard ricreato su Supabase | 2026-05-11 |
 | 7E | Import profili da lista (source_type=import, imported_profiles, resolve worker) | 2026-05-30 |
 | 7F | Scraping avanzato: contatti (phone/email/whatsapp/link) + messaggistica opzionale + cap scraping | 2026-06-06 |
+| 7G | Qualifica lead: target salvabili, scoring deterministico, AI sugli ambigui, export dedicato; migration 015 applicata | 2026-06-08 |
+| 7G fix | Lead qualification hardening: paginazione worker ID-based, cancellazione run, fix _model_used, JSON parse guard | 2026-06-08 |
 
 ### Da fare ☐
 
 | Priorità | Task | Note |
 |---|---|---|
-| **ALTA** | Applicare migrazione 014 a Supabase | `python -m scripts.migrate` con bot fermo; verificare no `idle in transaction` su campaigns/followers |
 | **MEDIA** | Fase 7B: multi-campagna parallela | 1 account = 1 campagna alla volta |
 | **BASSA** | Test unitari | timing, account_manager, ai_personalizer |
 | **BASSA** | Migrazione Alembic | attualmente create_all + inline ALTER |
@@ -98,6 +99,7 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 | `backend/app/services/reply_checker.py` | Cron: scansione inbox DM per risposte |
 | `backend/app/services/bot_state_service.py` | Kill-switch globale halt/resume |
 | `backend/app/services/campaign_control.py` | Pausa/ripresa campagna condivisa da API web e Telegram |
+| `backend/app/services/lead_qualification.py` | Qualifica lead: scoring deterministico, AI compiler/classifier, query candidati |
 | `backend/app/services/work_enqueue.py` | Re-enqueue ARQ condiviso per resume globale |
 | `backend/app/services/recovery_checker.py` | Recovery DM rimasti in `sending` + ripartenza worker DM valido |
 | `backend/app/services/telegram_commands.py` | Comandi Telegram con bottoni inline per campagne + halt/unhalt globale |
@@ -106,12 +108,14 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 | `backend/app/browser/context_manager.py` | Browser pool + mutex per-account + fingerprinting |
 | `backend/app/utils/events.py` | Sistema eventi Redis per live log frontend |
 | `backend/app/workers/task_queue.py` | ARQ config worker DM, funzioni task e pre-gen |
+| `backend/app/workers/lead_qualification_worker.py` | ARQ task per run batch di qualifica lead |
 | `backend/app/workers/cron_worker.py` | Cron ARQ dedicato: reset, stale locks, reply check, recovery `sending`, Telegram |
 | `backend/app/api/campaigns.py` | CRUD + start/pause/resume/stop + pre-gen + approval queue + A/B stats |
 | `backend/app/api/admin.py` | Stato/halt/resume globale admin |
 | `backend/app/api/accounts.py` | CRUD + login/manual-login + metrics + dm-count + force-cancel-cooldown |
 | `backend/app/api/followers.py` | Lista paginata + skip + regenerate + requeue |
 | `backend/app/api/leads.py` | Lead database + export CSV |
+| `backend/app/api/lead_qualification.py` | Target profile, stima run, risultati/export qualifica lead |
 | `backend/app/config.py` | Tutti i parametri configurabili via `.env` |
 | `backend/app/database.py` | Engine DB SQLite/Postgres; Postgres pooler-safe per Supabase |
 
@@ -121,9 +125,9 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 
 | File | Scopo | Aggiornato |
 |---|---|---|
-| `INDEX.md` | Navigazione, stato globale, ordine lettura | 2026-06-06 |
-| `CLAUDE.md` | Architettura completa, stack, schema DB, anti-detection | 2026-06-06 |
-| `docs/project/PROGRESS.md` | Log cronologico implementazioni + riferimento audit | 2026-06-06 |
+| `INDEX.md` | Navigazione, stato globale, ordine lettura | 2026-06-08 |
+| `CLAUDE.md` | Architettura completa, stack, schema DB, anti-detection | 2026-06-08 |
+| `docs/project/PROGRESS.md` | Log cronologico implementazioni + riferimento audit | 2026-06-08 |
 | `docs/audits/AUDIT.md` | Ultimo audit codice — **sempre sovrascritto** | 2026-04-16 |
 | `docs/audits/AUDIT_UNIFICATO.md` | Audit unificato Fase 0/1/2 | 2026-05-18 |
 | `docs/architecture/FUTURE_IMPROVEMENTS.md` | Miglioramenti proposti (da audit v2) | 2026-04-16 |

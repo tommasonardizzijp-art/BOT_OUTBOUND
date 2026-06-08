@@ -1,4 +1,12 @@
 from uuid import uuid4
+from collections import namedtuple
+import platform
+import sys
+
+if sys.platform.startswith("win"):
+    _UnameResult = namedtuple("uname_result", "system node release version machine processor")
+    platform.machine = lambda: "AMD64"
+    platform.uname = lambda: _UnameResult("Windows", "", "", "", "AMD64", "AMD64")
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase

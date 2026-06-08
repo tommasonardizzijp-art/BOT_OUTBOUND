@@ -118,14 +118,23 @@ def _build_conditions(stats_sq, search, campaign_id, has_replied,
         conditions.append(stats_sq.c.is_verified == 1)
     if min_followers is not None:
         conditions.append(stats_sq.c.follower_count >= min_followers)
+    # Temporal filter targets the SCRAPE date (first_seen_at), falling back to
+    # created_at for pre-014 rows. This keeps scraped-but-never-contacted leads
+    # (last_contacted_at=NULL) in range — the point of "estrai contatti scrapati".
+    scraped_at = func.coalesce(GlobalContact.first_seen_at, GlobalContact.created_at)
     if date_from:
         try:
-            conditions.append(GlobalContact.last_contacted_at >= datetime.fromisoformat(date_from))
+            conditions.append(scraped_at >= datetime.fromisoformat(date_from))
         except ValueError:
             pass
     if date_to:
         try:
-            conditions.append(GlobalContact.last_contacted_at <= datetime.fromisoformat(date_to))
+            dt_to = datetime.fromisoformat(date_to)
+            # Bare date (midnight) → make the whole day inclusive.
+            if (dt_to.hour, dt_to.minute, dt_to.second) == (0, 0, 0):
+                conditions.append(scraped_at < dt_to + timedelta(days=1))
+            else:
+                conditions.append(scraped_at <= dt_to)
         except ValueError:
             pass
     return conditions
@@ -182,6 +191,7 @@ def _row_to_lead(row) -> LeadResponse:
         contacts_count=len(history),
         scrape_sources=scrape_sources,
         has_replied=bool(row.has_replied),
+        first_seen_at=gc.first_seen_at,
         last_contacted_at=gc.last_contacted_at,
         created_at=gc.created_at,
     )
@@ -276,7 +286,11 @@ async def list_leads(
             pass
     if date_to:
         try:
-            scraped_q = scraped_q.where(Follower.created_at <= datetime.fromisoformat(date_to))
+            dt_to = datetime.fromisoformat(date_to)
+            if (dt_to.hour, dt_to.minute, dt_to.second) == (0, 0, 0):
+                scraped_q = scraped_q.where(Follower.created_at < dt_to + timedelta(days=1))
+            else:
+                scraped_q = scraped_q.where(Follower.created_at <= dt_to)
         except ValueError:
             pass
     scraped_leads = await db.scalar(scraped_q) or 0
@@ -343,7 +357,7 @@ async def export_leads_csv(
         "follower_count", "following_count", "is_verified",
         "phone", "email", "whatsapp", "external_url", "bio_links",
         "scrape_sources", "scraping_accounts", "contacts_count",
-        "has_replied", "last_contacted_at", "created_at",
+        "has_replied", "first_seen_at", "last_contacted_at", "created_at",
     ])
     writer.writeheader()
 
@@ -366,6 +380,7 @@ async def export_leads_csv(
             "scraping_accounts": ",".join(lead.scraping_accounts),
             "contacts_count": lead.contacts_count,
             "has_replied": "yes" if lead.has_replied else "no",
+            "first_seen_at": lead.first_seen_at.isoformat() if lead.first_seen_at else "",
             "last_contacted_at": lead.last_contacted_at.isoformat() if lead.last_contacted_at else "",
             "created_at": lead.created_at.isoformat(),
         })

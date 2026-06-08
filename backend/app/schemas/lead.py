@@ -24,6 +24,7 @@ class LeadResponse(BaseModel):
     contacts_count: int = 0          # number of times contacted
     scrape_sources: List[str] = []   # target_username of campaigns that scraped this lead
     has_replied: bool = False
+    first_seen_at: Optional[datetime] = None
     last_contacted_at: Optional[datetime] = None
     created_at: datetime
 

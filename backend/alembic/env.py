@@ -1,6 +1,15 @@
 import asyncio
+from collections import namedtuple
+import platform
+import sys
 from uuid import uuid4
 from logging.config import fileConfig
+
+if sys.platform.startswith("win"):
+    _UnameResult = namedtuple("uname_result", "system node release version machine processor")
+    platform.machine = lambda: "AMD64"
+    platform.uname = lambda: _UnameResult("Windows", "", "", "", "AMD64", "AMD64")
+
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config

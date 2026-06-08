@@ -341,6 +341,29 @@ async def enqueue_resolve(campaign_id: str) -> bool:
         await redis.aclose()
 
 
+async def enqueue_lead_qualification(run_id: str) -> bool:
+    """Enqueue a lead qualification batch run."""
+    import arq
+
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        job_id = f"lead-qualification:{run_id}"
+        await redis.delete(
+            f"arq:job:{job_id}",
+            f"arq:retry:{job_id}",
+            f"arq:in-progress:{job_id}",
+        )
+        await redis.enqueue_job(
+            "qualify_leads_task",
+            run_id,
+            _job_id=job_id,
+            _queue_name=ARQ_MAIN_QUEUE,
+        )
+        return True
+    finally:
+        await redis.aclose()
+
+
 async def _enqueue_collection_with_redis(redis, campaign_id: str, source_type: str) -> bool:
     """Enqueue the right profile-collection job for a campaign.
 

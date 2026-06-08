@@ -999,6 +999,70 @@ Così nel log del worker si vede quale account ha fatto ogni singolo lead (prima
 
 ---
 
+## 2026-06-08 — Fase 7G: Qualifica lead target-based
+
+### Obiettivo
+Creare una sezione dedicata per classificare i lead gia consolidati in `global_contacts` rispetto a target descritti dall'utente in linguaggio naturale, senza applicare AI su liste enormi.
+
+### Design e piano
+- Creati:
+  - `docs/superpowers/specs/2026-06-08-lead-qualification-design.md`
+  - `docs/superpowers/plans/2026-06-08-lead-qualification.md`
+- Scelta architetturale: target profile riutilizzabile + AI compiler per generare criteri + scoring deterministico sui lead filtrati + AI solo sugli ambigui.
+
+### Backend implementato
+| File | Contenuto |
+|---|---|
+| `backend/alembic/versions/015_lead_qualification.py` | Migrazione per `lead_target_profiles`, `lead_qualification_runs`, `lead_qualifications` |
+| `backend/app/models/lead_qualification.py` | Modelli ORM + enum run/result |
+| `backend/app/schemas/lead_qualification.py` | Schemi Pydantic per profiles, runs, estimate, results |
+| `backend/app/services/lead_qualification_rules.py` | Normalizzazione compiled rules, hash stabile, JSON helpers |
+| `backend/app/services/lead_qualification.py` | Scoring deterministico, AI compiler, AI classifier ambiguous, query candidati |
+| `backend/app/api/lead_qualification.py` | Router `/api/lead-qualification`: profiles, estimate, runs, results/export |
+| `backend/app/workers/lead_qualification_worker.py` | ARQ `qualify_leads_task`, batch da 100, AI concurrency 2, Telegram completion |
+| `backend/app/services/work_enqueue.py` | `enqueue_lead_qualification(run_id)` |
+| `backend/app/workers/task_queue.py` | Registrato `qualify_leads_task` |
+| `backend/app/main.py` | Registrato router protetto `lead_qualification` |
+
+### Frontend implementato
+| File | Contenuto |
+|---|---|
+| `frontend/lib/types.ts` | Tipi target profile, run, estimate, results |
+| `frontend/lib/api.ts` | Namespace `api.leadQualification` |
+| `frontend/app/lead-qualification/page.tsx` | Pagina dedicata: target, JSON criteri modificabile, filtri, stima, run, risultati, export |
+| `frontend/components/layout/Sidebar.tsx` | Voce "Qualifica lead" |
+
+### Decisioni operative
+- Sorgente dati: solo `global_contacts`.
+- Max run default: 5000 lead.
+- Batch size: 100.
+- AI solo sui lead `ambiguous`, concorrenza 2.
+- Stati risultato: `match`, `no_match`, `ambiguous`, `error`.
+- Export dedicato default: `match` con `confidence_score >= 80`.
+- Skip default: lead gia qualificati con stesso `target_profile_id` + `rules_hash`.
+- Delete target profile: rifiutato se esistono run storiche, per evitare perdita dati.
+
+### Verifica locale eseguita
+- `python -m py_compile` sui nuovi moduli backend: OK.
+- `python -m compileall app alembic scripts`: OK.
+- `npx tsc --noEmit`: OK.
+- `python -m scripts.migrate`: OK, `Migrations applied to head` su Supabase/Postgres.
+- Import runtime `from app.main import app; from app.workers.task_queue import WorkerSettings`: OK.
+- Respawn agente QA separato (`Carver`) per verifica parallela di regressioni/e2e sulle nuove funzioni e sulle superfici toccate.
+- Findings QA corretti:
+  - le run salvano snapshot di descrizione target, `compiled_rules`, `rules_hash` e soglie, quindi non cambiano retroattivamente se il profilo viene modificato;
+  - aggiunto vincolo unico `(run_id, global_contact_id)` e query worker idempotente per evitare duplicati nella stessa run;
+  - `positive_concepts` e `negative_concepts` contribuiscono allo scoring deterministico;
+  - AI review limitata davvero alla finestra `ai_review_min_score` / `ai_review_max_score`;
+  - fallimento AI su ambiguo salvato come risultato `error`.
+- Durante l'esecuzione della migrazione su Windows e' emerso un hang in `platform.uname()`/WMI chiamato indirettamente da SQLAlchemy/asyncpg. Aggiunto workaround locale in `backend/app/database.py`, `backend/alembic/env.py`, `backend/scripts/migrate.py` prima degli import SQLAlchemy.
+
+### Note rollback
+- La feature e' isolata, ma la migrazione 015 e' gia stata applicata: rollback DB tramite `alembic downgrade 014` oppure migration inversa dedicata. A livello codice rimuovere router `lead_qualification`, worker `lead_qualification_worker`, servizi/schemi/modelli `lead_qualification*`, pagina `/lead-qualification`, namespace frontend `leadQualification` e voce sidebar.
+- Non sono stati modificati flussi scraping/DM.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |

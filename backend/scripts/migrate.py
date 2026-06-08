@@ -3,9 +3,16 @@
 Usage from backend/: python -m scripts.migrate
 """
 import sys
+from collections import namedtuple
+import platform
 from pathlib import Path
 
 sys.path.insert(0, ".")
+
+if sys.platform.startswith("win"):
+    _UnameResult = namedtuple("uname_result", "system node release version machine processor")
+    platform.machine = lambda: "AMD64"
+    platform.uname = lambda: _UnameResult("Windows", "", "", "", "AMD64", "AMD64")
 
 
 def main() -> int:

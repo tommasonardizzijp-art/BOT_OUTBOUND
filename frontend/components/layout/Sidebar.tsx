@@ -17,6 +17,7 @@ import {
   Play,
   PauseCircle,
   Activity,
+  Target,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api, getAuthToken, setAuthToken } from '@/lib/api'
@@ -27,6 +28,7 @@ const navItems = [
   { href: '/accounts', label: 'Account IG', icon: Users },
   { href: '/messages', label: 'Messaggi', icon: MessageSquare },
   { href: '/leads', label: 'Leads', icon: Database },
+  { href: '/lead-qualification', label: 'Qualifica lead', icon: Target },
   { href: '/ops', label: 'Ops', icon: Activity },
   { href: '/settings', label: 'Impostazioni', icon: Settings },
   { href: '/guide', label: 'Guida', icon: BookOpen },

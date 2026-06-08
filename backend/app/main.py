@@ -9,7 +9,7 @@ from app.database import setup_pragmas, AsyncSessionLocal
 from app.models.account import InstagramAccount
 from app.models.message import Message, MessageStatus
 from sqlalchemy import select, func
-from app.api import accounts, campaigns, campaign_accounts, followers, messages, dashboard, health, leads, anomalies, auth, admin, ops
+from app.api import accounts, campaigns, campaign_accounts, followers, messages, dashboard, health, leads, anomalies, auth, admin, ops, lead_qualification
 from fastapi import Depends
 from app.utils.auth_deps import get_current_user
 
@@ -92,6 +92,7 @@ app.include_router(messages.router, prefix="/api", dependencies=_protected)
 app.include_router(dashboard.router, prefix="/api", dependencies=_protected)
 app.include_router(health.router, prefix="/api")
 app.include_router(leads.router, prefix="/api", dependencies=_protected)
+app.include_router(lead_qualification.router, prefix="/api", dependencies=_protected)
 app.include_router(anomalies.router, prefix="/api", dependencies=_protected)
 app.include_router(ops.router, prefix="/api", dependencies=_protected)
 app.include_router(admin.router, prefix="/api")

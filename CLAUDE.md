@@ -85,10 +85,12 @@ d:\BOT OUTBOUND\
 │   │   │   ├── messages.py           # Log + retry
 │   │   │   ├── dashboard.py          # Stats, activity feed, timeline
 │   │   │   ├── leads.py              # Lead database + export CSV
+│   │   │   ├── lead_qualification.py # Target profile + run/export qualifica lead
 │   │   │   └── health.py             # Health check sistema
 │   │   ├── services/
 │   │   │   ├── account_manager.py    # Rotazione account, warm-up, cooldown, reset giornaliero; has_scrape_budget/increment_scrape_lookup
 │   │   │   ├── global_contact_service.py  # upsert_lead + merge contatti cross-campagna in global_contacts
+│   │   │   ├── lead_qualification.py # scoring deterministico + AI compiler/classifier per lead
 │   │   │   ├── scraper.py            # instagrapi: login (session restore only), scrape follower/following, fetch bio
 │   │   │   ├── ai_personalizer.py    # Multi-provider LLM: generate, validate, fallback, batch, approval sampling
 │   │   │   ├── dm_sender.py          # Patchright: invio singolo DM
@@ -99,6 +101,7 @@ d:\BOT OUTBOUND\
 │   │   │   └── campaign_control.py   # Controlli condivisi pausa/ripresa campagna (web + Telegram)
 │   │   ├── workers/
 │   │   │   ├── task_queue.py         # ARQ WorkerSettings, funzioni cron
+│   │   │   ├── lead_qualification_worker.py # Task batch qualifica lead
 │   │   │   ├── scrape_worker.py      # Task: scrape_followers_task
 │   │   │   └── message_worker.py     # Task: send_message_task
 │   │   ├── browser/
@@ -231,6 +234,13 @@ Lead database + deduplicazione cross-campagna. Previene di inviare DM due volte 
 - `scrape_sources`: JSON array NOT NULL (default `[]`) — elenco delle sorgenti (campaign_id + timestamp) da cui il profilo è stato visto durante lo scraping, anche senza DM inviato.
 - `first_seen_at`: timestamp del primo scraping (NULL su righe pre-014).
 
+### `lead_target_profiles`, `lead_qualification_runs`, `lead_qualifications`
+Sezione "Qualifica lead" (migrazione 015). Lavora solo sui lead consolidati in `global_contacts`, non sui `followers` grezzi.
+- `lead_target_profiles`: target riutilizzabili descritti in linguaggio naturale, con `compiled_rules` JSON generato/modificabile dall'AI e `rules_hash` stabile.
+- `lead_qualification_runs`: batch filtrati su `global_contacts`, con stato `queued|running|completed|failed|cancelled`, filtri JSON, contatori progressivi e skip dei lead gia classificati con stesso target+rules_hash.
+- `lead_qualifications`: risultati storici per lead+target+run con `deterministic_score`, `ai_score`, `final_score`, stato `match|no_match|ambiguous|error`, segnali JSON e `reason` opzionale.
+- La vista operativa usa l'ultimo risultato per coppia `(target_profile_id, global_contact_id)` senza cancellare lo storico run.
+
 ### `activity_logs`
 Audit trail di tutte le azioni significative: login, scrape, dm_sent, dm_failed, rate_limited, challenge, cooldown_start/end, account_banned.
 
@@ -246,6 +256,7 @@ Variabili chiave:
 - `DATABASE_URL`: **in produzione punta a Supabase Postgres** (`postgresql+asyncpg://...@...pooler.supabase.com...`). Il codice aggiunge automaticamente parametri safe per Supabase Pooler/PgBouncer (`prepared_statement_cache_size=0`, `statement_cache_size=0`, unique prepared statement names, `NullPool`) per evitare `DuplicatePreparedStatementError`.
   - Fallback dev locale: `sqlite+aiosqlite:///./data/bot.db` (relativo a `backend/`). Il codice mantiene i branch SQLite (vedi `app/utils/db_dialect.py`), ma il deployment reale è su Supabase.
   - **Le migrazioni Alembic girano contro Supabase** (`python -m scripts.migrate`). Attenzione: una connessione `idle in transaction` lasciata aperta da un processo bot morto tiene un lock su `campaigns`/`followers` e fa andare in timeout gli `ALTER TABLE` — fermare il bot e/o terminare il backend zombie prima di migrare.
+  - Su Windows Python 3.13 puo' bloccarsi in WMI durante `platform.uname()`/`platform.machine()`, chiamato indirettamente da SQLAlchemy/asyncpg. Per questo `backend/app/database.py`, `backend/alembic/env.py` e `backend/scripts/migrate.py` patchano quelle funzioni prima degli import SQLAlchemy. Non rimuovere senza verificare migrazioni e import runtime.
 - `OLLAMA_MODEL`: nome modello Ollama (usato solo se `AI_PROVIDER=ollama`)
 - `AI_PROVIDER`: `ollama` | `groq` | `gemini` — seleziona provider LLM
 - `AI_API_KEY`: API key del provider cloud (Groq: `gsk_...`, Gemini: `AIza...`)
@@ -254,6 +265,8 @@ Variabili chiave:
 - `AI_SYSTEM_PROMPT`: override system prompt completo (vuoto = usa default ottimizzato hardcoded)
 - `AI_TEMPERATURE`: temperatura sampling, default `0.35` (più bassa = messaggi più consistenti)
 - `SCRAPE_DAILY_LIMIT`: cap lookup `user_info_by_username_v1` per account/giorno durante scraping (default `180`). Override per-campagna disponibile su `campaigns.scrape_daily_limit`. Quando l'account raggiunge il cap, lo scraper ruota su un account alternativo o mette la campagna in pausa (`scrape_capped`).
+- `SCRAPE_PAGE_DELAY_MIN_SECONDS` / `SCRAPE_PAGE_DELAY_MAX_SECONDS`: delay tra le chiamate di **paginazione lista follower** (`user_followers_v1_chunk`), default `25`/`70`. Endpoint #1 per il bot-detection IG → delay lognormale (non uniforme) per non sembrare scriptato. **Importante**: `user_followers_v1_chunk` NON usa `batch_size` — la dimensione pagina la decide IG (~100-200); l'unica leva anti-detection sulla lista è il delay tra pagine + le pause sessione, NON il batch size.
+- `SCRAPE_PAGE_LONG_PAUSE_PROBABILITY` (default `0.08`) + `SCRAPE_PAGE_LONG_PAUSE_MIN/MAX_SECONDS` (default `120`/`300`): pausa lunga occasionale tra pagine, simula distrazione umana. Il vecchio delay fisso 5-15s era troppo veloce/regolare e causava challenge "comportamento automatizzato" su liste 9k+.
 
 ---
 
@@ -407,7 +420,7 @@ Il layer browser in `app/browser/` gestisce:
 - **Lead visto a scrape-time**: ogni profilo scrapato/risolto viene fatto confluire in `global_contacts` via `app/services/global_contact_service.py` (`upsert_lead` + merge gap-fill). Il record diventa visibile nei lead anche prima che venga inviato qualsiasi DM (`last_contacted_at=NULL`). I campi contatto vengono arricchiti a send-time in `campaign_orchestrator._mark_globally_contacted`.
 - **Messaggistica opzionale**: toggle `campaigns.messaging_enabled` — se False, la campagna termina come `completed` dopo lo scraping senza inviare DM. Guard in `/start` e `/start-dm-auto` (HTTP 400 se disattivata o template mancante). Frontend: toggle "Invia messaggi" nel form nuova campagna.
 - **Cap anti-ban per-account**: `SCRAPE_DAILY_LIMIT` (env) + `campaigns.scrape_daily_limit` (override). Contatore `instagram_accounts.scrape_lookups_today` aggiornato dopo ogni `user_info` call; `has_scrape_budget`/`increment_scrape_lookup` in `account_manager.py`. Al raggiungimento del cap, lo scraper/resolver ruota su account alternativo o mette la campagna in pausa (`scrape_capped`). Contatore resettato dal cron `daily_reset`.
-- **Export leads filtrabile**: endpoint `/leads` e `/leads/export` estesi con filtri `campaign_ids[]`, `scraping_account_ids[]`, `has_phone`, `has_email` — nessuna cross-client data leak. Frontend: multi-select filtri + colonne contatto nella pagina leads.
+- **Export leads filtrabile**: endpoint `/leads` e `/leads/export` estesi con filtri `campaign_ids[]`, `scraping_account_ids[]`, `has_phone`, `has_email` — nessuna cross-client data leak. Frontend: multi-select filtri + colonne contatto nella pagina leads. **Filtro temporale su data scraping**: `date_from`/`date_to` filtrano `coalesce(first_seen_at, created_at)` (scrape-date, NON last_contacted — include lead solo-scrapati mai contattati); `date_to` bare-date è inclusivo (`< +1giorno`). Frontend `/leads`: select preset (Sempre/Oggi/Ieri/Ultimi 7gg/30gg/Questo mese/Personalizzato) che calcola il range, oltre ai date-picker custom. Colonna `first_seen_at` nel CSV.
 - **Multi-account round-robin scraping** (Approccio C): con 2+ account `scraping`/`both` su una campagna, il bio-fetch alterna gli account per-lead (`ScrapingPool` in `app/services/scraping_pool.py`), condividendo il carico dall'inizio (prima era sequenziale: A fino al cap, poi B). Tutti gli account vengono pre-loggati una volta e tenuti in memoria (1 slot scraping ciascuno, 1 client con proxy proprio); job singolo seriale, nessun worker parallelo. La paginazione lista resta su 1 account (chiamate cheap); il bio-fetch e la rotazione 429/soft-block usano `pool.next()` (niente re-login per switch). Cap per-account via `pool.next` (salta i capped; tutti a cap → `ScrapeBudgetError`). Il bump in-memory di `scrape_lookups_today` è visibile a `pool.next` grazie a `expire_on_commit=False`. Break **campagna-level** invariato (box "Pausa sessione" + countdown UI preservati). ⚠️ Il delay `bio_fetch_delay` è GLOBALE per-lead: con N account ogni account attende ~N× il valore — la UI lo segnala (helper text nel form nuova campagna e nel modale impostazioni). Compat mono-account: pool di 1 elemento = comportamento identico a prima. **Anche il resolver import** (`import_resolver.py`) usa ora lo stesso `ScrapingPool` round-robin per-riga (rotazione 429/cap via `pool.next`, break campagna-level invariato).
 - **Test connessione per-account**: `app/utils/proxy_probe.py` (`probe_egress(proxy)`) + endpoint `POST /accounts/{id}/test-connection` → IP/ISP/ASN/mobile reali di uscita via proxy dell'account (o WiFi se nessun proxy). Frontend: bottone "Testa IP" + pannello su ogni card account. Verifica al volo che il proxy esca su IP mobile diverso dal WiFi.
 - **Log per-lead round-robin**: `import_resolver.py` e `scraper.py` loggano per ogni lead l'account usato (`[Import] @user -> status via @account` / `[Scraper] @user bio via @account`). ASCII-only (console Windows cp1252).

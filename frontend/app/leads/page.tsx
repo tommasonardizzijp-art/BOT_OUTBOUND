@@ -25,6 +25,45 @@ function formatCount(n: number | null | undefined): string {
   return String(n)
 }
 
+/* ---------- Temporal presets (filter on scrape date) ---------- */
+
+type DatePreset = '' | 'today' | 'yesterday' | 'last7' | 'last30' | 'thisMonth' | 'custom'
+
+const DATE_PRESETS: { value: DatePreset; label: string }[] = [
+  { value: '', label: 'Sempre' },
+  { value: 'today', label: 'Oggi' },
+  { value: 'yesterday', label: 'Ieri' },
+  { value: 'last7', label: 'Ultimi 7 giorni' },
+  { value: 'last30', label: 'Ultimi 30 giorni' },
+  { value: 'thisMonth', label: 'Questo mese' },
+  { value: 'custom', label: 'Personalizzato' },
+]
+
+function fmtLocalDate(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+// Returns {from, to} as YYYY-MM-DD (local). Empty strings = no bound.
+function presetRange(preset: DatePreset): { from: string; to: string } {
+  const today = new Date()
+  const at = (offsetDays: number) => {
+    const d = new Date(today)
+    d.setDate(d.getDate() + offsetDays)
+    return fmtLocalDate(d)
+  }
+  switch (preset) {
+    case 'today': return { from: at(0), to: at(0) }
+    case 'yesterday': return { from: at(-1), to: at(-1) }
+    case 'last7': return { from: at(-6), to: at(0) }
+    case 'last30': return { from: at(-29), to: at(0) }
+    case 'thisMonth': return { from: fmtLocalDate(new Date(today.getFullYear(), today.getMonth(), 1)), to: at(0) }
+    default: return { from: '', to: '' }
+  }
+}
+
 export default function LeadsPage() {
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
@@ -36,9 +75,19 @@ export default function LeadsPage() {
   const [repliedFilter, setRepliedFilter] = useState<'' | 'true' | 'false'>('')
   const [verifiedOnly, setVerifiedOnly] = useState(false)
   const [minFollowers, setMinFollowers] = useState('')
+  const [datePreset, setDatePreset] = useState<DatePreset>('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [expandedId, setExpandedId] = useState<number | null>(null)
+
+  // Preset → compute the date range; 'custom'/'' leave the manual inputs alone.
+  const applyPreset = useCallback((preset: DatePreset) => {
+    setDatePreset(preset)
+    if (preset === 'custom') { setPage(1); return }
+    const { from, to } = presetRange(preset)
+    setDateFrom(from); setDateTo(to)
+    setPage(1)
+  }, [])
 
   // Build shared filter params for both list and export (must match so CSV respects selection).
   const buildFilters = useCallback(() => ({
@@ -207,20 +256,38 @@ export default function LeadsPage() {
               min={0}
               className="bg-gray-800 border-gray-700 text-white text-sm h-8"
             />
-            <Input
-              type="date"
-              placeholder="Data da"
-              value={dateFrom}
-              onChange={e => { setDateFrom(e.target.value); handleFilterChange() }}
-              className="bg-gray-800 border-gray-700 text-white text-sm h-8"
-            />
-            <Input
-              type="date"
-              placeholder="Data a"
-              value={dateTo}
-              onChange={e => { setDateTo(e.target.value); handleFilterChange() }}
-              className="bg-gray-800 border-gray-700 text-white text-sm h-8"
-            />
+            <select
+              value={datePreset}
+              onChange={e => applyPreset(e.target.value as DatePreset)}
+              className="h-8 text-xs bg-gray-800 border border-gray-700 text-gray-300 rounded-md px-2 focus:outline-none focus:ring-1 focus:ring-purple-500"
+              title="Periodo di scraping del contatto"
+            >
+              {DATE_PRESETS.map(p => (
+                <option key={p.value} value={p.value}>Scrapato: {p.label}</option>
+              ))}
+            </select>
+            {datePreset === 'custom' ? (
+              <>
+                <Input
+                  type="date"
+                  placeholder="Scrapato da"
+                  value={dateFrom}
+                  onChange={e => { setDateFrom(e.target.value); handleFilterChange() }}
+                  className="bg-gray-800 border-gray-700 text-white text-sm h-8"
+                />
+                <Input
+                  type="date"
+                  placeholder="Scrapato a"
+                  value={dateTo}
+                  onChange={e => { setDateTo(e.target.value); handleFilterChange() }}
+                  className="bg-gray-800 border-gray-700 text-white text-sm h-8"
+                />
+              </>
+            ) : datePreset !== '' ? (
+              <div className="md:col-span-2 flex items-center text-xs text-gray-500 px-1">
+                {dateFrom === dateTo ? `Scrapati il ${dateFrom}` : `Scrapati dal ${dateFrom} al ${dateTo}`}
+              </div>
+            ) : null}
           </div>
           <div className="flex items-center gap-4 mt-3 flex-wrap">
             <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
@@ -258,7 +325,7 @@ export default function LeadsPage() {
                 onClick={() => {
                   setSearch(''); setCampaignFilter(''); setCampaignIds([]); setScrapingAccountIds([])
                   setHasPhone(false); setHasEmail(false); setRepliedFilter('')
-                  setVerifiedOnly(false); setMinFollowers(''); setDateFrom(''); setDateTo('')
+                  setVerifiedOnly(false); setMinFollowers(''); setDatePreset(''); setDateFrom(''); setDateTo('')
                   setPage(1)
                 }}
               >

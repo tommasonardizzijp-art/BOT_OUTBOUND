@@ -324,6 +324,7 @@ export interface Lead {
   contacts_count: number
   scrape_sources: string[]
   has_replied: boolean
+  first_seen_at: string | null
   last_contacted_at: string | null
   created_at: string
 }
@@ -349,6 +350,132 @@ export interface LeadListResponse {
   page: number
   page_size: number
   insights: LeadInsights
+}
+
+// Lead qualification
+export type LeadQualificationRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type LeadQualificationStatus = 'match' | 'no_match' | 'ambiguous' | 'error'
+
+export interface CompiledLeadRules {
+  target_label: string
+  language_hints: string[]
+  positive_terms: string[]
+  strong_terms: string[]
+  negative_terms: string[]
+  positive_concepts: string[]
+  negative_concepts: string[]
+  field_weights: Record<string, number>
+  score_rules: Record<string, number>
+}
+
+export interface LeadTargetProfile {
+  id: string
+  name: string
+  description: string
+  compiled_rules: CompiledLeadRules
+  rules_hash: string
+  pass_threshold: number
+  reject_threshold: number
+  ai_review_min_score: number
+  ai_review_max_score: number
+  max_run_size: number
+  created_at: string
+  updated_at: string
+}
+
+export interface LeadTargetProfileCreate {
+  name: string
+  description: string
+  compiled_rules: CompiledLeadRules
+  pass_threshold?: number
+  reject_threshold?: number
+  ai_review_min_score?: number
+  ai_review_max_score?: number
+  max_run_size?: number
+}
+
+export interface CompileProfileResponse {
+  name_suggestion: string
+  compiled_rules: CompiledLeadRules
+  pass_threshold: number
+  reject_threshold: number
+  ai_review_min_score: number
+  ai_review_max_score: number
+  max_run_size: number
+}
+
+export interface LeadQualificationFilters {
+  date_from?: string
+  date_to?: string
+  campaign_ids?: string[]
+  scraping_account_ids?: string[]
+  has_phone?: boolean
+  has_email?: boolean
+  min_followers?: number
+  max_leads?: number
+  skip_existing_same_rules?: boolean
+}
+
+export interface LeadQualificationEstimate {
+  candidate_count: number
+  already_qualified_same_rules: number
+  will_process: number
+  over_limit: boolean
+  max_run_size: number
+}
+
+export interface LeadQualificationRun {
+  id: string
+  target_profile_id: string
+  target_profile_name: string | null
+  filters: LeadQualificationFilters
+  rules_hash: string
+  status: LeadQualificationRunStatus
+  total_candidates: number
+  skipped_existing: number
+  processed_count: number
+  matched_count: number
+  no_match_count: number
+  ambiguous_count: number
+  ai_reviewed_count: number
+  error_count: number
+  started_at: string | null
+  completed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface LeadQualificationResult {
+  id: string
+  target_profile_id: string
+  target_profile_name: string
+  run_id: string
+  ig_user_id: number
+  username: string | null
+  full_name: string | null
+  biography: string | null
+  phone: string | null
+  email: string | null
+  whatsapp: string | null
+  external_url: string | null
+  bio_links: { url: string; title: string | null }[]
+  status: LeadQualificationStatus
+  confidence_score: number
+  deterministic_score: number
+  ai_score: number | null
+  ai_used: boolean
+  matched_signals: unknown[]
+  negative_signals: unknown[]
+  reason: string | null
+  first_seen_at: string | null
+  created_at: string
+}
+
+export interface LeadQualificationResultList {
+  items: LeadQualificationResult[]
+  total: number
+  page: number
+  page_size: number
 }
 
 // Worker events (real-time log feed)
