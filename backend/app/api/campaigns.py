@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from loguru import logger
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, UploadFile, File
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, func
 from app.database import get_db
@@ -416,12 +417,16 @@ async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
     await db.refresh(campaign)
 
     try:
-        from app.services.work_enqueue import enqueue_scrape, enqueue_resolve
+        from app.services.work_enqueue import enqueue_resolve, enqueue_list
 
         if is_import:
             await enqueue_resolve(campaign_id)
         else:
-            await enqueue_scrape(campaign_id)
+            # source_type=scrape ora usa la Fase Lista (two-phase). Imposta listing.
+            campaign.status = CampaignStatus.listing
+            campaign.updated_at = datetime.utcnow()
+            await db.commit()
+            await enqueue_list(campaign_id)
     except Exception as exc:
         campaign.status = CampaignStatus.draft
         campaign.updated_at = datetime.utcnow()
@@ -439,6 +444,101 @@ async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
             "Controlla Redis e il worker, poi riprova.",
         ) from exc
 
+    return await _enrich_campaign(campaign, db, include_today=True)
+
+
+class PhaseStartBody(BaseModel):
+    target: int | None = None
+
+
+@router.post("/{campaign_id}/list/start", response_model=CampaignResponse)
+async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: AsyncSession = Depends(get_db)):
+    campaign = await _get_or_404(campaign_id, db)
+    if campaign.source_type == "import":
+        raise HTTPException(status_code=400, detail="Le campagne import non usano la Fase Lista (usa la risoluzione).")
+    if campaign.status not in (
+        CampaignStatus.draft, CampaignStatus.ready, CampaignStatus.paused,
+        CampaignStatus.error, CampaignStatus.listing_break,
+    ):
+        raise HTTPException(status_code=400, detail="La Fase Lista parte da draft/ready/paused/error/listing_break")
+    try:
+        await ensure_bot_accepts_work(db)
+    except CampaignControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not await has_active_role_account(db, campaign_id, ("scraping", "both"), (AccountStatus.active,)):
+        raise HTTPException(status_code=400, detail="Nessun account attivo con ruolo scraping o 'entrambi'.")
+    if not await _check_redis_reachable():
+        raise HTTPException(status_code=503, detail="Redis non raggiungibile.")
+    if body and body.target is not None:
+        campaign.list_target = body.target
+    campaign.status = CampaignStatus.listing
+    campaign.updated_at = datetime.utcnow()
+    db.add(ActivityLog(campaign_id=campaign.id, action="list_started"))
+    await db.commit()
+    await db.refresh(campaign)
+    from app.services.work_enqueue import enqueue_list
+    await enqueue_list(campaign_id)
+    return await _enrich_campaign(campaign, db, include_today=True)
+
+
+@router.post("/{campaign_id}/list/stop", response_model=CampaignResponse)
+async def stop_list(campaign_id: str, db: AsyncSession = Depends(get_db)):
+    campaign = await _get_or_404(campaign_id, db)
+    if campaign.status not in (CampaignStatus.listing, CampaignStatus.listing_break):
+        raise HTTPException(status_code=400, detail="La Fase Lista non e' attiva")
+    campaign.status = CampaignStatus.paused
+    campaign.scrape_break_until = None
+    campaign.updated_at = datetime.utcnow()
+    db.add(ActivityLog(campaign_id=campaign.id, action="list_stopped"))
+    await db.commit()
+    return await _enrich_campaign(campaign, db, include_today=True)
+
+
+@router.post("/{campaign_id}/bios/start", response_model=CampaignResponse)
+async def start_bios(campaign_id: str, body: PhaseStartBody | None = None, db: AsyncSession = Depends(get_db)):
+    campaign = await _get_or_404(campaign_id, db)
+    if campaign.status not in (
+        CampaignStatus.ready, CampaignStatus.paused, CampaignStatus.error, CampaignStatus.scraping_break,
+    ):
+        raise HTTPException(status_code=400, detail="La Fase Bio parte da ready/paused/error/scraping_break")
+    pending = await db.scalar(
+        select(func.count(Follower.id)).where(
+            Follower.campaign_id == campaign_id,
+            Follower.status == FollowerStatus.pending,
+        )
+    ) or 0
+    if pending == 0:
+        raise HTTPException(status_code=400, detail="Nessun follower in lista da scrapare. Avvia prima la Fase Lista.")
+    try:
+        await ensure_bot_accepts_work(db)
+    except CampaignControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not await has_active_role_account(db, campaign_id, ("scraping", "both"), (AccountStatus.active,)):
+        raise HTTPException(status_code=400, detail="Nessun account attivo con ruolo scraping o 'entrambi'.")
+    if not await _check_redis_reachable():
+        raise HTTPException(status_code=503, detail="Redis non raggiungibile.")
+    if body and body.target is not None:
+        campaign.bio_target = body.target
+    campaign.status = CampaignStatus.scraping
+    campaign.updated_at = datetime.utcnow()
+    db.add(ActivityLog(campaign_id=campaign.id, action="bios_started"))
+    await db.commit()
+    await db.refresh(campaign)
+    from app.services.work_enqueue import enqueue_bios
+    await enqueue_bios(campaign_id)
+    return await _enrich_campaign(campaign, db, include_today=True)
+
+
+@router.post("/{campaign_id}/bios/stop", response_model=CampaignResponse)
+async def stop_bios(campaign_id: str, db: AsyncSession = Depends(get_db)):
+    campaign = await _get_or_404(campaign_id, db)
+    if campaign.status not in (CampaignStatus.scraping, CampaignStatus.scraping_break):
+        raise HTTPException(status_code=400, detail="La Fase Bio non e' attiva")
+    campaign.status = CampaignStatus.paused
+    campaign.scrape_break_until = None
+    campaign.updated_at = datetime.utcnow()
+    db.add(ActivityLog(campaign_id=campaign.id, action="bios_stopped"))
+    await db.commit()
     return await _enrich_campaign(campaign, db, include_today=True)
 
 
