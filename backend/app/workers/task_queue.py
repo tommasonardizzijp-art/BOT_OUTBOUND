@@ -2,6 +2,8 @@
 from arq.worker import func
 from app.services.work_enqueue import ARQ_MAIN_QUEUE, arq_redis_settings
 from app.workers.scrape_worker import scrape_followers_task
+from app.workers.list_worker import list_followers_task
+from app.workers.bio_worker import scrape_bios_task
 from app.workers.message_worker import run_campaign_task
 from app.workers.import_worker import resolve_imports_task
 from app.workers.lead_qualification_worker import qualify_leads_task
@@ -277,6 +279,8 @@ async def on_startup(ctx: dict) -> None:
 class WorkerSettings:
     functions = [
         scrape_followers_task,
+        list_followers_task,
+        scrape_bios_task,
         func(run_campaign_task, max_tries=10000),
         pre_generate_messages_task,
         full_batch_generate_task,
