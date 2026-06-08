@@ -386,8 +386,9 @@ async def _scrape_paginated(pool, campaign: Campaign, db, scrape_mode: str = 'fo
 
             # Human-like delay between follower-LIST pagination calls.
             # This endpoint is the #1 IG bot-detection target — slow + irregular.
-            # Lognormal jitter (not uniform) so the cadence never looks scripted,
-            # plus an occasional long "distraction" pause as a real user would.
+            # Uniform draw in the configured range is sufficient at 5-10 s; the
+            # lognormal complexity bought nothing and clamped ~46% of samples to lo.
+            # An occasional long "distraction" pause is kept for realism.
             from app.config import settings as _s
             if random.random() < _s.list_long_pause_probability:
                 delay = random.uniform(
@@ -396,11 +397,8 @@ async def _scrape_paginated(pool, campaign: Campaign, db, scrape_mode: str = 'fo
                 )
                 logger.info(f"[Scraper] Pausa lunga {delay:.0f}s tra pagine (simulazione distrazione umana)")
             else:
-                lo = _s.list_page_delay_min_seconds
-                hi = _s.list_page_delay_max_seconds
-                mid = (lo + hi) / 2
-                # lognormal centered near mid, clamped to [lo, hi]
-                delay = min(hi, max(lo, random.lognormvariate(0, 0.45) * mid * 0.7))
+                # Uniform in [list_page_delay_min_seconds, list_page_delay_max_seconds]
+                delay = random.uniform(_s.list_page_delay_min_seconds, _s.list_page_delay_max_seconds)
             await asyncio.sleep(delay)
 
             # Fetch a batch of followers/following (batch_size re-randomized per page)
