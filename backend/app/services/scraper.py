@@ -42,6 +42,48 @@ from app.services.account_manager import has_scrape_budget, increment_scrape_loo
 from app.utils.exceptions import ScrapeBudgetError
 
 
+def is_challenge_exception(exc: Exception) -> bool:
+    """instagrapi usa nomi classe che contengono 'Challenge' per checkpoint/2FA."""
+    return "Challenge" in type(exc).__name__
+
+
+async def isolate_challenged_account(db, campaign, account, exc: Exception) -> None:
+    """Isola l'account challenged e mette la campagna in pausa (riprendibile).
+
+    Usata da Fase Lista e Fase Bio: una challenge IG NON deve lasciare l'account
+    'active' (ogni retry rifallirebbe) ne' mandare la campagna in 'error' secco.
+    """
+    from sqlalchemy import select
+    from app.models.account import InstagramAccount, AccountStatus
+    from app.models.activity_log import ActivityLog
+    from app.utils.events import emit as emit_event
+
+    exc_name = type(exc).__name__
+    acc = None
+    if account is not None:
+        acc = (await db.execute(
+            select(InstagramAccount).where(InstagramAccount.id == account.id)
+        )).scalar_one_or_none()
+    acc_label = acc.username if acc else "?"
+    if acc:
+        acc.status = AccountStatus.challenge_required
+    campaign.status = CampaignStatus.paused
+    campaign.scrape_outcome = "challenge"
+    campaign.updated_at = datetime.utcnow()
+    db.add(ActivityLog(
+        campaign_id=campaign.id,
+        action="challenge",
+        details=json.dumps({"account": acc_label, "exc": exc_name}),
+    ))
+    await db.commit()
+    logger.error(f"[Scraper] Challenge IG su @{acc_label} ({exc_name}) — account isolato, campagna in pausa")
+    emit_event(
+        campaign.id, "scrape_stopped",
+        f"Instagram richiede verifica su @{acc_label}. Risolvi la challenge (app/web IG), poi ri-login browser e riavvia.",
+        level="error",
+    )
+
+
 async def scrape_followers(campaign_id: str) -> None:
     """
     Main entry point. Called by the ARQ worker.
@@ -221,39 +263,8 @@ async def scrape_followers(campaign_id: str) -> None:
             emit_event(campaign_id, "scrape_stopped", f"Scraping non avviato: {e}", level="error")
 
         except Exception as e:
-            # Instagram challenge/checkpoint during scraping (es. risoluzione target
-            # o paginazione): instagrapi usa nomi classe che contengono "Challenge".
-            # Va isolato l'account (challenge_required) — non lasciarlo 'active' o
-            # ogni retry rifallisce identico. La campagna va in pausa, non error,
-            # cosi' e' riprendibile dopo che l'operatore risolve la verifica IG.
-            exc_name = type(e).__name__
-            challenged_id = locals().get("account")
-            challenged_id = getattr(challenged_id, "id", None)
-            if "Challenge" in exc_name and challenged_id:
-                acc = (await db.execute(
-                    select(InstagramAccount).where(InstagramAccount.id == challenged_id)
-                )).scalar_one_or_none()
-                acc_label = acc.username if acc else challenged_id[:8]
-                if acc:
-                    acc.status = AccountStatus.challenge_required
-                campaign.status = CampaignStatus.paused
-                campaign.scrape_outcome = "challenge"
-                campaign.updated_at = datetime.utcnow()
-                db.add(ActivityLog(
-                    campaign_id=campaign_id,
-                    action="challenge",
-                    details=json.dumps({"account": acc_label, "exc": exc_name}),
-                ))
-                await db.commit()
-                logger.error(
-                    f"[Scraper] Challenge IG su @{acc_label} ({exc_name}) — account isolato, campagna in pausa"
-                )
-                emit_event(
-                    campaign_id, "scrape_stopped",
-                    f"Instagram richiede verifica su @{acc_label}. "
-                    "Risolvi la challenge (app/web IG), poi ri-login browser e riavvia.",
-                    level="error",
-                )
+            if is_challenge_exception(e) and locals().get("account") is not None:
+                await isolate_challenged_account(db, campaign, locals().get("account"), e)
             else:
                 logger.error(f"Scrape failed for campaign {campaign_id}: {e}")
                 campaign.status = CampaignStatus.error
