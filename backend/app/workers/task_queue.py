@@ -103,8 +103,9 @@ async def daily_reset(ctx: dict) -> None:
     from app.database import AsyncSessionLocal
     from app.models.account import InstagramAccount, AccountStatus
     from app.models.campaign import Campaign, CampaignStatus
-    from app.services.work_enqueue import enqueue_dm_workers_with_redis
-    from sqlalchemy import select, update
+    from app.models.follower import Follower, FollowerStatus
+    from app.services.work_enqueue import enqueue_dm_workers_with_redis, enqueue_bios
+    from sqlalchemy import select, update, func
     from datetime import datetime
     from loguru import logger
 
@@ -150,6 +151,33 @@ async def daily_reset(ctx: dict) -> None:
             logger.info(
                 f"[Cron] Restarted {enqueued} staggered worker(s) for campaign '{campaign.name}'"
             )
+
+        # ── Restart Fase Bio capped by daily cap ──────────────────────────
+        # La Fase Bio si mette in pausa (scrape_capped) al raggiungimento del cap
+        # lookup giornaliero. Dopo il reset del contatore, se restano follower
+        # pending la riavviamo automaticamente.
+        capped = await db.execute(
+            select(Campaign).where(
+                Campaign.status == CampaignStatus.paused,
+                Campaign.scrape_outcome == "scrape_capped",
+            )
+        )
+        for campaign in capped.scalars().all():
+            has_pending = await db.scalar(
+                select(func.count(Follower.id)).where(
+                    Follower.campaign_id == campaign.id,
+                    Follower.status == FollowerStatus.pending,
+                )
+            )
+            if has_pending:
+                campaign.status = CampaignStatus.scraping
+                campaign.scrape_outcome = None
+                campaign.updated_at = datetime.utcnow()
+                await db.commit()
+                await enqueue_bios(campaign.id)
+                logger.info(
+                    f"[Cron] Restarted Fase Bio for capped campaign '{campaign.name}'"
+                )
 
     logger.info("[Cron] daily_reset: done")
 

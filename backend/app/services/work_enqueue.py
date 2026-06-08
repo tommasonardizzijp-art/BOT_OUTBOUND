@@ -467,6 +467,8 @@ async def reenqueue_active_work() -> dict[str, int]:
                 select(Campaign).where(
                     Campaign.status.in_(
                         (
+                            CampaignStatus.listing,
+                            CampaignStatus.listing_break,
                             CampaignStatus.scraping,
                             CampaignStatus.scraping_and_running,
                             CampaignStatus.scraping_break,
@@ -478,7 +480,13 @@ async def reenqueue_active_work() -> dict[str, int]:
             campaigns = result.scalars().all()
 
             for campaign in campaigns:
-                if campaign.status == CampaignStatus.scraping_break:
+                if campaign.status == CampaignStatus.listing_break:
+                    campaign.status = CampaignStatus.listing
+                    campaign.scrape_break_until = None
+                    campaign.scrape_break_prev_status = None
+                    campaign.updated_at = datetime.utcnow()
+                    counts["breaks_restored"] += 1
+                elif campaign.status == CampaignStatus.scraping_break:
                     prev = campaign.scrape_break_prev_status or CampaignStatus.scraping.value
                     if prev not in {CampaignStatus.scraping.value, CampaignStatus.scraping_and_running.value}:
                         prev = CampaignStatus.scraping.value
@@ -493,7 +501,19 @@ async def reenqueue_active_work() -> dict[str, int]:
 
             for campaign in campaigns:
                 status = campaign.status
-                if status in (CampaignStatus.scraping, CampaignStatus.scraping_and_running):
+                if status == CampaignStatus.listing:
+                    # Fase Lista (two-phase): raccolta info base follower.
+                    await _enqueue_list_with_redis(redis, campaign.id)
+                    counts["scrape_jobs"] += 1
+                elif status == CampaignStatus.scraping:
+                    # source_type=scrape ora = Fase Bio; import resta resolve.
+                    if campaign.source_type == "import":
+                        await _enqueue_collection_with_redis(redis, campaign.id, campaign.source_type)
+                    else:
+                        await _enqueue_bios_with_redis(redis, campaign.id)
+                    counts["scrape_jobs"] += 1
+                elif status == CampaignStatus.scraping_and_running:
+                    # Legacy parallelo scrape+DM.
                     await _enqueue_collection_with_redis(redis, campaign.id, campaign.source_type)
                     counts["scrape_jobs"] += 1
                 if status in (CampaignStatus.running, CampaignStatus.scraping_and_running):
