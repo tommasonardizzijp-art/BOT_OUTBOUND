@@ -8,6 +8,8 @@ import enum
 
 class CampaignStatus(str, enum.Enum):
     draft = "draft"
+    listing = "listing"
+    listing_break = "listing_break"
     scraping = "scraping"
     scraping_break = "scraping_break"
     scraping_and_running = "scraping_and_running"
@@ -60,6 +62,8 @@ class Campaign(Base):
     scrape_break_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     scrape_break_prev_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     scrape_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    list_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bio_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 'completed' | 'partial' | 'rate_limited' — esito ultimo scraping
     scrape_outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)
     scrape_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
