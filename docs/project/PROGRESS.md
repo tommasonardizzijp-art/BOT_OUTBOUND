@@ -1063,6 +1063,28 @@ Creare una sezione dedicata per classificare i lead gia consolidati in `global_c
 
 ---
 
+## 2026-06-09 — Two-phase scraping (Fase Lista + Fase Bio)
+
+Separato lo scraping `source_type='scrape'` in due fasi indipendenti per eliminare i challenge "comportamento automatizzato" sull'estrazione lista di pagine grandi (9k+).
+
+**Root cause**: `user_followers_v1_chunk(max_amount=0)` drenava l'intera lista in un burst `count=200` senza delay. Fix: passare `max_amount=random(20,40)` → vere pagine piccole pagate dal delay lognormale.
+
+**Cosa è stato fatto**:
+- **Fase Lista** (`scrape_list.py`, worker `list_followers_task`, stati `listing`/`listing_break`): blocchetti paced, crea `Follower(pending)` con info base, nessun `user_info_v1` (no cap).
+- **Fase Bio** (`scrape_bios.py`, worker `scrape_bios_task`, stati `scraping`/`scraping_break`): `pending`→`user_info_v1`→`bio_scraped` sotto cap; helper estratto `fetch_and_store_bio` ritorna `(outcome, account_used, error)` per isolare l'account giusto su challenge (bug round-robin doppio `pool.next` corretto in review).
+- Endpoint `POST /campaigns/{id}/list/start|stop`, `/bios/start|stop` (body `{target}`); `start-scrape` instrada scrape→Fase Lista.
+- Colonne `campaigns.list_target`/`bio_target` (migrazione `016`); `CampaignResponse.list_progress`/`bio_progress` via `compute_phase_progress`.
+- Config: cap `SCRAPE_DAILY_LIMIT` 180→300; nuovi `LIST_PAGE_SIZE_*`, `LIST_PAGE_DELAY_*`, `LIST_LONG_PAUSE_*`.
+- Worker `task_queue.py` (8 functions); enqueue `enqueue_list`/`enqueue_bios` (job-id `list:`/`bios:`); `reenqueue_active_work` + `daily_reset` gestiscono i nuovi stati e il restart Fase Bio capped; startup-guard include `listing`/`listing_break`.
+- Frontend: stati + api (`startList/stopList/startBios/stopBios`), `TwoPhasePanel` (due card con target+progress) nel dettaglio campagna, label badge `listing`/`listing_break`.
+- Challenge handler condiviso `is_challenge_exception`/`isolate_challenged_account` (scraper.py) — isola solo l'account colpito.
+
+**Comportamento atteso**: avvio scraping → Fase Lista a blocchetti 20-40 con pause naturali (nessun burst). A lista pronta (`ready`) si avvia la Fase Bio sotto cap. Pause sessione e cap restano per-account; recovery/daily_reset riavviano automaticamente. Import e flusso DM invariati. Suite: 112 passed.
+
+**File**: `backend/app/services/{scrape_list,scrape_bios,scraper,work_enqueue}.py`, `backend/app/workers/{list_worker,bio_worker,task_queue}.py`, `backend/app/{config,models/campaign,schemas/campaign,api/campaigns}.py`, `backend/alembic/versions/016_two_phase_scraping.py`, `frontend/lib/{types,api}.ts`, `frontend/app/campaigns/[id]/page.tsx`, `frontend/app/campaigns/page.tsx`. Piano: `docs/superpowers/plans/2026-06-09-two-phase-scraping.md`.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |

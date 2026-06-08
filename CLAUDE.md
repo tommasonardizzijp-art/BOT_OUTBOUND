@@ -178,9 +178,12 @@ Stato degli account Instagram usati per inviare DM.
 ### `campaigns`
 Una campagna = una sorgente di profili + un template messaggio.
 - `source_type`: `'scrape'` (default) | `'import'`. `scrape` = raccoglie follower/following di `target_username`; `import` = profili caricati da file (vedi `imported_profiles`). Per `import`, `target_username` è NULL (reso nullable in migrazione 013); UI/query che lo assumono presente devono fare guardia su `source_type`.
-- `status` enum: `draft → scraping → scraping_break | scraping_and_running → ready → running → paused → completed | error`
-  - `scraping_break`: scraper in pausa sessione (con countdown), riprendibile manualmente
-  - `scraping_and_running`: scraper + worker DM attivi simultaneamente (account separati per ruolo)
+- `status` enum: `draft → listing → listing_break → ready → scraping → scraping_break | scraping_and_running → running → paused → completed | error`
+  - `listing`: **Fase Lista** (two-phase) — raccolta info base dei follower a blocchetti paced, nessun `user_info_v1` (no consumo cap)
+  - `listing_break`: Fase Lista in pausa sessione (con countdown), riprendibile manualmente
+  - `scraping`: per `source_type='scrape'` ora indica la **Fase Bio** (estrazione bio/contatti dai follower `pending`); per `source_type='import'` indica la risoluzione
+  - `scraping_break`: scraper/bio in pausa sessione (con countdown), riprendibile manualmente
+  - `scraping_and_running`: legacy scraper + worker DM attivi simultaneamente (account separati per ruolo)
 - `total_followers` / `messages_sent/failed/pending`: contatori denormalizzati per performance UI
 - `base_message_template`: template principale (ora **nullable** — NULL consentito quando `messaging_enabled=False`; non può essere vuoto/NULL se `messaging_enabled=True`)
 - `message_template_b`: template B opzionale per A/B testing (M10)
@@ -195,6 +198,8 @@ Una campagna = una sorgente di profili + un template messaggio.
 - `scrape_break_prev_status`: status da ripristinare al termine della pausa
 - `messaging_enabled`: bool (default True) — se False, la campagna fa solo scraping/raccolta contatti senza inviare DM; `/start` e `/start-dm-auto` restituiscono 400 se disattivata. Campagne scraping-only terminano in `completed` al termine dello scraping.
 - `scrape_daily_limit`: int nullable — override del cap lookup per questa campagna (sovrascrive `SCRAPE_DAILY_LIMIT` da `.env`). NULL = usa il default globale.
+- `list_target`: int nullable — target di follower da raccogliere nella Fase Lista (NULL = tutta la lista). Stop manuale sempre disponibile.
+- `bio_target`: int nullable — target di bio da estrarre nella Fase Bio (NULL = tutti i `pending`). Stop manuale sempre disponibile.
 
 ### `campaign_accounts`
 Join table campagne ↔ account Instagram.
@@ -264,9 +269,10 @@ Variabili chiave:
 - `AI_BASE_URL`: override endpoint OpenAI-compatible (vuoto = default provider)
 - `AI_SYSTEM_PROMPT`: override system prompt completo (vuoto = usa default ottimizzato hardcoded)
 - `AI_TEMPERATURE`: temperatura sampling, default `0.35` (più bassa = messaggi più consistenti)
-- `SCRAPE_DAILY_LIMIT`: cap lookup `user_info_by_username_v1` per account/giorno durante scraping (default `180`). Override per-campagna disponibile su `campaigns.scrape_daily_limit`. Quando l'account raggiunge il cap, lo scraper ruota su un account alternativo o mette la campagna in pausa (`scrape_capped`).
-- `SCRAPE_PAGE_DELAY_MIN_SECONDS` / `SCRAPE_PAGE_DELAY_MAX_SECONDS`: delay tra le chiamate di **paginazione lista follower** (`user_followers_v1_chunk`), default `25`/`70`. Endpoint #1 per il bot-detection IG → delay lognormale (non uniforme) per non sembrare scriptato. **Importante**: `user_followers_v1_chunk` NON usa `batch_size` — la dimensione pagina la decide IG (~100-200); l'unica leva anti-detection sulla lista è il delay tra pagine + le pause sessione, NON il batch size.
-- `SCRAPE_PAGE_LONG_PAUSE_PROBABILITY` (default `0.08`) + `SCRAPE_PAGE_LONG_PAUSE_MIN/MAX_SECONDS` (default `120`/`300`): pausa lunga occasionale tra pagine, simula distrazione umana. Il vecchio delay fisso 5-15s era troppo veloce/regolare e causava challenge "comportamento automatizzato" su liste 9k+.
+- `SCRAPE_DAILY_LIMIT`: cap lookup `user_info_v1` per account/giorno durante la **Fase Bio** (default `300`). Override per-campagna disponibile su `campaigns.scrape_daily_limit`. La Fase Lista NON consuma cap (nessun `user_info`). Quando l'account raggiunge il cap, la Fase Bio ruota su un account alternativo o mette la campagna in pausa (`scrape_capped`); il cron `daily_reset` la riavvia dopo il reset del contatore se restano follower `pending`.
+- **Fase Lista** — `LIST_PAGE_SIZE_MIN`/`LIST_PAGE_SIZE_MAX` (default `20`/`40`): dimensione pagina randomizzata passata come `max_amount` a `user_followers_v1_chunk`. **CRITICO**: con `max_amount=0` instagrapi drena l'intera lista in un burst `count=200` senza delay → challenge IG "comportamento automatizzato". Passando un `max_amount` piccolo ogni chiamata ritorna pochi utenti e i delay sotto agiscono (scroll umano). Questa è la vera leva anti-detection sulla lista (sostituisce il vecchio modello "il batch size lo decide IG").
+- `LIST_PAGE_DELAY_MIN_SECONDS`/`LIST_PAGE_DELAY_MAX_SECONDS` (default `5`/`10`): delay lognormale tra pagine lista.
+- `LIST_LONG_PAUSE_PROBABILITY` (default `0.06`) + `LIST_LONG_PAUSE_MIN/MAX_SECONDS` (default `30`/`60`): pausa lunga occasionale tra pagine (scroll che si ferma), simula distrazione umana.
 
 ---
 
@@ -414,6 +420,14 @@ Il layer browser in `app/browser/` gestisce:
   - `/unhalt` disattiva il kill-switch globale e riaccoda solo il lavoro ancora in stato attivo.
 - `campaign_control.py` centralizza pausa/ripresa per API web e Telegram, con pre-check Redis prima di portare una campagna a running.
 - Problemi su singolo account non fermano tutto il bot: `cooldown`, `challenge_required` e `banned` isolano l'account; vengono pausate solo le campagne che non hanno altri account DM utilizzabili. Il kill-switch resta per problemi sistemici o comando manuale.
+
+### Two-phase scraping: Fase Lista + Fase Bio (✅ IMPLEMENTATA)
+Lo scraping `source_type='scrape'` è separato in due fasi indipendenti, ognuna avviabile/fermabile con target opzionale. Risolve i challenge "comportamento automatizzato" che colpivano l'estrazione lista su pagine grandi (9k+).
+- **Fase Lista** (`app/services/scrape_list.py`, worker `list_followers_task`, stato `listing`/`listing_break`): pagina la lista follower/following a blocchetti `random(20,40)` passati come `max_amount` a `user_followers_v1_chunk`, crea `Follower(status=pending)` con sole info base (username, full_name, pic, flags). NON chiama `user_info_v1` → nessun consumo di cap. Delay lognormale 5-10s tra pagine + pausa lunga occasionale. Rispetta `campaign.list_target`. Endpoint: `POST /campaigns/{id}/list/start` (body `{target}`), `/list/stop`.
+- **Fase Bio** (`app/services/scrape_bios.py`, worker `scrape_bios_task`, stato `scraping`/`scraping_break`): cicla i `Follower(status=pending)`, per ognuno `user_info_v1` → bio+contatti → `bio_scraped`, sotto cap, con `bio_target`, session break, rotazione `ScrapingPool`. Riusa l'helper estratto `fetch_and_store_bio` (scraper.py) che ritorna `(outcome, account_used, error)` — l'account reale usato serve a isolare quello giusto su challenge con la rotazione round-robin. Endpoint: `POST /campaigns/{id}/bios/start` (body `{target}`), `/bios/stop`.
+- `POST /campaigns/{id}/start-scrape` per `source_type='scrape'` ora instrada alla Fase Lista (imposta `listing` + `enqueue_list`); import resta `enqueue_resolve`. Il vecchio `scrape_followers_task` resta registrato per job in volo ma il nuovo flusso non lo accoda.
+- **Progress**: `CampaignResponse.list_progress`/`bio_progress` (`{done, target}`) calcolati da `compute_phase_progress` (lista done = tutti i follower; bio done = `bio_scraped` + stati a valle). Frontend: `TwoPhasePanel` (due card) nel dettaglio campagna.
+- **Recovery**: `reenqueue_active_work` riaccoda `listing`→list, `scraping`(scrape)→bios, `scraping_and_running`→legacy; `listing_break`→`listing`. `daily_reset` riavvia la Fase Bio messa in pausa per cap (`scrape_capped`) se restano `pending`. Challenge handler condiviso `is_challenge_exception`/`isolate_challenged_account` (scraper.py) isola solo l'account colpito. Migrazione `016_two_phase_scraping.py` (colonne `list_target`/`bio_target`). Piano: `docs/superpowers/plans/2026-06-09-two-phase-scraping.md`.
 
 ### Scraping avanzato + raccolta contatti (✅ IMPLEMENTATA)
 - **Estrazione contatti in 1 call IG**: modulo puro `app/utils/contact_extract.py` legge campi business IG (`public_phone_number`, `public_email`, `whatsapp_number`, link profilo) + regex su bio (telefono, email, WhatsApp) e restituisce un `ContactData`. Consumato da scraper (`scraper.py`) e resolver import (`import_resolver.py`).
