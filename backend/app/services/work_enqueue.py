@@ -76,6 +76,56 @@ async def _enqueue_scrape_with_redis(redis, campaign_id: str) -> bool:
     return True
 
 
+async def _enqueue_list_with_redis(redis, campaign_id: str) -> bool:
+    job_id = f"list:{campaign_id}"
+    await redis.delete(
+        f"arq:job:{job_id}",
+        f"arq:retry:{job_id}",
+        f"arq:in-progress:{job_id}",
+    )
+    await redis.enqueue_job(
+        "list_followers_task",
+        campaign_id,
+        _job_id=job_id,
+        _queue_name=ARQ_MAIN_QUEUE,
+    )
+    return True
+
+
+async def _enqueue_bios_with_redis(redis, campaign_id: str) -> bool:
+    job_id = f"bios:{campaign_id}"
+    await redis.delete(
+        f"arq:job:{job_id}",
+        f"arq:retry:{job_id}",
+        f"arq:in-progress:{job_id}",
+    )
+    await redis.enqueue_job(
+        "scrape_bios_task",
+        campaign_id,
+        _job_id=job_id,
+        _queue_name=ARQ_MAIN_QUEUE,
+    )
+    return True
+
+
+async def enqueue_list(campaign_id: str) -> bool:
+    import arq
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        return await _enqueue_list_with_redis(redis, campaign_id)
+    finally:
+        await redis.aclose()
+
+
+async def enqueue_bios(campaign_id: str) -> bool:
+    import arq
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        return await _enqueue_bios_with_redis(redis, campaign_id)
+    finally:
+        await redis.aclose()
+
+
 async def _enqueue_dm_workers_with_redis(redis, campaign_id: str) -> int:
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -170,6 +220,8 @@ async def pause_active_work_on_startup() -> dict[str, int]:
         CampaignStatus.scraping,
         CampaignStatus.scraping_and_running,
         CampaignStatus.scraping_break,
+        CampaignStatus.listing,
+        CampaignStatus.listing_break,
     )
     stale_before = datetime.utcnow() - timedelta(seconds=STARTUP_ACTIVE_WORK_GRACE_SECONDS)
 
