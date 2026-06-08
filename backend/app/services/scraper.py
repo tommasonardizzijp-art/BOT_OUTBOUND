@@ -221,9 +221,43 @@ async def scrape_followers(campaign_id: str) -> None:
             emit_event(campaign_id, "scrape_stopped", f"Scraping non avviato: {e}", level="error")
 
         except Exception as e:
-            logger.error(f"Scrape failed for campaign {campaign_id}: {e}")
-            campaign.status = CampaignStatus.error
-            await db.commit()
+            # Instagram challenge/checkpoint during scraping (es. risoluzione target
+            # o paginazione): instagrapi usa nomi classe che contengono "Challenge".
+            # Va isolato l'account (challenge_required) — non lasciarlo 'active' o
+            # ogni retry rifallisce identico. La campagna va in pausa, non error,
+            # cosi' e' riprendibile dopo che l'operatore risolve la verifica IG.
+            exc_name = type(e).__name__
+            challenged_id = locals().get("account")
+            challenged_id = getattr(challenged_id, "id", None)
+            if "Challenge" in exc_name and challenged_id:
+                acc = (await db.execute(
+                    select(InstagramAccount).where(InstagramAccount.id == challenged_id)
+                )).scalar_one_or_none()
+                acc_label = acc.username if acc else challenged_id[:8]
+                if acc:
+                    acc.status = AccountStatus.challenge_required
+                campaign.status = CampaignStatus.paused
+                campaign.scrape_outcome = "challenge"
+                campaign.updated_at = datetime.utcnow()
+                db.add(ActivityLog(
+                    campaign_id=campaign_id,
+                    action="challenge",
+                    details=json.dumps({"account": acc_label, "exc": exc_name}),
+                ))
+                await db.commit()
+                logger.error(
+                    f"[Scraper] Challenge IG su @{acc_label} ({exc_name}) — account isolato, campagna in pausa"
+                )
+                emit_event(
+                    campaign_id, "scrape_stopped",
+                    f"Instagram richiede verifica su @{acc_label}. "
+                    "Risolvi la challenge (app/web IG), poi ri-login browser e riavvia.",
+                    level="error",
+                )
+            else:
+                logger.error(f"Scrape failed for campaign {campaign_id}: {e}")
+                campaign.status = CampaignStatus.error
+                await db.commit()
 
         finally:
             if pool is not None:
@@ -326,7 +360,8 @@ async def _scrape_paginated(pool, campaign: Campaign, db, scrape_mode: str = 'fo
         select(func.count(Follower.id)).where(Follower.campaign_id == campaign.id)
     ) or 0
     since_last_break = 0
-    batch_size = 50
+    from app.config import settings as _scfg
+    batch_size = _scfg.scrape_page_size  # passato come max_amount → pagine piccole, no burst
     max_id = getattr(campaign, "scrape_cursor", None) or None
     consecutive_errors = 0
     MAX_CONSECUTIVE_ERRORS = 3
@@ -350,8 +385,23 @@ async def _scrape_paginated(pool, campaign: Campaign, db, scrape_mode: str = 'fo
                 )
                 return total, "partial"
 
-            # Small random delay between pagination calls (5-15 sec)
-            delay = random.uniform(5, 15)
+            # Human-like delay between follower-LIST pagination calls.
+            # This endpoint is the #1 IG bot-detection target — slow + irregular.
+            # Lognormal jitter (not uniform) so the cadence never looks scripted,
+            # plus an occasional long "distraction" pause as a real user would.
+            from app.config import settings as _s
+            if random.random() < _s.scrape_page_long_pause_probability:
+                delay = random.uniform(
+                    _s.scrape_page_long_pause_min_seconds,
+                    _s.scrape_page_long_pause_max_seconds,
+                )
+                logger.info(f"[Scraper] Pausa lunga {delay:.0f}s tra pagine (simulazione distrazione umana)")
+            else:
+                lo = _s.scrape_page_delay_min_seconds
+                hi = _s.scrape_page_delay_max_seconds
+                mid = (lo + hi) / 2
+                # lognormal centered near mid, clamped to [lo, hi]
+                delay = min(hi, max(lo, random.lognormvariate(0, 0.45) * mid * 0.7))
             await asyncio.sleep(delay)
 
             # Fetch a batch of followers/following
@@ -480,9 +530,13 @@ def _fetch_followers_chunk(client, user_id: int, amount: int, max_id: str | None
     Synchronous function (run in thread) to fetch one page of followers or following.
     Returns (users_list, next_max_id).
     """
+    # CRITICO: passare max_amount=amount. Senza, instagrapi fa un loop interno
+    # che drena l'intera lista in un burst di richieste count=200 senza delay →
+    # challenge IG immediata. Con max_amount la chiamata ritorna ~amount utenti
+    # e poi il delay tra pagine in _scrape_paginated agisce (scroll umano).
     if scrape_mode == 'following':
         try:
-            result = client.user_following_v1_chunk(user_id, max_id=max_id)
+            result = client.user_following_v1_chunk(user_id, max_amount=amount, max_id=max_id or "")
             users, next_cursor = result
             return users, next_cursor or None
         except Exception:
@@ -491,7 +545,7 @@ def _fetch_followers_chunk(client, user_id: int, amount: int, max_id: str | None
             return users, None
     else:
         try:
-            result = client.user_followers_v1_chunk(user_id, max_id=max_id)
+            result = client.user_followers_v1_chunk(user_id, max_amount=amount, max_id=max_id or "")
             users, next_cursor = result
             return users, next_cursor or None
         except Exception:

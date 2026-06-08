@@ -81,6 +81,26 @@ class Settings(BaseSettings):
     # Max user_info lookups/day/account for scraping (anti-ban). Per-campaign override on campaigns.scrape_daily_limit.
     scrape_daily_limit: int = 180
 
+    # Follower-LIST page size. CRITICO: passato come max_amount a
+    # user_followers_v1_chunk. Senza questo (max_amount=0), instagrapi fa un loop
+    # interno che drena l'INTERA lista in un burst di richieste count=200 SENZA
+    # delay → challenge "comportamento automatizzato" immediata. Con un valore
+    # piccolo (es. 30) ogni chiamata ritorna ~30 utenti e poi il delay sotto
+    # agisce tra le pagine, simulando lo scroll umano del modale follower.
+    scrape_page_size: int = 30
+
+    # Delay between follower-LIST pagination calls (user_followers_v1_chunk).
+    # This is the highest-risk endpoint for IG bot detection — keep it slow and
+    # well-randomized to mimic a human scrolling the followers modal. The old
+    # hardcoded 5-15s was too fast/regular and triggered "automated behavior"
+    # challenges on 9k+ lists. Lognormal jitter is applied on top of this range.
+    scrape_page_delay_min_seconds: int = 25
+    scrape_page_delay_max_seconds: int = 70
+    # Occasional long "human distraction" pause during list pagination.
+    scrape_page_long_pause_probability: float = 0.08   # 8% chance per page
+    scrape_page_long_pause_min_seconds: int = 120
+    scrape_page_long_pause_max_seconds: int = 300
+
     # Account defaults
     default_daily_limit: int = 20
     warmup_enabled: bool = True
