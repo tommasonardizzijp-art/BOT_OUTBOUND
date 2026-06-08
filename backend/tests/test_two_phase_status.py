@@ -24,3 +24,13 @@ def test_is_challenge_exception_detects_by_name():
 
     assert is_challenge_exception(ChallengeResolve("x")) is True
     assert is_challenge_exception(SomethingElse("x")) is False
+
+
+def test_bio_remaining_respects_target():
+    from app.services.scrape_bios import bio_should_continue
+    # target None -> continua finche' ci sono pending
+    assert bio_should_continue(target=None, done=50) is True
+    # target 200, done 199 -> continua
+    assert bio_should_continue(target=200, done=199) is True
+    # target raggiunto -> stop
+    assert bio_should_continue(target=200, done=200) is False

@@ -279,6 +279,63 @@ async def scrape_followers(campaign_id: str) -> None:
                 await pool.release()
 
 
+async def fetch_and_store_bio(follower, campaign, db, pool) -> str:
+    """Estrae bio+contatti per UN follower gia' in DB (status pending) e lo porta
+    a bio_scraped. Ritorna esito: 'done' | 'soft_block' | 'capped' | 'error'.
+    Riusa rotazione pool / cap / extract_contacts come _store_followers_batch.
+    """
+    sel = pool.next(campaign)
+    if sel is None:
+        return "capped"
+    current_account, current_client = sel
+    try:
+        user_info = await asyncio.to_thread(current_client.user_info_v1, follower.ig_user_id)
+    except Exception as e:
+        es = str(e).lower()
+        if "protect" in es or "restrict" in es or "community" in es:
+            return "soft_block"
+        if "429" in es or "too many" in es or "rate" in es:
+            return "soft_block"
+        logger.warning(f"[Bio] user_info @{follower.username} fallito: {e}")
+        return "error"
+
+    from app.utils.contact_extract import extract_contacts
+    contacts = extract_contacts(user_info)
+    await increment_scrape_lookup(db, current_account.id)
+    current_account.scrape_lookups_today = (current_account.scrape_lookups_today or 0) + 1
+
+    follower.biography = user_info.biography or None
+    follower.is_verified = getattr(user_info, "is_verified", False) or False
+    follower.follower_count = getattr(user_info, "follower_count", None)
+    follower.following_count = getattr(user_info, "following_count", None)
+    ext = getattr(user_info, "external_url", None)
+    follower.external_url = contacts.external_url or (str(ext) if ext else None)
+    follower.phone = contacts.phone
+    follower.email = contacts.email
+    follower.whatsapp = contacts.whatsapp
+    follower.bio_links = json.dumps(contacts.bio_links) if contacts.bio_links else None
+    follower.contact_source = json.dumps(contacts.sources) if contacts.sources else None
+    follower.status = FollowerStatus.bio_scraped
+    await db.commit()
+
+    await upsert_lead(
+        db,
+        ig_user_id=follower.ig_user_id,
+        username=follower.username,
+        full_name=follower.full_name,
+        biography=follower.biography,
+        contacts=contacts,
+        campaign=campaign,
+        account=current_account,
+    )
+
+    logger.info(
+        f"[Bio] @{follower.username} via @{current_account.username} "
+        f"(lookups oggi: {current_account.scrape_lookups_today})"
+    )
+    return "done"
+
+
 async def _get_available_account(db, campaign_id: str | None = None) -> InstagramAccount:
     from sqlalchemy import select, func
     from app.models.campaign_account import CampaignAccount
