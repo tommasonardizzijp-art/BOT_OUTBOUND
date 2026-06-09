@@ -242,9 +242,10 @@ Lead database + deduplicazione cross-campagna. Previene di inviare DM due volte 
 ### `lead_target_profiles`, `lead_qualification_runs`, `lead_qualifications`
 Sezione "Qualifica lead" (migrazione 015). Lavora solo sui lead consolidati in `global_contacts`, non sui `followers` grezzi.
 - `lead_target_profiles`: target riutilizzabili descritti in linguaggio naturale, con `compiled_rules` JSON generato/modificabile dall'AI e `rules_hash` stabile.
-- `lead_qualification_runs`: batch filtrati su `global_contacts`, con stato `queued|running|completed|failed|cancelled`, filtri JSON, contatori progressivi e skip dei lead gia classificati con stesso target+rules_hash.
+- `lead_qualification_runs`: batch filtrati su `global_contacts`, con stato `queued|running|completed|failed|cancelled`, filtri JSON, contatori progressivi e skip dei lead gia classificati con stesso target+rules_hash. Salva uno **snapshot** di target/regole/soglie al momento della run (`target_name`, `target_description`, `compiled_rules`, `pass/reject_threshold`, `ai_review_min/max_score`) — colonne aggiunte in **migrazione 017** (la 015 le aveva omesse → drift che bloccava l'INSERT della run).
 - `lead_qualifications`: risultati storici per lead+target+run con `deterministic_score`, `ai_score`, `final_score`, stato `match|no_match|ambiguous|error`, segnali JSON e `reason` opzionale.
 - La vista operativa usa l'ultimo risultato per coppia `(target_profile_id, global_contact_id)` senza cancellare lo storico run.
+- **Scoring**: deterministico (`score_lead`) → se `reject_threshold < score < pass_threshold` E score in `[ai_review_min_score, ai_review_max_score]` → AI review (Groq) che assegna lo score finale. ⚠️ I default (`reject=25`, `ai_review_min=26`) sono severi: un match `positive_concept` singolo pesa ~7 → cade sotto 26 → reject diretto SENZA AI. Per target a keyword singola, abbassare reject/ai_review_min nel profilo per mandare i borderline all'AI. L'AI review ritenta con backoff (5/10/20s) sui 429 del free-tier Groq (`_classify_with_retry`) per non perdere lead.
 
 ### `activity_logs`
 Audit trail di tutte le azioni significative: login, scrape, dm_sent, dm_failed, rate_limited, challenge, cooldown_start/end, account_banned.
