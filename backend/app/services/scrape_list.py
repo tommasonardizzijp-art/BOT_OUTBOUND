@@ -102,6 +102,16 @@ async def list_followers(campaign_id: str) -> None:
                     logger.info(f"[Lista] Target {campaign.list_target} raggiunto ({already})")
                     break
 
+                # Rotazione account per-pagina: ogni pagina la richiede un account
+                # diverso del pool (round-robin). Il cursore max_id e' lato-IG e
+                # funziona con qualunque account lo presenti, quindi dimezza (con 2
+                # account) le richieste di lista per-account = footprint piu' basso.
+                # La Fase Lista non consuma cap, quindi pool.next non salta mai per cap.
+                sel = pool.next(campaign)
+                if sel is None:
+                    raise ScrapeBudgetError("Nessun account scraping disponibile")
+                account, client = sel
+
                 await _list_page_delay()
                 batch, max_id = await asyncio.to_thread(
                     _fetch_followers_chunk, client, campaign.target_user_id, page, max_id, scrape_mode
