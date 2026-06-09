@@ -153,10 +153,18 @@ export default function CampaignsPage() {
                     </div>
                   </div>
 
+                    {c.source_type !== 'import' && (c.list_progress?.done ?? 0) > 0 && (
+                      <div className="text-sm text-gray-400">
+                        {c.list_progress?.done ?? 0}{c.list_progress?.target ? `/${c.list_progress.target}` : ''} in lista
+                        {' · '}
+                        {c.bio_progress?.done ?? 0}{c.bio_progress?.target ? `/${c.bio_progress.target}` : ''} bio estratte
+                      </div>
+                    )}
+
                     {c.total_followers > 0 && (
                       <div>
                         <div className="flex justify-between text-sm text-gray-500 mb-1.5">
-                          <span>{c.messages_sent} inviati · {c.messages_failed} falliti · {c.messages_pending} in coda</span>
+                          <span>{c.messages_sent} inviati · {c.messages_failed} falliti · {c.messages_pending} in coda DM</span>
                           <span>{progress}%</span>
                         </div>
                         <div className="h-3 w-full bg-gray-800 rounded-full overflow-hidden">

@@ -20,7 +20,7 @@ import {
   XCircle, Clock, Trash2, RotateCcw, SkipForward, RefreshCw,
   UserPlus, Pencil, X, AlertTriangle, Shield, Zap, ChevronLeft, ChevronRight,
   ThumbsUp, ThumbsDown, MessageSquare, Activity, ArrowUpDown, MinusCircle, Filter,
-  Settings
+  Settings, FileText
 } from 'lucide-react'
 import type { Campaign, Follower, FollowerStatus, CampaignAccount, Account, AccountStatus, ABStats, ApprovalQueueItem, ApprovalQueue, WorkerEvent, AccountRole, ImportStatusResponse } from '@/lib/types'
 
@@ -976,7 +976,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               </div>
             </div>
             <Progress value={progress} className="h-3" />
-            <div className="grid grid-cols-6 gap-4 pt-1">
+            <div className="grid grid-cols-7 gap-4 pt-1">
               <div className="text-center">
                 <div className="flex items-center justify-center gap-1 text-green-400 font-semibold text-lg">
                   <CheckCircle className="w-4 h-4" />{campaign.messages_sent}
@@ -1015,13 +1015,19 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 <div className="flex items-center justify-center gap-1 text-yellow-400 font-semibold text-lg">
                   <Clock className="w-4 h-4" />{campaign.messages_pending}
                 </div>
-                <p className="text-sm text-gray-500 mt-1">In coda</p>
+                <p className="text-sm text-gray-500 mt-1">In coda DM</p>
               </div>
               <div className="text-center">
-                <div className="flex items-center justify-center gap-1 text-gray-400 font-semibold text-lg">
-                  <Users className="w-4 h-4" />{campaign.total_followers}
+                <div className="flex items-center justify-center gap-1 text-blue-400 font-semibold text-lg">
+                  <Users className="w-4 h-4" />{campaign.list_progress?.done ?? campaign.total_followers}
                 </div>
-                <p className="text-sm text-gray-500 mt-1">Scrappati</p>
+                <p className="text-sm text-gray-500 mt-1">In lista</p>
+              </div>
+              <div className="text-center">
+                <div className="flex items-center justify-center gap-1 text-cyan-400 font-semibold text-lg">
+                  <FileText className="w-4 h-4" />{campaign.bio_progress?.done ?? 0}
+                </div>
+                <p className="text-sm text-gray-500 mt-1">Bio estratte</p>
               </div>
             </div>
           </CardContent>
