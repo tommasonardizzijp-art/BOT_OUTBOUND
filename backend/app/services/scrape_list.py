@@ -116,6 +116,7 @@ async def list_followers(campaign_id: str) -> None:
                 batch, max_id = await asyncio.to_thread(
                     _fetch_followers_chunk, client, campaign.target_user_id, page, max_id, scrape_mode
                 )
+                logger.info(f"[Lista] pagina via @{account.username}: +{len(batch)} (totale ~{already + len(batch)})")
                 if not batch:
                     logger.info(f"[Lista] Lista IG esaurita ({already})")
                     break
