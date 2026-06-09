@@ -288,6 +288,22 @@ def _latest_results_subquery(target_profile_id: str | None):
     return stmt.group_by(LeadQualification.target_profile_id, LeadQualification.global_contact_id).subquery("latest_lq")
 
 
+def _parse_statuses(status_value: str | None) -> list[str]:
+    """status puo' essere singolo o comma-separated ('match,ambiguous'). Vuoto = tutti."""
+    if not status_value:
+        return []
+    valid = {item.value for item in LeadQualificationStatus}
+    out = []
+    for raw in status_value.split(","):
+        s = raw.strip()
+        if not s:
+            continue
+        if s not in valid:
+            raise HTTPException(status_code=422, detail=f"status non valido: {s}")
+        out.append(s)
+    return out
+
+
 def _results_base(
     *,
     target_profile_id: str | None,
@@ -295,8 +311,7 @@ def _results_base(
     status_value: str | None,
     min_score: int | None,
 ):
-    if status_value and status_value not in {item.value for item in LeadQualificationStatus}:
-        raise HTTPException(status_code=422, detail="status non valido")
+    statuses = _parse_statuses(status_value)
     if run_id:
         stmt = (
             select(LeadQualification, GlobalContact, LeadTargetProfile)
@@ -321,8 +336,8 @@ def _results_base(
         )
     if target_profile_id:
         stmt = stmt.where(LeadQualification.target_profile_id == target_profile_id)
-    if status_value:
-        stmt = stmt.where(LeadQualification.status == LeadQualificationStatus(status_value))
+    if statuses:
+        stmt = stmt.where(LeadQualification.status.in_([LeadQualificationStatus(s) for s in statuses]))
     if min_score is not None:
         stmt = stmt.where(LeadQualification.final_score >= min_score)
     return stmt
@@ -392,8 +407,10 @@ async def list_results(
 async def export_results_csv(
     target_profile_id: str = Query(...),
     run_id: str | None = Query(default=None),
-    status_value: str = Query(default=LeadQualificationStatus.match.value, alias="status"),
-    min_score: int = Query(default=80, ge=0, le=100),
+    # status: singolo o comma-separated ('match,ambiguous'); vuoto/assente = tutti.
+    # Niente piu' default 'match'/80 silenzioso: l'export rispetta esattamente la selezione.
+    status_value: str | None = Query(default=None, alias="status"),
+    min_score: int = Query(default=0, ge=0, le=100),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = _results_base(

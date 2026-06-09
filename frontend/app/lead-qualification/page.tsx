@@ -456,6 +456,7 @@ export default function LeadQualificationPage() {
               className="h-9 text-sm bg-gray-800 border border-gray-700 text-gray-300 rounded-md px-2 focus:outline-none focus:ring-1 focus:ring-purple-500"
             >
               <option value="match">Solo match</option>
+              <option value="match,ambiguous">Match + Ambigui</option>
               <option value="ambiguous">Solo ambigui</option>
               <option value="no_match">Solo no match</option>
               <option value="">Tutti</option>
@@ -473,6 +474,11 @@ export default function LeadQualificationPage() {
               {results ? `${results.total.toLocaleString()} risultati` : 'Seleziona un target'}
             </div>
           </div>
+
+          <p className="text-xs text-gray-500 -mt-1">
+            Lo stato e la confidenza minima filtrano sia la lista qui sotto sia l&apos;<strong>Esporta CSV</strong>.
+            Per i tuoi lead usa <strong>Match + Ambigui</strong> e confidenza minima vuota (0).
+          </p>
 
           <div className="divide-y divide-gray-800">
             {results?.items.length === 0 && <div className="py-8 text-center text-gray-500">Nessun risultato</div>}
