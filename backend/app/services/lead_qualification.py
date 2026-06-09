@@ -523,11 +523,32 @@ async def classify_batch(
 
     sem = asyncio.Semaphore(2)
 
+    async def _classify_with_retry(contact, det, max_attempts: int = 4):
+        # Il free-tier ha un limite token/minuto: su 429 (rate limit) non perdiamo
+        # il lead, aspettiamo e ritentiamo con backoff crescente.
+        last_exc = None
+        for attempt in range(max_attempts):
+            try:
+                return await classify_ambiguous_lead(profile, contact, det)
+            except Exception as exc:
+                last_exc = exc
+                msg = str(exc).lower()
+                is_rate_limit = "429" in msg or "rate limit" in msg or "too many" in msg
+                if not is_rate_limit or attempt == max_attempts - 1:
+                    raise
+                delay = 5 * (2 ** attempt)  # 5, 10, 20s
+                logger.warning(
+                    f"[LeadQualification] rate-limit AI (tentativo {attempt+1}/{max_attempts}) "
+                    f"per {contact.ig_user_id}: attendo {delay}s"
+                )
+                await asyncio.sleep(delay)
+        raise last_exc
+
     async def review(item):
         contact, det, qualification = item
         async with sem:
             try:
-                ai = await classify_ambiguous_lead(profile, contact, det)
+                ai = await _classify_with_retry(contact, det)
                 qualification.ai_used = True
                 qualification.ai_score = ai["ai_score"]
                 qualification.final_score = ai["ai_score"]
