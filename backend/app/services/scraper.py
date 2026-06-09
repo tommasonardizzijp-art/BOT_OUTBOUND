@@ -312,7 +312,11 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
 
     from app.utils.contact_extract import extract_contacts
     contacts = extract_contacts(user_info)
-    await increment_scrape_lookup(db, current_account.id)
+    # Una sola sorgente per il contatore cap: bump in-memory, persistito dal
+    # db.commit() sotto. NON usare anche increment_scrape_lookup (UPDATE atomico
+    # che committa subito): con expire_on_commit=False i due incrementi si
+    # sommano -> doppio conteggio (cap raggiunto a meta'). Il bump in-memory e'
+    # gia' visibile a pool.next nello stesso run.
     current_account.scrape_lookups_today = (current_account.scrape_lookups_today or 0) + 1
 
     follower.biography = user_info.biography or None

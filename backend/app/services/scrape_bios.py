@@ -4,7 +4,7 @@ import random
 from datetime import datetime, timedelta
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.database import AsyncSessionLocal
 from app.models.campaign import Campaign, CampaignStatus
@@ -38,7 +38,15 @@ async def scrape_bios(campaign_id: str) -> None:
 
         pool = None
         account = None
-        done = 0
+        # bio_target e' un TOTALE, non un per-run: seed done con le bio gia' estratte
+        # cosi' un resume punta al totale (coerente con bio_progress nella UI) invece
+        # di rifare bio_target lookup da capo ad ogni ripresa.
+        done = await db.scalar(
+            select(func.count(Follower.id)).where(
+                Follower.campaign_id == campaign_id,
+                Follower.status == FollowerStatus.bio_scraped,
+            )
+        ) or 0
         consecutive_soft = 0
         try:
             from app.utils.events import emit as emit_event
