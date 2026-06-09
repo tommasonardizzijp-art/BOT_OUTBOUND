@@ -30,10 +30,11 @@ class LeadResponse(BaseModel):
 
 
 class LeadInsights(BaseModel):
-    scraped_leads: int          # unique users scraped (in Follower table, filtered by campaign)
-    total_leads: int            # unique users contacted (in GlobalContact, filtered)
+    scraped_leads: int          # unique users scraped (Follower table, lista — solo info base)
+    total_leads: int            # lead con info acquisite (righe GlobalContact = bio/contatti estratti)
+    contacted_leads: int        # lead davvero contattati via DM (GlobalContact.last_contacted_at not null)
     total_replied: int
-    reply_rate: float           # percentage (0-100)
+    reply_rate: float           # percentage (0-100) sui contattati
 
 
 class LeadListResponse(BaseModel):

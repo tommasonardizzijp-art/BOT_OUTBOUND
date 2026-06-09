@@ -178,19 +178,26 @@ export default function LeadsPage() {
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <InsightCard
             icon={<Users className="w-5 h-5 text-purple-400" />}
             label="Lead scrapati"
             value={ins ? ins.scraped_leads.toLocaleString() : '—'}
-            sub={campaignFilter ? 'campagna selezionata' : 'tutte le campagne'}
+            sub={campaignFilter ? 'campagna selezionata · solo lista' : 'tutte le campagne · solo lista'}
           />
           <InsightCard
             icon={<Database className="w-5 h-5 text-green-400" />}
-            label="Lead contattati"
+            label="Con info acquisite"
             value={ins ? ins.total_leads.toLocaleString() : '—'}
-            sub={campaignFilter || dateFrom || dateTo ? 'filtro attivo' : 'totale'}
+            sub="bio/contatti estratti"
             color="green"
+          />
+          <InsightCard
+            icon={<MessageCircle className="w-5 h-5 text-amber-400" />}
+            label="Contattati"
+            value={ins ? ins.contacted_leads.toLocaleString() : '—'}
+            sub="DM inviato"
+            color="amber"
           />
           <InsightCard
             icon={<CheckCircle2 className="w-5 h-5 text-blue-400" />}
@@ -479,13 +486,14 @@ function InsightCard({
   label: string
   value: string
   sub?: string
-  color?: 'purple' | 'green' | 'blue' | 'yellow'
+  color?: 'purple' | 'green' | 'blue' | 'yellow' | 'amber'
 }) {
   const border = {
     purple: 'border-purple-900/40',
     green: 'border-green-900/40',
     blue: 'border-blue-900/40',
     yellow: 'border-yellow-900/40',
+    amber: 'border-amber-900/40',
   }[color]
 
   return (

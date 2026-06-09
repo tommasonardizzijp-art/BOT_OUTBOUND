@@ -335,7 +335,8 @@ export interface Lead {
 
 export interface LeadInsights {
   scraped_leads: number
-  total_leads: number
+  total_leads: number        // lead con info acquisite (bio/contatti estratti)
+  contacted_leads: number    // lead davvero contattati via DM
   total_replied: number
   reply_rate: number
 }

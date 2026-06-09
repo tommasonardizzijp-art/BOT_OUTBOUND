@@ -264,6 +264,7 @@ async def list_leads(
     filtered_ins_base = (
         select(
             func.count(GlobalContact.id).label("total"),
+            func.sum(case((GlobalContact.last_contacted_at.isnot(None), 1), else_=0)).label("contacted"),
             func.sum(case((ins_sq2.c.has_replied == 1, 1), else_=0)).label("total_replied"),
         )
         .outerjoin(ins_sq2, ins_sq2.c.ig_user_id == GlobalContact.ig_user_id)
@@ -272,7 +273,10 @@ async def list_leads(
         filtered_ins_base = filtered_ins_base.where(and_(*ins_conditions))
     ins = (await db.execute(filtered_ins_base)).one()
 
-    total_contacted = ins.total or 0
+    # total = lead con info acquisite (righe GlobalContact = bio/contatti estratti)
+    # contacted = quelli con DM realmente inviato (last_contacted_at valorizzato)
+    info_leads = ins.total or 0
+    contacted_leads = int(ins.contacted or 0)
     total_replied = int(ins.total_replied or 0)
 
     # Scraped leads: unique ig_user_ids in Follower table (filter by campaign if set)
@@ -297,9 +301,10 @@ async def list_leads(
 
     insights = LeadInsights(
         scraped_leads=scraped_leads,
-        total_leads=total_contacted,
+        total_leads=info_leads,
+        contacted_leads=contacted_leads,
         total_replied=total_replied,
-        reply_rate=round((total_replied / total_contacted) * 100, 1) if total_contacted > 0 else 0.0,
+        reply_rate=round((total_replied / contacted_leads) * 100, 1) if contacted_leads > 0 else 0.0,
     )
 
     return LeadListResponse(items=items, total=total, page=page, page_size=page_size, insights=insights)
