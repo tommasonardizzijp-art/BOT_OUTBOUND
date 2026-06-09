@@ -81,7 +81,7 @@ async def list_followers(campaign_id: str) -> None:
                 target_user = await asyncio.to_thread(client.user_info_by_username_v1, campaign.target_username)
                 if target_user.is_private:
                     raise TargetPrivateError(f"@{campaign.target_username} privato")
-                campaign.target_user_id = target_user.pk
+                campaign.target_user_id = int(target_user.pk)  # pk e' str in instagrapi; colonna BIGINT
                 await db.commit()
 
             emit_event(campaign_id, "scrape_start", f"Fase Lista avviata ({mode_label}) — target {campaign.list_target or 'tutta la lista'}")

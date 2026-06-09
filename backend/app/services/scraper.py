@@ -159,7 +159,7 @@ async def scrape_followers(campaign_id: str) -> None:
             if target_user.is_private:
                 raise TargetPrivateError(f"@{campaign.target_username} is a private account")
 
-            campaign.target_user_id = target_user.pk
+            campaign.target_user_id = int(target_user.pk)  # pk e' str in instagrapi; colonna BIGINT
             await db.commit()
 
             logger.info(f"Target @{campaign.target_username} has pk={target_user.pk}")
