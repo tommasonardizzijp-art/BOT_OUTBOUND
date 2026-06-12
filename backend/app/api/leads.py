@@ -357,7 +357,9 @@ async def export_leads_csv(
     rows = (await db.execute(stmt)).all()
 
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=[
+    # delimiter ';' = separatore nativo di Excel italiano; il modulo csv quota i
+    # campi che lo contengono (es. bio con ';'), evitando split di colonna sbagliati.
+    writer = csv.DictWriter(output, delimiter=";", fieldnames=[
         "ig_user_id", "username", "full_name", "biography",
         "follower_count", "following_count", "is_verified",
         "phone", "email", "whatsapp", "external_url", "bio_links",
@@ -372,7 +374,7 @@ async def export_leads_csv(
             "ig_user_id": lead.ig_user_id,
             "username": lead.username or "",
             "full_name": lead.full_name or "",
-            "biography": (lead.biography or "").replace("\n", " "),
+            "biography": (lead.biography or "").replace("\n", " ").replace("\r", " ").replace("\t", " "),
             "follower_count": lead.follower_count or "",
             "following_count": lead.following_count or "",
             "is_verified": "yes" if lead.is_verified else "no",
@@ -392,8 +394,10 @@ async def export_leads_csv(
 
     output.seek(0)
     filename = f"leads_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    # BOM utf-8-sig: senza, Excel legge il CSV come cp1252 e accenti/emoji
+    # diventano mojibake. Il BOM forza Excel a interpretarlo come UTF-8.
     return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
+        iter([output.getvalue().encode("utf-8-sig")]),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

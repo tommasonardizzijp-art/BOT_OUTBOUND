@@ -10,9 +10,15 @@ from app.database import AsyncSessionLocal
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.follower import Follower, FollowerStatus
 from app.services.bot_state_service import is_halted
-from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty
+from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty, ScrapingSlotsBusy
 from app.services.scraper import fetch_and_store_bio, is_challenge_exception, isolate_challenged_account
 from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, SoftBlockError
+
+
+# Ritenta lo STESSO profilo prima di skippare/pausare (assorbe blip transitori).
+MAX_BIO_ATTEMPTS = 3
+# Fallimenti di fila oltre i quali la run si ferma (problema sistemico, non profilo).
+MAX_CONSECUTIVE_BIO_FAIL = 5
 
 
 def bio_should_continue(target: int | None, done: int) -> bool:
@@ -22,19 +28,32 @@ def bio_should_continue(target: int | None, done: int) -> bool:
     return done < target
 
 
-async def scrape_bios(campaign_id: str) -> None:
-    """Entry point Fase Bio. Chiamata dal worker."""
+async def scrape_bios(campaign_id: str) -> int | None:
+    """Entry point Fase Bio. Chiamata dal worker.
+
+    Ritorna i secondi di defer se ha colpito una pausa sessione (il worker
+    solleva Retry(defer=...)); None se completata/interrotta.
+    """
     async with AsyncSessionLocal() as db:
         campaign = (await db.execute(select(Campaign).where(Campaign.id == campaign_id))).scalar_one_or_none()
         if not campaign:
-            return
+            return None
         if campaign.status not in (CampaignStatus.scraping, CampaignStatus.scraping_break):
             logger.info(f"[Bio] Stato '{campaign.status.value}' — skip stale retry")
-            return
+            return None
         if await is_halted(db):
             from app.utils.events import emit as emit_event
             emit_event(campaign_id, "scrape_stopped", "Bot in pausa globale — bio non avviata", level="warn")
-            return
+            return None
+        # Resume da pausa sessione: il job rientra in scraping_break dopo il defer.
+        if campaign.status == CampaignStatus.scraping_break:
+            from app.utils.events import emit as emit_event
+            campaign.status = CampaignStatus.scraping
+            campaign.scrape_break_until = None
+            campaign.scrape_break_prev_status = None
+            campaign.updated_at = datetime.utcnow()
+            await db.commit()
+            emit_event(campaign_id, "scrape_resume", "Pausa bio terminata, ripresa")
 
         pool = None
         account = None
@@ -48,6 +67,8 @@ async def scrape_bios(campaign_id: str) -> None:
             )
         ) or 0
         consecutive_soft = 0
+        consecutive_fail = 0
+        attempts: dict[str, int] = {}
         try:
             from app.utils.events import emit as emit_event
 
@@ -96,8 +117,65 @@ async def scrape_bios(campaign_id: str) -> None:
                     await asyncio.sleep(random.uniform(90, 180))
                     continue
 
+                if outcome in ("network", "error"):
+                    # Ritenta lo stesso profilo: con limit(1) senza ORDER BY la
+                    # riga ri-selezionata e' la stessa (resta pending). Assorbe
+                    # blip di rete o parse sporadici prima di decidere.
+                    fid = follower.id
+                    attempts[fid] = attempts.get(fid, 0) + 1
+                    if attempts[fid] < MAX_BIO_ATTEMPTS:
+                        backoff = random.uniform(5, 12) * attempts[fid]
+                        logger.warning(
+                            f"[Bio] @{follower.username} {outcome} "
+                            f"(tentativo {attempts[fid]}/{MAX_BIO_ATTEMPTS}) — ritento tra {int(backoff)}s: {err}"
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    if outcome == "network":
+                        # Connessione giu' (tethering/proxy): NON skippare profili
+                        # buoni. Pausa la run preservando i pending; riavviabile da
+                        # bios/start dopo il fix.
+                        campaign.status = CampaignStatus.error
+                        campaign.scrape_outcome = "scrape_network_error"
+                        campaign.updated_at = datetime.utcnow()
+                        await db.commit()
+                        emit_event(
+                            campaign_id, "scrape_stopped",
+                            "Connessione persa (tethering/proxy?) — bio interrotta, riprendi dopo il fix",
+                            level="error",
+                        )
+                        logger.error(f"[Bio] Rete giu' su @{follower.username} dopo {attempts[fid]} tentativi — pausa run a {done}")
+                        return
+
+                    # Profilo non parsabile (es. schema IG cambiato): skip e avanza.
+                    # Questo evita il loop infinito sul medesimo follower pending.
+                    follower.status = FollowerStatus.skipped
+                    follower.skip_reason = (f"bio_error: {str(err)[:200]}" if err else "bio_error")
+                    follower.updated_at = datetime.utcnow()
+                    await db.commit()
+                    consecutive_fail += 1
+                    logger.warning(f"[Bio] @{follower.username} SKIP dopo {attempts[fid]} tentativi: {err}")
+                    emit_event(campaign_id, "scrape_progress", f"@{follower.username} saltato: bio non recuperabile", level="warn")
+                    if consecutive_fail >= MAX_CONSECUTIVE_BIO_FAIL:
+                        # Troppi skip di fila => sistemico, fermati per non bruciare la lista.
+                        campaign.status = CampaignStatus.error
+                        campaign.scrape_outcome = "scrape_errors"
+                        campaign.updated_at = datetime.utcnow()
+                        await db.commit()
+                        emit_event(
+                            campaign_id, "scrape_stopped",
+                            f"{consecutive_fail} bio fallite di fila — interrotta, controlla account/connessione",
+                            level="error",
+                        )
+                        logger.error(f"[Bio] {consecutive_fail} fallimenti consecutivi — pausa run a {done}")
+                        return
+                    await asyncio.sleep(random.uniform(3, 8))
+                    continue
+
                 if outcome == "done":
                     consecutive_soft = 0
+                    consecutive_fail = 0
                     done += 1
                     since_break += 1
                     delay = random.uniform(
@@ -111,13 +189,15 @@ async def scrape_bios(campaign_id: str) -> None:
                         getattr(campaign, "scrape_break_minutes_min", 30),
                         getattr(campaign, "scrape_break_minutes_max", 45),
                     )
+                    seconds = int(minutes * 60)
                     campaign.scrape_break_prev_status = CampaignStatus.scraping.value
                     campaign.status = CampaignStatus.scraping_break
-                    campaign.scrape_break_until = datetime.utcnow() + timedelta(minutes=minutes)
+                    campaign.scrape_break_until = datetime.utcnow() + timedelta(seconds=seconds)
                     campaign.updated_at = datetime.utcnow()
                     await db.commit()
                     emit_event(campaign_id, "scrape_break", f"Pausa bio {int(minutes)} min dopo {done}")
-                    return
+                    logger.info(f"[Bio] Pausa sessione {int(minutes)}min dopo {done} bio — defer job")
+                    return seconds
 
             campaign.status = CampaignStatus.ready
             campaign.updated_at = datetime.utcnow()
@@ -137,6 +217,13 @@ async def scrape_bios(campaign_id: str) -> None:
             campaign.updated_at = datetime.utcnow()
             await db.commit()
             emit_event(campaign_id, "scrape_stopped", f"Soft block — bio in pausa: {e}", level="error")
+
+        except ScrapingSlotsBusy:
+            # Job bios duplicato: gli slot li tiene gia' il job legittimo. Esco
+            # senza toccare lo stato campagna (NON metto error, altrimenti uccido
+            # il job vivo che al refresh vedrebbe 'error' e si fermerebbe).
+            logger.info(f"[Bio] Slot account occupati da altro job — esco no-op ({done} fatti)")
+            return
 
         except (ScrapeBudgetError, ScrapingPoolEmpty) as e:
             from app.utils.events import emit as emit_event

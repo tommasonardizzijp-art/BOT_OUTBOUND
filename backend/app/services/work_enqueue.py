@@ -60,52 +60,39 @@ def arq_redis_settings() -> RedisSettings:
     )
 
 
-async def _enqueue_scrape_with_redis(redis, campaign_id: str) -> bool:
-    job_id = f"scrape:{campaign_id}"
-    await redis.delete(
-        f"arq:job:{job_id}",
-        f"arq:retry:{job_id}",
-        f"arq:in-progress:{job_id}",
-    )
+async def _reenqueue_phase(redis, task_name: str, job_id: str, campaign_id: str) -> bool:
+    """Ri-accoda un job di fase (scrape/list/bios) con guardia di concorrenza.
+
+    ⚠️ NON cancella `arq:in-progress:{job_id}`: e' il lock con cui arq garantisce
+    UN solo job per job_id. Cancellarlo (come faceva il codice precedente) lasciava
+    partire un secondo job concorrente sullo stesso campaign → collisione slot
+    account (ScrapingSlotsBusy) → campagna in 'error' + arq KeyError su job_tasks.
+    Se il job e' gia' in esecuzione, si esce no-op. Si cancella solo la retry
+    parcheggiata da Retry(defer) cosi' un resume manuale riparte subito.
+    """
+    if await redis.exists(f"arq:in-progress:{job_id}"):
+        logger.info(f"[Enqueue] {job_id} gia' in esecuzione — skip enqueue duplicato")
+        return False
+    await redis.delete(f"arq:job:{job_id}", f"arq:retry:{job_id}")
     await redis.enqueue_job(
-        "scrape_followers_task",
+        task_name,
         campaign_id,
         _job_id=job_id,
         _queue_name=ARQ_MAIN_QUEUE,
     )
     return True
+
+
+async def _enqueue_scrape_with_redis(redis, campaign_id: str) -> bool:
+    return await _reenqueue_phase(redis, "scrape_followers_task", f"scrape:{campaign_id}", campaign_id)
 
 
 async def _enqueue_list_with_redis(redis, campaign_id: str) -> bool:
-    job_id = f"list:{campaign_id}"
-    await redis.delete(
-        f"arq:job:{job_id}",
-        f"arq:retry:{job_id}",
-        f"arq:in-progress:{job_id}",
-    )
-    await redis.enqueue_job(
-        "list_followers_task",
-        campaign_id,
-        _job_id=job_id,
-        _queue_name=ARQ_MAIN_QUEUE,
-    )
-    return True
+    return await _reenqueue_phase(redis, "list_followers_task", f"list:{campaign_id}", campaign_id)
 
 
 async def _enqueue_bios_with_redis(redis, campaign_id: str) -> bool:
-    job_id = f"bios:{campaign_id}"
-    await redis.delete(
-        f"arq:job:{job_id}",
-        f"arq:retry:{job_id}",
-        f"arq:in-progress:{job_id}",
-    )
-    await redis.enqueue_job(
-        "scrape_bios_task",
-        campaign_id,
-        _job_id=job_id,
-        _queue_name=ARQ_MAIN_QUEUE,
-    )
-    return True
+    return await _reenqueue_phase(redis, "scrape_bios_task", f"bios:{campaign_id}", campaign_id)
 
 
 async def enqueue_list(campaign_id: str) -> bool:

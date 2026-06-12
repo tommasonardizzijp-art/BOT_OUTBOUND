@@ -48,20 +48,33 @@ async def _list_page_delay() -> None:
     await asyncio.sleep(delay)
 
 
-async def list_followers(campaign_id: str) -> None:
-    """Entry point Fase Lista. Chiamata dal worker."""
+async def list_followers(campaign_id: str) -> int | None:
+    """Entry point Fase Lista. Chiamata dal worker.
+
+    Ritorna i secondi di defer se ha colpito una pausa sessione (il worker
+    solleva Retry(defer=...)); None se completata/interrotta.
+    """
     async with AsyncSessionLocal() as db:
         campaign = (await db.execute(select(Campaign).where(Campaign.id == campaign_id))).scalar_one_or_none()
         if not campaign:
             logger.error(f"[Lista] Campaign {campaign_id} not found")
-            return
+            return None
         if campaign.status not in (CampaignStatus.listing, CampaignStatus.listing_break):
             logger.info(f"[Lista] Campaign status='{campaign.status.value}' — skip stale retry")
-            return
+            return None
         if await is_halted(db):
             from app.utils.events import emit as emit_event
             emit_event(campaign_id, "scrape_stopped", "Bot in pausa globale — lista non avviata", level="warn")
-            return
+            return None
+        # Resume da pausa sessione: il job rientra in listing_break dopo il defer.
+        if campaign.status == CampaignStatus.listing_break:
+            from app.utils.events import emit as emit_event
+            campaign.status = CampaignStatus.listing
+            campaign.scrape_break_until = None
+            campaign.scrape_break_prev_status = None
+            campaign.updated_at = datetime.utcnow()
+            await db.commit()
+            emit_event(campaign_id, "scrape_resume", "Pausa lista terminata, ripresa")
 
         scrape_mode = getattr(campaign, "scrape_mode", "followers")
         mode_label = "following" if scrape_mode == "following" else "follower"
@@ -88,6 +101,10 @@ async def list_followers(campaign_id: str) -> None:
             already = await db.scalar(select(func.count(Follower.id)).where(Follower.campaign_id == campaign_id)) or 0
             max_id = campaign.scrape_cursor or None
             since_break = 0
+            if max_id:
+                logger.info(f"[Lista] Ripresa da cursore — {already} follower già in DB")
+            elif already > 0:
+                logger.warning(f"[Lista] RESCAN COMPLETO — {already} follower già in DB, cursore azzerato. Tutte le pagine saranno duplicate.")
 
             while True:
                 if await is_halted(db):
@@ -116,7 +133,7 @@ async def list_followers(campaign_id: str) -> None:
                 batch, max_id = await asyncio.to_thread(
                     _fetch_followers_chunk, client, campaign.target_user_id, page, max_id, scrape_mode
                 )
-                logger.info(f"[Lista] pagina via @{account.username}: +{len(batch)} (totale ~{already + len(batch)})")
+                logger.info(f"[Lista] pagina via @{account.username}: {len(batch)} da IG (già in DB: {already})")
                 if not batch:
                     logger.info(f"[Lista] Lista IG esaurita ({already})")
                     break
@@ -148,25 +165,26 @@ async def list_followers(campaign_id: str) -> None:
                 campaign.total_followers = already
                 campaign.updated_at = datetime.utcnow()
                 await db.commit()
+                logger.info(f"[Lista] salvati {stored}/{len(batch)} nuovi — totale DB: {already}")
                 emit_event(campaign_id, "scrape_batch", f"Lista: {already}" + (f"/{campaign.list_target}" if campaign.list_target else ""))
 
                 if not max_id:
                     logger.info(f"[Lista] Fine lista ({already})")
                     break
 
-                # Pausa sessione lista
+                # Pausa sessione lista — defer via ARQ Retry (timeout-safe, no sleep in-job).
+                # Ritorna i secondi di defer al worker che solleva Retry(defer=...).
                 if since_break >= getattr(campaign, "scrape_session_size", 250):
-                    minutes = random.uniform(
-                        getattr(campaign, "scrape_break_minutes_min", 30),
-                        getattr(campaign, "scrape_break_minutes_max", 45),
-                    )
+                    minutes = random.uniform(2, 5)
+                    seconds = int(minutes * 60)
                     campaign.scrape_break_prev_status = CampaignStatus.listing.value
                     campaign.status = CampaignStatus.listing_break
-                    campaign.scrape_break_until = datetime.utcnow() + timedelta(minutes=minutes)
+                    campaign.scrape_break_until = datetime.utcnow() + timedelta(seconds=seconds)
                     campaign.updated_at = datetime.utcnow()
                     await db.commit()
                     emit_event(campaign_id, "scrape_break", f"Pausa lista {int(minutes)} min dopo {already}")
-                    return  # il resume riaccoda il job
+                    logger.info(f"[Lista] Pausa sessione {int(minutes)}min dopo {already} follower — defer job")
+                    return seconds
 
             # Completata: torna a ready (o resta listing-done -> ready)
             campaign.status = CampaignStatus.ready

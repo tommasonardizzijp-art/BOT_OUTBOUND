@@ -470,6 +470,16 @@ async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: A
         raise HTTPException(status_code=400, detail="Nessun account attivo con ruolo scraping o 'entrambi'.")
     if not await _check_redis_reachable():
         raise HTTPException(status_code=503, detail="Redis non raggiungibile.")
+    # Blocca rescan: se lista già completata (cursor=None) e follower in DB, non rifare da capo
+    if not campaign.scrape_cursor:
+        existing_count = await db.scalar(
+            select(func.count(Follower.id)).where(Follower.campaign_id == campaign.id)
+        ) or 0
+        if existing_count > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Lista già completata ({existing_count} follower in DB). Reset la campagna prima di rifare la lista."
+            )
     if body and body.target is not None:
         campaign.list_target = body.target
     campaign.status = CampaignStatus.listing
@@ -854,6 +864,13 @@ async def resume_scrape_break(campaign_id: str, db: AsyncSession = Depends(get_d
     db.add(log)
     await db.commit()
     await db.refresh(campaign)
+    # Fase Bio (scrape) usa Retry(defer): il job e' parcheggiato nel retry zset e
+    # il solo flip di stato non lo risveglia. Ri-accoda subito (enqueue cancella la
+    # retry parcheggiata). Legacy scraping_and_running e import resolver fanno invece
+    # self-poll del DB ogni 10s e si riprendono da soli — niente re-enqueue (eviti doppio job).
+    if campaign.source_type != "import" and prev == CampaignStatus.scraping.value:
+        from app.services.work_enqueue import enqueue_bios
+        await enqueue_bios(campaign_id)
     return await _enrich_campaign(campaign, db, include_today=True)
 
 

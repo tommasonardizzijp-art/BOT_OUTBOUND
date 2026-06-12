@@ -16,9 +16,12 @@ DEFAULT_FIELD_WEIGHTS = {
     "scrape_source": 5,
 }
 
+# Filosofia: 1 keyword di nicchia corretta = match diretto (recall sopra
+# precisione, l'AI filtra solo i deboli). Con pass_threshold=10, positive_term_bonus
+# deve essere >=10 cosi' una sola keyword positiva supera la soglia su qualunque campo.
 DEFAULT_SCORE_RULES = {
     "strong_term_bonus": 18,
-    "positive_term_bonus": 8,
+    "positive_term_bonus": 10,
     "negative_term_penalty": 25,
     "external_url_bonus": 8,
     "contact_available_bonus": 4,

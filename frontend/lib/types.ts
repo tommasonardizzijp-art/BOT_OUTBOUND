@@ -419,6 +419,7 @@ export interface LeadQualificationFilters {
   min_followers?: number
   max_leads?: number
   skip_existing_same_rules?: boolean
+  match_on_contact?: boolean
 }
 
 export interface LeadQualificationEstimate {

@@ -28,6 +28,10 @@ class InstagramAccount(Base):
     )
     daily_message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     scrape_lookups_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Giorno (UTC "YYYY-MM-DD") a cui si riferisce scrape_lookups_today. Se != oggi
+    # il contatore e' stale → vale 0 (reset lazy, vedi account_manager). Rende il
+    # cap auto-guarente anche se il cron daily_reset non gira.
+    scrape_lookups_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
     daily_message_limit: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
     total_messages_sent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     warmup_day: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

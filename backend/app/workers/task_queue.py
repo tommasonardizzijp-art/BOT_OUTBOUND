@@ -112,7 +112,11 @@ async def daily_reset(ctx: dict) -> None:
     logger.info("[Cron] daily_reset: starting...")
     async with AsyncSessionLocal() as db:
         # ── Reset daily message counters ──────────────────────────────────
-        await db.execute(update(InstagramAccount).values(daily_message_count=0, scrape_lookups_today=0))
+        await db.execute(update(InstagramAccount).values(
+            daily_message_count=0,
+            scrape_lookups_today=0,
+            scrape_lookups_date=datetime.utcnow().strftime("%Y-%m-%d"),
+        ))
 
         # ── Re-activate expired cooldowns ──────────────────────────────────
         await db.execute(
@@ -307,8 +311,10 @@ async def on_startup(ctx: dict) -> None:
 class WorkerSettings:
     functions = [
         scrape_followers_task,
-        list_followers_task,
-        scrape_bios_task,
+        # list/bio usano Retry(defer) per le pause sessione: ogni break = 1 try.
+        # Default max_tries=5 abortirebbe liste/bio lunghe dopo 5 pause → alza il cap.
+        func(list_followers_task, max_tries=10000),
+        func(scrape_bios_task, max_tries=10000),
         func(run_campaign_task, max_tries=10000),
         pre_generate_messages_task,
         full_batch_generate_task,

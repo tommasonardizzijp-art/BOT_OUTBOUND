@@ -284,7 +284,7 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
     a bio_scraped.
 
     Ritorna una tupla ``(outcome, account_used, error)``:
-      - outcome: 'done' | 'soft_block' | 'capped' | 'challenge' | 'error'
+      - outcome: 'done' | 'soft_block' | 'capped' | 'challenge' | 'network' | 'error'
       - account_used: l'account che ha eseguito la chiamata IG (None se 'capped')
       - error: l'eccezione catturata su 'challenge'/'error' (None altrimenti)
 
@@ -307,6 +307,21 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
             return "soft_block", current_account, None
         if "429" in es or "too many" in es or "rate" in es:
             return "soft_block", current_account, None
+        # Connessione caduta (tethering USB staccato, proxy giu', DNS): NON e' colpa
+        # del profilo. Il chiamante mette in pausa la run preservando i pending,
+        # invece di skippare profili buoni o ciclare a vuoto.
+        if isinstance(e, (ConnectionError, TimeoutError, OSError)) or any(
+            k in es for k in (
+                "connection", "timed out", "timeout", "proxy", "max retries",
+                "network", "unreachable", "reset by peer", "getaddrinfo",
+                "resolve", "ssl", "tunnel", "aborted",
+            )
+        ):
+            logger.warning(f"[Bio] user_info @{follower.username} errore di rete: {e}")
+            return "network", current_account, e
+        # Errore di parsing/dati specifico del profilo (es. KeyError
+        # 'pinned_channels_info' quando IG cambia schema): il chiamante skippa
+        # questo profilo e avanza.
         logger.warning(f"[Bio] user_info @{follower.username} fallito: {e}")
         return "error", current_account, e
 
@@ -317,7 +332,8 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
     # che committa subito): con expire_on_commit=False i due incrementi si
     # sommano -> doppio conteggio (cap raggiunto a meta'). Il bump in-memory e'
     # gia' visibile a pool.next nello stesso run.
-    current_account.scrape_lookups_today = (current_account.scrape_lookups_today or 0) + 1
+    from app.services.account_manager import bump_scrape_lookup
+    bump_scrape_lookup(current_account)
 
     follower.biography = user_info.biography or None
     follower.is_verified = getattr(user_info, "is_verified", False) or False
@@ -703,8 +719,10 @@ async def _store_followers_batch(
                 ext = getattr(user_info, 'external_url', None)
                 external_url = str(ext) if ext else None
                 contacts = extract_contacts(user_info)
-                await increment_scrape_lookup(db, current_account.id)
-                current_account.scrape_lookups_today = (current_account.scrape_lookups_today or 0) + 1
+                # Un solo conteggio: bump in-memory date-aware, persistito dal commit
+                # del batch. (Prima sommava anche increment_scrape_lookup -> doppio.)
+                from app.services.account_manager import bump_scrape_lookup
+                bump_scrape_lookup(current_account)
                 consecutive_soft_blocks = 0
                 break
             except Exception as e:

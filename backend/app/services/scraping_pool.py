@@ -17,6 +17,15 @@ class ScrapingPoolEmpty(Exception):
     """Nessun account utilizzabile nel pool (tutti a cap o nessuno loggato)."""
 
 
+class ScrapingSlotsBusy(ScrapingPoolEmpty):
+    """Account esistono ma tutti gli slot sono occupati da un ALTRO job.
+
+    Condizione transitoria (non un errore della campagna): il chiamante deve
+    uscire silenzioso senza portare la campagna in 'error'. Sottoclasse di
+    ScrapingPoolEmpty per retro-compat con i catch esistenti.
+    """
+
+
 class ScrapingPool:
     def __init__(self, entries: list[dict]):
         # entries: list[{"account": InstagramAccount, "client": Client, "slot_owned": bool}]
@@ -58,9 +67,12 @@ class ScrapingPool:
             )
 
         entries: list[dict] = []
+        slot_busy = 0
+        login_failed = 0
         for acct in accounts:
             slot_owned = await acquire_scraping_slot(acct.id)
             if not slot_owned:
+                slot_busy += 1
                 logger.warning(
                     f"[ScrapingPool] Slot @{acct.username} già occupato da un'altra campagna — escluso dal pool"
                 )
@@ -68,12 +80,19 @@ class ScrapingPool:
             try:
                 client = await _login(acct, db)
             except Exception as e:
+                login_failed += 1
                 await release_scraping_slot(acct.id)
                 logger.warning(f"[ScrapingPool] Login fallito per @{acct.username}: {e} — escluso dal pool")
                 continue
             entries.append({"account": acct, "client": client, "slot_owned": True})
 
         if not entries:
+            # Slot tutti occupati e nessun login fallito = job duplicato concorrente
+            # (gli slot li tiene l'altro job). Transitorio: non e' un errore campagna.
+            if slot_busy and not login_failed:
+                raise ScrapingSlotsBusy(
+                    "Tutti gli slot account occupati da un altro job — esco senza errore."
+                )
             raise ScrapingPoolEmpty(
                 "Nessun account scraping disponibile/loggato per la campagna (slot occupati o login falliti)."
             )

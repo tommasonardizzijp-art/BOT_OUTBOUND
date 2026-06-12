@@ -9,10 +9,10 @@ LeadQualificationStatusValue = Literal["match", "no_match", "ambiguous", "error"
 
 
 class LeadThresholdsMixin(BaseModel):
-    pass_threshold: int = Field(default=80, ge=0, le=100)
-    reject_threshold: int = Field(default=25, ge=0, le=100)
-    ai_review_min_score: int = Field(default=26, ge=0, le=100)
-    ai_review_max_score: int = Field(default=79, ge=0, le=100)
+    pass_threshold: int = Field(default=10, ge=0, le=100)
+    reject_threshold: int = Field(default=0, ge=0, le=100)
+    ai_review_min_score: int = Field(default=1, ge=0, le=100)
+    ai_review_max_score: int = Field(default=9, ge=0, le=100)
     max_run_size: int = Field(default=5000, ge=1, le=5000)
 
     @model_validator(mode="after")
@@ -70,6 +70,10 @@ class LeadQualificationFilters(BaseModel):
     min_followers: int | None = Field(default=None, ge=0)
     max_leads: int = Field(default=5000, ge=1, le=5000)
     skip_existing_same_rules: bool = True
+    # Se True: ogni lead che ha un contatto (telefono/email/whatsapp/link) viene
+    # messo automaticamente come match, anche senza keyword di nicchia. Utile su
+    # pagine super-in-target dove si contatta chiunque sia raggiungibile.
+    match_on_contact: bool = False
 
 
 class LeadQualificationEstimateRequest(BaseModel):

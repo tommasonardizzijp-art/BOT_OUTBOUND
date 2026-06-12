@@ -173,8 +173,10 @@ async def resolve_imports(campaign_id: str) -> None:
 
                 info, err, account = await _resolve_one(db, campaign, row.username, pool, current_account, current_client)
                 if info is not None:
-                    await increment_scrape_lookup(db, account.id)
-                    account.scrape_lookups_today = (account.scrape_lookups_today or 0) + 1
+                    # Un solo conteggio date-aware (persistito dal commit sotto);
+                    # prima sommava anche increment_scrape_lookup -> doppio.
+                    from app.services.account_manager import bump_scrape_lookup
+                    bump_scrape_lookup(account)
                 status, create = classify_resolution(info, err)
                 row.status = status
                 row.error = (str(err)[:255] if err and status == "error" else None)

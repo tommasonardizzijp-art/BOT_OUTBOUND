@@ -126,6 +126,18 @@ def _bio_links_from(info) -> tuple[list[dict], str | None]:
     return links, external
 
 
+def text_has_contact(text: str | None) -> bool:
+    """Deterministic: True se il testo contiene un telefono/email/whatsapp.
+    Stesso regex usato a scrape-time, cosi' recuperiamo i recapiti che sono
+    scritti SOLO nella bio (colonna phone/email NULL)."""
+    if not text:
+        return False
+    if _emails_from_text(text) or _phones_from_text(text):
+        return True
+    wa, _ = _whatsapp_from([text])
+    return bool(wa)
+
+
 def extract_contacts(info) -> ContactData:
     """Extract contacts from an instagrapi User (or None). Never raises."""
     data = ContactData()

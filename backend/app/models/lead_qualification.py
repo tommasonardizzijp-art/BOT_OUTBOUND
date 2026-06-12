@@ -31,10 +31,10 @@ class LeadTargetProfile(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     compiled_rules: Mapped[str] = mapped_column(Text, nullable=False)
     rules_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    pass_threshold: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
-    reject_threshold: Mapped[int] = mapped_column(Integer, default=25, nullable=False)
-    ai_review_min_score: Mapped[int] = mapped_column(Integer, default=26, nullable=False)
-    ai_review_max_score: Mapped[int] = mapped_column(Integer, default=79, nullable=False)
+    pass_threshold: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    reject_threshold: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    ai_review_min_score: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    ai_review_max_score: Mapped[int] = mapped_column(Integer, default=9, nullable=False)
     max_run_size: Mapped[int] = mapped_column(Integer, default=5000, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -54,10 +54,10 @@ class LeadQualificationRun(Base):
     compiled_rules: Mapped[str] = mapped_column(Text, nullable=False)
     filters: Mapped[str] = mapped_column(Text, nullable=False)
     rules_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    pass_threshold: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
-    reject_threshold: Mapped[int] = mapped_column(Integer, default=25, nullable=False)
-    ai_review_min_score: Mapped[int] = mapped_column(Integer, default=26, nullable=False)
-    ai_review_max_score: Mapped[int] = mapped_column(Integer, default=79, nullable=False)
+    pass_threshold: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    reject_threshold: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    ai_review_min_score: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    ai_review_max_score: Mapped[int] = mapped_column(Integer, default=9, nullable=False)
     status: Mapped[LeadQualificationRunStatus] = mapped_column(
         SAEnum(LeadQualificationRunStatus, native_enum=False),
         default=LeadQualificationRunStatus.queued,

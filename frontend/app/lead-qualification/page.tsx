@@ -74,6 +74,7 @@ export default function LeadQualificationPage() {
   const [minFollowers, setMinFollowers] = useState('')
   const [maxLeads, setMaxLeads] = useState('5000')
   const [skipExisting, setSkipExisting] = useState(true)
+  const [matchOnContact, setMatchOnContact] = useState(false)
 
   const [resultStatus, setResultStatus] = useState('match')
   const [minScore, setMinScore] = useState('80')
@@ -108,6 +109,16 @@ export default function LeadQualificationPage() {
     { refreshInterval: 30000 },
   )
 
+  // Auto-seleziona il target se nessuno e' scelto e ne esiste almeno uno:
+  // senza questo i risultati (runs/qualifiche) restano nascosti al primo load
+  // perche' la SWR /results parte solo con selectedProfileId valorizzato.
+  useEffect(() => {
+    if (selectedProfileId) return
+    if (profiles && profiles.length > 0) {
+      setSelectedProfileId(profiles[0].id)
+    }
+  }, [profiles, selectedProfileId])
+
   useEffect(() => {
     if (!selectedProfile) return
     setProfileName(selectedProfile.name)
@@ -134,7 +145,8 @@ export default function LeadQualificationPage() {
     min_followers: minFollowers ? Number(minFollowers) : undefined,
     max_leads: maxLeads ? Number(maxLeads) : 5000,
     skip_existing_same_rules: skipExisting,
-  }), [dateFrom, dateTo, campaignIds, scrapingAccountIds, hasPhone, hasEmail, minFollowers, maxLeads, skipExisting])
+    match_on_contact: matchOnContact,
+  }), [dateFrom, dateTo, campaignIds, scrapingAccountIds, hasPhone, hasEmail, minFollowers, maxLeads, skipExisting, matchOnContact])
 
   const handleCompile = useCallback(async () => {
     setCompileLoading(true)
@@ -389,6 +401,17 @@ export default function LeadQualificationPage() {
               <Checkbox label="Salta gia qualificati" checked={skipExisting} onChange={setSkipExisting} />
             </div>
 
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+              <Checkbox
+                label="Chi ha un contatto (telefono/email/link) = match automatico"
+                checked={matchOnContact}
+                onChange={setMatchOnContact}
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                Pagina super-in-target: ogni profilo raggiungibile diventa match anche senza keyword di nicchia. L&apos;AI non viene usata per questi.
+              </p>
+            </div>
+
             <div className="flex gap-2">
               <Button onClick={handleEstimate} disabled={!selectedProfileId || estimateLoading}>
                 {estimateLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <BadgeCheck className="w-4 h-4 mr-2" />}
@@ -449,7 +472,15 @@ export default function LeadQualificationPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <select
+              value={selectedProfileId}
+              onChange={e => { setSelectedProfileId(e.target.value); setEstimate(null); setResultsPage(1) }}
+              className="h-9 text-sm bg-gray-800 border border-gray-700 text-gray-300 rounded-md px-2 focus:outline-none focus:ring-1 focus:ring-purple-500"
+            >
+              <option value="">— Seleziona target —</option>
+              {profiles?.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
             <select
               value={resultStatus}
               onChange={e => { setResultStatus(e.target.value); setResultsPage(1) }}

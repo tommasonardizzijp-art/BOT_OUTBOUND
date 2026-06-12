@@ -238,17 +238,51 @@ def scrape_daily_limit_for(account, campaign) -> int:
     return settings.scrape_daily_limit
 
 
+def _utc_today_str() -> str:
+    from datetime import datetime
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def effective_scrape_lookups(account) -> int:
+    """Lookup di OGGI con reset lazy: se scrape_lookups_date != oggi (UTC) il
+    contatore appartiene a un giorno passato e vale 0, senza dipendere dal cron
+    daily_reset. Il reset persistito avviene al primo bump (bump_scrape_lookup)."""
+    if getattr(account, "scrape_lookups_date", None) != _utc_today_str():
+        return 0
+    return getattr(account, "scrape_lookups_today", 0) or 0
+
+
 def has_scrape_budget(account, campaign) -> bool:
-    return (getattr(account, "scrape_lookups_today", 0) or 0) < scrape_daily_limit_for(account, campaign)
+    return effective_scrape_lookups(account) < scrape_daily_limit_for(account, campaign)
+
+
+def bump_scrape_lookup(account) -> None:
+    """Incremento in-memory date-aware del contatore lookup. Da chiamare prima del
+    db.commit() del chiamante (scraper/import). Se il contatore e' di un giorno
+    passato lo azzera e aggiorna la data prima di incrementare."""
+    today = _utc_today_str()
+    if getattr(account, "scrape_lookups_date", None) != today:
+        account.scrape_lookups_today = 0
+        account.scrape_lookups_date = today
+    account.scrape_lookups_today = (account.scrape_lookups_today or 0) + 1
 
 
 async def increment_scrape_lookup(db, account_id: str) -> None:
-    """Atomic +1 on the account's daily scrape lookup counter."""
-    from sqlalchemy import update
+    """Atomic +1 on the account's daily scrape lookup counter (date-aware reset)."""
+    from sqlalchemy import update, case
     from app.models.account import InstagramAccount
+    today = _utc_today_str()
     await db.execute(
         update(InstagramAccount)
         .where(InstagramAccount.id == account_id)
-        .values(scrape_lookups_today=InstagramAccount.scrape_lookups_today + 1)
+        .values(
+            # reset lazy: se la data salvata non e' oggi, riparti da 1, altrimenti +1
+            scrape_lookups_today=case(
+                (InstagramAccount.scrape_lookups_date == today,
+                 InstagramAccount.scrape_lookups_today + 1),
+                else_=1,
+            ),
+            scrape_lookups_date=today,
+        )
     )
     await db.commit()

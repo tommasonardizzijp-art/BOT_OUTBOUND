@@ -7,7 +7,13 @@ from app.services.scraping_pool import ScrapingPool
 
 
 def _entry(account_id, lookups, client):
-    acct = SimpleNamespace(id=account_id, username=account_id, scrape_lookups_today=lookups)
+    # scrape_lookups_date = oggi: il conteggio rappresenta uso ODIERNO (altrimenti
+    # il reset lazy lo tratterebbe come stale=0 e nessun account risulterebbe a cap).
+    from datetime import datetime
+    acct = SimpleNamespace(
+        id=account_id, username=account_id, scrape_lookups_today=lookups,
+        scrape_lookups_date=datetime.utcnow().strftime("%Y-%m-%d"),
+    )
     return {"account": acct, "client": client, "slot_owned": True}
 
 
