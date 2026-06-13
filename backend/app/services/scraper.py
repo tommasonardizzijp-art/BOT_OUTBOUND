@@ -637,6 +637,13 @@ def _fetch_followers_chunk(client, user_id: int, amount: int, max_id: str | None
             users, next_cursor = result
             return users, next_cursor or None
         except Exception:
+            # Mid-paginazione: un errore qui NON significa "lista finita". Il fallback
+            # user_following() ignora max_id (riparte dall'inizio) e ritorna cursor=None
+            # => verrebbe interpretato come fine lista, azzerando il cursore su un semplice
+            # throttle/429. Ri-solleva cosi' il caller lo gestisce (retry/challenge) e il
+            # cursore resta intatto. Il fallback resta valido SOLO alla prima pagina.
+            if max_id:
+                raise
             following_dict = client.user_following(user_id, amount=amount)
             users = list(following_dict.values())
             return users, None
@@ -646,6 +653,10 @@ def _fetch_followers_chunk(client, user_id: int, amount: int, max_id: str | None
             users, next_cursor = result
             return users, next_cursor or None
         except Exception:
+            # Vedi nota sopra (branch following): non mascherare un throttle mid-paginazione
+            # come fine lista. Fallback non-chunk solo alla prima pagina.
+            if max_id:
+                raise
             followers_dict = client.user_followers(user_id, amount=amount)
             users = list(followers_dict.values())
             return users, None

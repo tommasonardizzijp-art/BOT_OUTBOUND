@@ -49,6 +49,26 @@ def compute_phase_progress(counts: dict, list_target: int | None, bio_target: in
     )
 
 
+def list_start_blocked(scrape_cursor, existing_count: int, list_target: int | None) -> bool:
+    """True se la Fase Lista e' gia' satura per il target richiesto e non c'e' modo di prenderne altri.
+
+    - cursore presente => si puo' sempre riprendere dalla posizione IG => NON bloccare.
+    - cursore None + nessun follower => prima esecuzione => NON bloccare.
+    - cursore None + follower presenti:
+        * target None (lista intera gia' drenata) => bloccare.
+        * target set ed existing >= target => target gia' raggiunto => bloccare.
+        * target set ed existing < target => l'utente vuole piu' follower => PERMETTERE
+          (ripartira' in rescan-dedup dall'inizio: il cursore e' andato perso).
+    """
+    if scrape_cursor:
+        return False
+    if existing_count <= 0:
+        return False
+    if list_target is None:
+        return True
+    return existing_count >= list_target
+
+
 async def _enrich_campaign(campaign: Campaign, db: AsyncSession, include_today: bool = False) -> CampaignResponse:
     """Build CampaignResponse with live-reconciled counters from Follower.status GROUP BY."""
     counts_result = await db.execute(
@@ -470,18 +490,23 @@ async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: A
         raise HTTPException(status_code=400, detail="Nessun account attivo con ruolo scraping o 'entrambi'.")
     if not await _check_redis_reachable():
         raise HTTPException(status_code=503, detail="Redis non raggiungibile.")
-    # Blocca rescan: se lista già completata (cursor=None) e follower in DB, non rifare da capo
-    if not campaign.scrape_cursor:
-        existing_count = await db.scalar(
-            select(func.count(Follower.id)).where(Follower.campaign_id == campaign.id)
-        ) or 0
-        if existing_count > 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Lista già completata ({existing_count} follower in DB). Reset la campagna prima di rifare la lista."
-            )
+    # Applica il nuovo target PRIMA del guard: alzarlo deve poter sbloccare il restart.
     if body and body.target is not None:
         campaign.list_target = body.target
+    # Blocca solo se la lista e' davvero satura per il target corrente (cursore perso E
+    # gia' raccolti >= target). Se il target e' stato alzato sopra il count, si riparte.
+    existing_count = await db.scalar(
+        select(func.count(Follower.id)).where(Follower.campaign_id == campaign.id)
+    ) or 0
+    if list_start_blocked(campaign.scrape_cursor, existing_count, campaign.list_target):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Lista già completa per il target ({existing_count} follower in DB, "
+                f"target {campaign.list_target or 'intera lista'}). "
+                f"Alza il target per raccoglierne altri, oppure resetta la campagna."
+            ),
+        )
     campaign.status = CampaignStatus.listing
     campaign.updated_at = datetime.utcnow()
     db.add(ActivityLog(campaign_id=campaign.id, action="list_started"))

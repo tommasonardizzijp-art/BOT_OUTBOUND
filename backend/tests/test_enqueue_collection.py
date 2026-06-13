@@ -11,6 +11,10 @@ class _FakeRedis:
     def __init__(self):
         self.enqueued = []
 
+    async def exists(self, key):
+        # Nessun job in-progress nei test: _reenqueue_phase deve poter accodare.
+        return 0
+
     async def delete(self, *keys):
         pass
 

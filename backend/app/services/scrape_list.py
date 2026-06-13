@@ -101,6 +101,7 @@ async def list_followers(campaign_id: str) -> int | None:
             already = await db.scalar(select(func.count(Follower.id)).where(Follower.campaign_id == campaign_id)) or 0
             max_id = campaign.scrape_cursor or None
             since_break = 0
+            ig_exhausted = False  # True solo se IG ha davvero finito la lista (batch/cursore vuoti)
             if max_id:
                 logger.info(f"[Lista] Ripresa da cursore — {already} follower già in DB")
             elif already > 0:
@@ -136,6 +137,7 @@ async def list_followers(campaign_id: str) -> int | None:
                 logger.info(f"[Lista] pagina via @{account.username}: {len(batch)} da IG (già in DB: {already})")
                 if not batch:
                     logger.info(f"[Lista] Lista IG esaurita ({already})")
+                    ig_exhausted = True
                     break
 
                 stored = 0
@@ -170,6 +172,7 @@ async def list_followers(campaign_id: str) -> int | None:
 
                 if not max_id:
                     logger.info(f"[Lista] Fine lista ({already})")
+                    ig_exhausted = True
                     break
 
                 # Pausa sessione lista — defer via ARQ Retry (timeout-safe, no sleep in-job).
@@ -186,12 +189,16 @@ async def list_followers(campaign_id: str) -> int | None:
                     logger.info(f"[Lista] Pausa sessione {int(minutes)}min dopo {already} follower — defer job")
                     return seconds
 
-            # Completata: torna a ready (o resta listing-done -> ready)
+            # Fine fase: torna a ready. Azzera il cursore SOLO se IG ha davvero esaurito
+            # la lista; se ci siamo fermati per target raggiunto, conserva il cursore cosi'
+            # alzando il target la lista riprende dalla posizione IG (niente rescan dall'inizio).
             campaign.status = CampaignStatus.ready
-            campaign.scrape_cursor = None
+            if ig_exhausted:
+                campaign.scrape_cursor = None
             campaign.updated_at = datetime.utcnow()
             await db.commit()
-            emit_event(campaign_id, "scrape_complete", f"Fase Lista completata: {already} follower in lista")
+            done_label = "esaurita" if ig_exhausted else "target raggiunto"
+            emit_event(campaign_id, "scrape_complete", f"Fase Lista completata ({done_label}): {already} follower in lista")
 
         except BotHaltedError:
             from app.utils.events import emit as emit_event

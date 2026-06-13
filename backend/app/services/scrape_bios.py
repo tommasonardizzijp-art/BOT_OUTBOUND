@@ -1,6 +1,7 @@
 """Fase Bio: estrae bio+contatti dai Follower(status=pending) gia' in lista."""
 import asyncio
 import random
+import time
 from datetime import datetime, timedelta
 
 from loguru import logger
@@ -19,6 +20,15 @@ from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, SoftBlockErr
 MAX_BIO_ATTEMPTS = 3
 # Fallimenti di fila oltre i quali la run si ferma (problema sistemico, non profilo).
 MAX_CONSECUTIVE_BIO_FAIL = 5
+# Micro-yield: ogni quante bio estratte (o secondi di wall-clock) il job cede ad ARQ
+# con un defer brevissimo. Spezza un job lungo in tanti job corti, cosi' la durata del
+# SINGOLO job resta ben sotto job_timeout del worker (3600s) SENZA un cap hard sul
+# totale dei lead. ~100 lookup x ~18s ~= 1800s, meta' del timeout. Invisibile
+# all'utente: lo status resta 'scraping' e il job successivo riprende subito dai
+# pending. Distinto dalla pausa lunga anti-block (scrape_session_size -> 30-45 min),
+# che resta la cadenza "umana": questo serve SOLO a non sforare il timeout di ARQ.
+MICRO_YIELD_EVERY = 100
+MICRO_YIELD_MAX_SECONDS = 40 * 60
 
 
 def bio_should_continue(target: int | None, done: int) -> bool:
@@ -74,7 +84,14 @@ async def scrape_bios(campaign_id: str) -> int | None:
 
             pool = await ScrapingPool.build(db, campaign)
             emit_event(campaign_id, "scrape_start", f"Fase Bio avviata — target {campaign.bio_target or 'tutti i pending'}")
-            since_break = 0
+            # Cadenza pausa lunga anti-block ancorata a `done` (count bio_scraped,
+            # persistito in DB): sopravvive ai micro-yield/restart, che azzerano i
+            # contatori locali. Prossima pausa al primo multiplo di `size` oltre `done`.
+            size = getattr(campaign, "scrape_session_size", 250) or 250
+            next_long_break = ((done // size) + 1) * size
+            # Contatori del SINGOLO job (azzerati a ogni restart): governano il micro-yield.
+            processed_this_job = 0
+            job_started = time.monotonic()
 
             while bio_should_continue(campaign.bio_target, done):
                 if await is_halted(db):
@@ -177,27 +194,47 @@ async def scrape_bios(campaign_id: str) -> int | None:
                     consecutive_soft = 0
                     consecutive_fail = 0
                     done += 1
-                    since_break += 1
+                    processed_this_job += 1
                     delay = random.uniform(
                         getattr(campaign, "bio_fetch_delay_min", 5.0) or 5.0,
                         getattr(campaign, "bio_fetch_delay_max", 8.0) or 8.0,
                     )
                     await asyncio.sleep(delay)
 
-                if since_break >= getattr(campaign, "scrape_session_size", 250):
-                    minutes = random.uniform(
-                        getattr(campaign, "scrape_break_minutes_min", 30),
-                        getattr(campaign, "scrape_break_minutes_max", 45),
+                    # Pausa lunga anti-block (cadenza "umana", invariata): ogni `size`
+                    # bio totali. Dentro il ramo "done" (mai dopo uno skip) e ancorata a
+                    # `done` cosi' non ri-scatta al rientro quando `done` resta sul confine.
+                    if done >= next_long_break:
+                        minutes = random.uniform(
+                            getattr(campaign, "scrape_break_minutes_min", 30),
+                            getattr(campaign, "scrape_break_minutes_max", 45),
+                        )
+                        seconds = int(minutes * 60)
+                        campaign.scrape_break_prev_status = CampaignStatus.scraping.value
+                        campaign.status = CampaignStatus.scraping_break
+                        campaign.scrape_break_until = datetime.utcnow() + timedelta(seconds=seconds)
+                        campaign.updated_at = datetime.utcnow()
+                        await db.commit()
+                        emit_event(campaign_id, "scrape_break", f"Pausa bio {int(minutes)} min dopo {done}")
+                        logger.info(f"[Bio] Pausa sessione {int(minutes)}min dopo {done} bio — defer job")
+                        return seconds
+
+                # Micro-yield: cede il job ad ARQ ben prima di job_timeout (3600s).
+                # Defer brevissimo, status RESTA 'scraping' (niente *_break, nessun
+                # evento utente): il job successivo riprende subito dai pending. Spezza
+                # il job lungo, non e' una pausa percepita. Conta solo le bio riuscite
+                # (processed_this_job): durante uno streak di fallimenti agisce invece il
+                # guard consecutive_fail; il backstop wall-clock copre i lookup lenti.
+                if (
+                    processed_this_job >= MICRO_YIELD_EVERY
+                    or (time.monotonic() - job_started) >= MICRO_YIELD_MAX_SECONDS
+                ):
+                    logger.info(
+                        f"[Bio] Micro-yield dopo {processed_this_job} bio / "
+                        f"{int(time.monotonic() - job_started)}s — defer job "
+                        f"(status resta scraping, {done} totali)"
                     )
-                    seconds = int(minutes * 60)
-                    campaign.scrape_break_prev_status = CampaignStatus.scraping.value
-                    campaign.status = CampaignStatus.scraping_break
-                    campaign.scrape_break_until = datetime.utcnow() + timedelta(seconds=seconds)
-                    campaign.updated_at = datetime.utcnow()
-                    await db.commit()
-                    emit_event(campaign_id, "scrape_break", f"Pausa bio {int(minutes)} min dopo {done}")
-                    logger.info(f"[Bio] Pausa sessione {int(minutes)}min dopo {done} bio — defer job")
-                    return seconds
+                    return 2
 
             campaign.status = CampaignStatus.ready
             campaign.updated_at = datetime.utcnow()
