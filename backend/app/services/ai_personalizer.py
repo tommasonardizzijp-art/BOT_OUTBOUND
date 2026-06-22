@@ -24,7 +24,7 @@ from app.adapters.ai import AIClient
 # Provider defaults
 _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 _GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
-_GEMINI_DEFAULT_MODEL = "gemini-2.0-flash"
+_GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"  # 2.0-flash dismesso/quota free 0
 
 
 class ConfiguredAIClient:
@@ -190,6 +190,10 @@ async def _generate_gemini(system_prompt: str, user_prompt: str, max_tokens: int
             "temperature": settings.ai_temperature,
             "maxOutputTokens": max_tokens,
             "topP": 0.9,
+            # Gemini 2.5+ ha il "thinking" ON di default: consuma maxOutputTokens
+            # prima di scrivere → output troncato (finishReason=MAX_TOKENS) o vuoto.
+            # thinkingBudget=0 lo disattiva. Ignorato dai modelli che non lo supportano.
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
     async with httpx.AsyncClient(timeout=30) as client:
@@ -263,10 +267,14 @@ def _validate_message(message: str, base_template: str, fallback_name: str) -> s
     if message and message[0] in _leading_quotes:
         message = message[1:].strip()
 
-    # Collapse newlines — Instagram DM input sends on Enter
-    message = message.replace('\r\n', ' ').replace('\r', ' ').replace('\n', ' ').strip()
+    # Preserve newlines: at send time vengono battuti come Shift+Enter (Enter da
+    # solo invierebbe il DM). Normalizza CRLF, trim spazi per riga, collassa 3+
+    # righe vuote in una sola.
     import re
-    message = re.sub(r' {2,}', ' ', message)
+    message = message.replace('\r\n', '\n').replace('\r', '\n')
+    message = '\n'.join(ln.rstrip() for ln in message.split('\n'))
+    message = re.sub(r'[ \t]{2,}', ' ', message)
+    message = re.sub(r'\n{3,}', '\n\n', message).strip()
 
     # Dynamic char cap based on template length — Instagram DM soft-limit ~2200
     char_cap = max(1500, len(base_template) * 3)

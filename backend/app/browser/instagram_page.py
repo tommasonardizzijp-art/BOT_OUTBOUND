@@ -233,6 +233,40 @@ class InstagramPage:
             except Exception:
                 pass
 
+    # Candidati input DM, dal più specifico al più generico (cross-locale).
+    _DM_INPUT_SELECTORS = (
+        'div[aria-label="Message"][contenteditable="true"]',
+        'div[aria-label="Messaggio"][contenteditable="true"]',
+        'div[aria-label="Message..."][contenteditable="true"]',
+        'div[contenteditable="true"][role="textbox"]',
+        'div[role="textbox"]',
+    )
+
+    async def _locate_dm_input(self, page, timeout: int = 10000):
+        """Trova l'input DM con UNA sola attesa sull'unione dei selettori, poi
+        sceglie per priorità con check istantanei (is_visible).
+
+        Il vecchio loop faceva `wait_for(timeout=8000)` per OGNI selettore in
+        sequenza: se i primi (es. aria-label inglese "Message") non matchavano
+        il locale IT, si accumulavano 8-24s di attesa a vuoto ("imbambolato").
+        Qui il timeout è pagato una volta sola.
+        Ritorna (locator | None, selettore | None).
+        """
+        union = ", ".join(self._DM_INPUT_SELECTORS)
+        try:
+            await page.locator(union).first.wait_for(state="visible", timeout=timeout)
+        except Exception:
+            return None, None
+        for selector in self._DM_INPUT_SELECTORS:
+            loc = page.locator(selector).first
+            try:
+                if await loc.count() > 0 and await loc.is_visible():
+                    return loc, selector
+            except Exception:
+                continue
+        # Union visibile ma priorità mancata (race DOM): usa il primo dell'unione.
+        return page.locator(union).first, union
+
     async def send_dm(self, username: str, message: str, pre_send_callback: Optional[Callable[[], Awaitable[bool]]] = None) -> None:
         """Navigate to a user's profile and send a DM."""
         page = await self._get_page()
@@ -329,26 +363,9 @@ class InstagramPage:
         # Dismiss any popup that appeared after DM thread opened
         await self._dismiss_ig_modals(page, username)
 
-        # Find DM input — ordered from most specific to least.
-        # NOTE: placeholder attr doesn't work on contenteditable divs — removed.
-        # role="textbox" is the most reliable cross-locale selector on /direct/ pages.
-        msg_input = None
-        found_selector = None
-        for selector in [
-            'div[aria-label="Message"][contenteditable="true"]',
-            'div[aria-label="Messaggio"][contenteditable="true"]',
-            'div[aria-label="Message..."][contenteditable="true"]',
-            'div[contenteditable="true"][role="textbox"]',
-            'div[role="textbox"]',
-        ]:
-            loc = page.locator(selector)
-            try:
-                await loc.first.wait_for(state="visible", timeout=8000)
-                msg_input = loc.first
-                found_selector = selector
-                break
-            except Exception:
-                continue
+        # Find DM input — una sola attesa sull'unione dei selettori (no timeout
+        # impilati per locale: vedi _locate_dm_input).
+        msg_input, found_selector = await self._locate_dm_input(page)
 
         if msg_input is None and await self._is_stories_viewer_open(page):
             logger.info(f"@{username}: DM input search landed in Stories - returning to profile and retrying once")
@@ -363,21 +380,7 @@ class InstagramPage:
             await asyncio.sleep(random.uniform(2.5, 4.0))
             await self._dismiss_ig_modals(page, username)
 
-            for selector in [
-                'div[aria-label="Message"][contenteditable="true"]',
-                'div[aria-label="Messaggio"][contenteditable="true"]',
-                'div[aria-label="Message..."][contenteditable="true"]',
-                'div[contenteditable="true"][role="textbox"]',
-                'div[role="textbox"]',
-            ]:
-                loc = page.locator(selector)
-                try:
-                    await loc.first.wait_for(state="visible", timeout=8000)
-                    msg_input = loc.first
-                    found_selector = selector
-                    break
-                except Exception:
-                    continue
+            msg_input, found_selector = await self._locate_dm_input(page)
 
         if msg_input is None:
             try:
@@ -404,11 +407,11 @@ class InstagramPage:
         # Small extra pause so the input is fully interactive before typing
         await asyncio.sleep(random.uniform(0.5, 1.0))
 
-        # Strip any newlines — keyboard.type('\n') triggers Instagram's send action
-        # mid-typing, splitting one message into two (or losing the second half).
-        # This catches both newly generated messages and old DB records with \n.
+        # Normalizza CRLF ma PRESERVA gli a-capo: _human_type li batte come
+        # Shift+Enter (Enter da solo invierebbe il DM). Collassa 3+ righe vuote.
         import re as _re
-        message = _re.sub(r'\s*[\r\n]+\s*', ' ', message).strip()
+        message = message.replace('\r\n', '\n').replace('\r', '\n')
+        message = _re.sub(r'\n{3,}', '\n\n', message).strip()
 
         # Type and send the message
         await self._human_type(msg_input, message)
@@ -453,40 +456,51 @@ class InstagramPage:
         # directly to the focused element without evaluating the locator again.
         page = self._page
 
-        # Each session has a random base typing speed, scaled by per-account timing multiplier
-        base_ms = random.uniform(70, 160) * self._tm
+        # Each session has a random base typing speed, scaled by per-account timing multiplier.
+        # Tarato su un utente "digitale" veloce (~130 WPM di picco): 28-70 ms/char.
+        # La varianza lognormale + pause/typo sotto tengono il risultato umano.
+        base_ms = random.uniform(28, 70) * self._tm
 
-        words = text.split(' ')
-        for i, word in enumerate(words):
-            # Occasional thinking pause before a word (more likely mid-sentence)
-            if i > 0 and random.random() < 0.15:
-                await asyncio.sleep(random.uniform(0.4, 1.8))
+        # Su IG web Enter invia il DM: gli a-capo si battono come Shift+Enter
+        # (newline senza invio). Tipiamo riga per riga, parola per parola.
+        lines = text.split('\n')
+        for line_idx, line in enumerate(lines):
+            if line_idx > 0:
+                # A-capo umano: Shift+Enter (non invia)
+                await page.keyboard.press("Shift+Enter")
+                await asyncio.sleep(random.uniform(0.15, 0.5))
 
-            for char_idx, char in enumerate(word):
-                # Typo: ~8% chance per char in words >3 letters (skip first/last char)
-                if len(word) > 3 and 0 < char_idx < len(word) - 1 and random.random() < 0.08:
-                    wrong = _typo_char(char)
-                    if wrong:
-                        err_delay = random.lognormvariate(math.log(base_ms), 0.45)
-                        await page.keyboard.type(wrong)
-                        await asyncio.sleep(max(35, min(480, err_delay)) / 1000)
-                        await asyncio.sleep(random.uniform(0.15, 0.50))  # notice mistake
-                        await page.keyboard.press("Backspace")
-                        await asyncio.sleep(random.uniform(0.08, 0.25))  # before retyping
+            words = line.split(' ')
+            for i, word in enumerate(words):
+                # Occasional thinking pause before a word (more likely mid-sentence)
+                if i > 0 and random.random() < 0.07:
+                    await asyncio.sleep(random.uniform(0.25, 1.0))
 
-                # Correct character with lognormal delay
-                delay_ms = random.lognormvariate(math.log(base_ms), 0.45)
-                delay_ms = max(35, min(480, delay_ms))
-                await page.keyboard.type(char)
-                await asyncio.sleep(delay_ms / 1000)
-                # Rare micro-pause within a word (re-reading, hesitation)
-                if random.random() < 0.03:
-                    await asyncio.sleep(random.uniform(0.2, 0.7))
+                for char_idx, char in enumerate(word):
+                    # Typo: ~3.5% chance per char in words >3 letters (skip first/last char)
+                    if len(word) > 3 and 0 < char_idx < len(word) - 1 and random.random() < 0.035:
+                        wrong = _typo_char(char)
+                        if wrong:
+                            err_delay = random.lognormvariate(math.log(base_ms), 0.45)
+                            await page.keyboard.type(wrong)
+                            await asyncio.sleep(max(20, min(480, err_delay)) / 1000)
+                            await asyncio.sleep(random.uniform(0.12, 0.40))  # notice mistake
+                            await page.keyboard.press("Backspace")
+                            await asyncio.sleep(random.uniform(0.06, 0.20))  # before retyping
 
-            # Type the space between words
-            if i < len(words) - 1:
-                await page.keyboard.type(' ')
-                await asyncio.sleep(random.uniform(40, 120) / 1000)
+                    # Correct character with lognormal delay
+                    delay_ms = random.lognormvariate(math.log(base_ms), 0.45)
+                    delay_ms = max(20, min(480, delay_ms))
+                    await page.keyboard.type(char)
+                    await asyncio.sleep(delay_ms / 1000)
+                    # Rare micro-pause within a word (re-reading, hesitation)
+                    if random.random() < 0.015:
+                        await asyncio.sleep(random.uniform(0.2, 0.7))
+
+                # Type the space between words
+                if i < len(words) - 1:
+                    await page.keyboard.type(' ')
+                    await asyncio.sleep(random.uniform(25, 80) / 1000)
 
     async def _maybe_view_stories(self, page, username: str) -> bool:
         """Click the profile picture to open stories if available (≈35% of visits).

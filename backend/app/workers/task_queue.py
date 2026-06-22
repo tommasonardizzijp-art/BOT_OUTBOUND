@@ -318,7 +318,9 @@ class WorkerSettings:
         func(run_campaign_task, max_tries=10000),
         pre_generate_messages_task,
         full_batch_generate_task,
-        resolve_imports_task,
+        # max_tries alto: i Retry(defer) su blip DB/rete transitori non devono
+        # esaurire il default (5) durante un'outage prolungata.
+        func(resolve_imports_task, max_tries=10000),
         qualify_leads_task,
     ]
     cron_jobs = []

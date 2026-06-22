@@ -47,6 +47,7 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 | 7F | Scraping avanzato: contatti (phone/email/whatsapp/link) + messaggistica opzionale + cap scraping | 2026-06-06 |
 | 7G | Qualifica lead: target salvabili, scoring deterministico, AI sugli ambigui, export dedicato; migration 015 applicata | 2026-06-08 |
 | 7G fix | Lead qualification hardening: paginazione worker ID-based, cancellazione run, fix _model_used, JSON parse guard | 2026-06-08 |
+| Hardening DM | Resilienza blip rete/DB (Retry defer), a-capo DM via Shift+Enter, switch AI Groq→Gemini 2.5-flash, fix freeze input-DM, typing 2.3x | 2026-06-22 |
 
 ### Da fare ☐
 

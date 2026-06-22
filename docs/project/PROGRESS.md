@@ -1085,6 +1085,24 @@ Separato lo scraping `source_type='scrape'` in due fasi indipendenti per elimina
 
 ---
 
+## [2026-06-22] Hardening sessione: resilienza DB, a-capo DM, Gemini, anti-freeze, typing
+
+Sessione di fix operativi sul flusso DM/scraping (branch `feature/advanced-scraping`).
+
+1. **Resilienza blip rete/DB** — `OSError [WinError 121]` (connect a pooler Supabase fallito) faceva crashare il worker e fermare la campagna. Con `NullPool` ogni query apre una connessione nuova → un blip su qualsiasi `db.execute` era fatale. Nuovo `app/utils/db_resilience.py:is_transient_db_error()` (riconosce OSError/connessione, anche in catena `__cause__`/`.orig`); i 4 worker (`message/bio/list/import`) convertono l'errore transitorio in `Retry(defer=60)` invece di fallire; `database.py` aggiunge `timeout=15` al connect asyncpg; `resolve_imports_task` portato a `max_tries=10000`.
+
+2. **DM senza a-capo (blocco unico)** — su IG web Enter invia, quindi il codice schiacciava ogni `\n` in spazi (in `_validate_message` + `send_dm`). Fix: gli a-capo si battono come `Shift+Enter` (newline senza invio). `_validate_message` preserva `\n`, `_human_type` tipa riga per riga con `Shift+Enter` tra le righe. Rigenerati 74 messaggi standby (tutti con a-capo).
+
+3. **Groq TPD esaurito → Gemini** — free tier Groq 70b = 100k token/giorno, saturato. Switch a `gemini-2.5-flash` (key utente). ⚠️ Gemini 2.5 ha "thinking" ON che consuma `maxOutputTokens` → output troncato; fix `thinkingConfig.thinkingBudget=0` in `_generate_gemini`. Default `_GEMINI_DEFAULT_MODEL` 2.0→2.5-flash (2.0 ha quota free 0). `.env`: `AI_PROVIDER=gemini`, Groq key conservata commentata.
+
+4. **Chat DM "imbambolata" 10-15s** — il loop di ricerca input DM provava 5 selettori in sequenza, ognuno con `wait_for(timeout=8000)`: i primi (aria-label inglese) andavano a vuoto sul locale IT → 8-16s di stallo a chat già aperta. Fix: helper `_locate_dm_input` con UNA attesa sull'unione dei selettori + scelta per priorità istantanea (`is_visible`). Priorità per locale preservata.
+
+5. **Typing velocizzato ~2.3x** — `_human_type`: `base_ms` 70-160→28-70 ms/char, clamp min 35→20, typo 8%→3.5%, pausa-parola 15%→7%, micro-pausa 3%→1.5%, spazio 40-120→25-80ms. Varianza lognormale + typo + pause mantenute (umano). Simulato: 257char 46.6s→20.4s.
+
+**File**: `backend/app/utils/db_resilience.py` (nuovo), `backend/app/database.py`, `backend/app/services/ai_personalizer.py`, `backend/app/browser/instagram_page.py`, `backend/app/workers/{message,bio,list,import}_worker.py`, `backend/app/workers/task_queue.py`, `.env`, `CLAUDE.md`. ⚠️ Richiede restart backend + arq worker. Dettagli per-fix in `memory/project_state.md`.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |

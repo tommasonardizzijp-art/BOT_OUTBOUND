@@ -24,6 +24,10 @@ def _connect_args() -> dict:
         return {
             "statement_cache_size": 0,
             "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4()}__",
+            # Connect timeout corto: un blip di rete verso il pooler Supabase
+            # fallisce in ~15s invece di restare appeso fino al default (60s).
+            # I worker convertono il fallimento in Retry(defer) (db_resilience).
+            "timeout": 15,
         }
     return {}
 

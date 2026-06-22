@@ -271,7 +271,7 @@ Variabili chiave:
 - `OLLAMA_MODEL`: nome modello Ollama (usato solo se `AI_PROVIDER=ollama`)
 - `AI_PROVIDER`: `ollama` | `groq` | `gemini` — seleziona provider LLM
 - `AI_API_KEY`: API key del provider cloud (Groq: `gsk_...`, Gemini: `AIza...`)
-- `AI_MODEL`: modello specifico (vuoto = default provider: Groq→`llama-3.3-70b-versatile`, Gemini→`gemini-2.0-flash`)
+- `AI_MODEL`: modello specifico (vuoto = default provider: Groq→`llama-3.3-70b-versatile`, Gemini→`gemini-2.5-flash`). ⚠️ Gemini 2.5+ ha il "thinking" ON di default che consuma `maxOutputTokens` → `_generate_gemini` forza `thinkingConfig.thinkingBudget=0`, altrimenti i messaggi escono troncati/vuoti. `gemini-2.0-flash` è dismesso (quota free 0).
 - `AI_BASE_URL`: override endpoint OpenAI-compatible (vuoto = default provider)
 - `AI_SYSTEM_PROMPT`: override system prompt completo (vuoto = usa default ottimizzato hardcoded)
 - `AI_TEMPERATURE`: temperatura sampling, default `0.35` (più bassa = messaggi più consistenti)
@@ -353,7 +353,7 @@ Il layer AI supporta tre provider configurabili via `.env`:
 |---|---|---|---|
 | `ollama` | nessuna API key | `OLLAMA_MODEL` | locale, lento, qualità bassa su modelli piccoli |
 | `groq` | `AI_API_KEY=gsk_...` | `llama-3.3-70b-versatile` | gratis, OpenAI-compatible, raccomandato |
-| `gemini` | `AI_API_KEY=AIza...` | `gemini-2.0-flash` | gratis, REST API propria |
+| `gemini` | `AI_API_KEY=AIza... o AQ....` | `gemini-2.5-flash` | gratis, REST API propria; thinking disattivato (thinkingBudget=0). Groq free tier 70b = solo 100k token/giorno |
 
 ### Parametri chiave
 - `AI_TEMPERATURE=0.35` — bassa per messaggi B2B consistenti (non alzare oltre 0.5)
@@ -364,7 +364,7 @@ Il layer AI supporta tre provider configurabili via `.env`:
 1. `generate_message()` → legge `settings.ai_provider` → branch sul provider
 2. `_build_user_prompt()` → costruisce il prompt utente con template + bio + contesto campagna
 3. `_get_system_prompt()` → usa `AI_SYSTEM_PROMPT` da .env oppure `DEFAULT_SYSTEM_PROMPT`
-4. `_validate_message()` → strip virgolette, collapse `\n` (Instagram invia su Enter), truncate, fallback
+4. `_validate_message()` → strip virgolette, **preserva gli a-capo `\n`** (normalizza CRLF, collassa 3+ righe vuote), truncate, fallback. ⚠️ Gli a-capo NON sono più collassati: a send-time `_human_type` li batte come `Shift+Enter` (Enter da solo invierebbe il DM su IG web). Vedi flusso `send_dm`.
 
 ---
 
@@ -383,7 +383,7 @@ Il layer browser in `app/browser/` gestisce:
 4. Click su `div[role="button"]:text-is("Message")` (match esatto, non `has-text`)
 5. `wait_for_url('/direct/')` → attende navigazione alla thread DM
 6. Dismiss popup vari ("Not Now", "Cancel", ecc.)
-7. `_human_type()` → typing lognormale con pause tra parole
+7. `_human_type()` → typing lognormale con pause tra parole; gli a-capo del messaggio vengono battuti come `Shift+Enter` (newline senza invio), tipando riga per riga
 8. `Enter` → invio
 
 ---
@@ -397,6 +397,7 @@ Il layer browser in `app/browser/` gestisce:
 - Mutex asyncio per-account in `context_manager.py` — 1 browser alla volta
 - Campaign daily limit live query (non contatore stale)
 - I worker DM sono batch short-lived: a fine sessione/budget sollevano `Retry(defer=...)` invece di dormire dentro ARQ.
+- **Resilienza blip rete/DB (tutti i worker)**: con `NullPool` ogni `db.execute` apre una nuova connessione asyncpg → un drop di rete verso il pooler Supabase (es. `OSError: [WinError 121]`, proxy/USB/WiFi caduto, pooler irraggiungibile) faceva fallire il job e fermava la campagna. Ora `message/bio/list/import_worker` nel `except Exception` chiamano `is_transient_db_error(e)` (`app/utils/db_resilience.py`: classifica `OSError`/`ConnectionError`/`asyncio.TimeoutError`/SQLAlchemy `InterfaceError`/`OperationalError`/`DBAPIError(connection_invalidated)`/errori conn asyncpg, risalendo la catena `__cause__`/`.orig`) → se transitorio `raise Retry(defer=60)` (il job riprende da solo al ritorno rete), altrimenti `raise` come prima (errori reali non mascherati). `database.py` aggiunge `timeout=15` al connect asyncpg (fail in ~15s invece di 60s). Tutti i task con `max_tries=10000` perché i retry non si esauriscano in un'outage prolungata.
 - Durante il defer di sessione il worker mantiene un lease account fino a pochi secondi prima della ripartenza, cosi' eventuali job duplicati immediati escono senza inviare ma il job ARQ differito puo' ripartire all'orario previsto.
 - Il cron dedicato recupera ogni 5 minuti i `messages.status='sending'` stale; dopo recovery/retry/giveup riaccoda il worker solo se campagna, account e assegnazione DM sono ancora utilizzabili e non esiste gia' un job Redis (`arq:job`, `arq:retry`, `arq:in-progress`) per lo stesso campaign/account.
 
