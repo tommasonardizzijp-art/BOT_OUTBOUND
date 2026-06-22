@@ -27,49 +27,46 @@ def _patch_media_xma() -> None:
     Patching at module load time (before any Client is created) covers all
     callers — recovery_checker, reply_checker, scraper.
 
-    Strategy: create a subclass with the Optional field, inject it back into
-    instagrapi.types, then rebuild DirectMessage/ReplyMessage (which reference
-    MediaXma in their xma_share field) so their compiled validators pick up the
-    new type.
+    Strategy: mutate the EXISTING MediaXma class in place (make video_url
+    optional) and rebuild it + DirectMessage/ReplyMessage. We must NOT subclass:
+    instagrapi.extractors captured `from .types import MediaXma` at its own import
+    time and builds instances via that reference (extract_media_v1_xma →
+    MediaXma(...)). A subclass left those extractor-built instances as the ORIGINAL
+    class, which then failed DirectMessage validation with
+    'Input should be a valid dictionary or instance of _PatchedMediaXma'
+    (type-identity mismatch) — crashing direct_threads() for ANY thread containing
+    an xma_share, video_url null or not. Mutating in place keeps a single class
+    object shared by types + extractors, so every instance validates.
     """
     try:
         from typing import Optional
         from pydantic import HttpUrl
+        from pydantic_core import PydanticUndefined
         import instagrapi.types as _t
 
         if not hasattr(_t, "MediaXma"):
             return
 
-        orig_field = _t.MediaXma.model_fields.get("video_url")
-        if orig_field is None or not orig_field.is_required():
+        field = _t.MediaXma.model_fields.get("video_url")
+        if field is None or not field.is_required():
             return  # already optional — nothing to do
 
-        # Build a drop-in replacement with Optional video_url.
-        # Subclassing ensures all other fields and validators are preserved.
-        class _PatchedMediaXma(_t.MediaXma):
-            video_url: Optional[HttpUrl] = None  # type: ignore[assignment]
+        # Mutate the field on the original class: Optional annotation + None default
+        # (default != PydanticUndefined ⇒ is_required() becomes False).
+        field.annotation = Optional[HttpUrl]
+        field.default = None
+        _t.MediaXma.model_rebuild(force=True)
 
-        _PatchedMediaXma.__name__ = "MediaXma"
-        _PatchedMediaXma.__qualname__ = "MediaXma"
-
-        # Inject into instagrapi.types so any code that imports the name picks
-        # up the patched version.
-        _t.MediaXma = _PatchedMediaXma
-
-        # Rebuild dependent models (DirectMessage, ReplyMessage) so their
-        # compiled validators reference the patched class.
+        # Rebuild dependent models so their compiled xma_share validators pick up
+        # MediaXma's new (None-tolerant) core schema. Annotation stays the same
+        # class object — only its schema changed.
         ns = vars(_t)
         for model_name in ("DirectMessage", "ReplyMessage"):
             model = ns.get(model_name)
-            if model is None:
-                continue
-            fi = model.model_fields.get("xma_share")
-            if fi is not None:
-                fi.annotation = Optional[_PatchedMediaXma]
-                model.__annotations__["xma_share"] = Optional[_PatchedMediaXma]
-            model.model_rebuild(force=True, _types_namespace=ns)
+            if model is not None:
+                model.model_rebuild(force=True, _types_namespace=ns)
 
-        logger.debug("[Patch] instagrapi MediaXma.video_url → Optional[HttpUrl] (subclass + rebuild)")
+        logger.debug("[Patch] instagrapi MediaXma.video_url → Optional[HttpUrl] (in-place mutate + rebuild)")
     except Exception as exc:
         logger.warning(f"[Patch] MediaXma patch skipped (non-fatal): {exc}")
 

@@ -62,6 +62,29 @@ class TestMediaXmaPatch:
         _patch_media_xma()
         _patch_media_xma()  # second call: field already optional → return early
 
+    def test_extractor_built_xma_instance_validates(self):
+        """Regression: instagrapi's extractor builds a MediaXma INSTANCE via the
+        reference it captured at import time (instagrapi.extractors.MediaXma), then
+        assigns it to DirectMessage.xma_share. The patch must keep class identity so
+        that instance still validates — a subclass-based patch breaks this with
+        'Input should be a valid dictionary or instance of _PatchedMediaXma'.
+        """
+        import app.utils.instagrapi_client  # noqa: F401 — triggers patch
+        import instagrapi.types as t
+        import instagrapi.extractors as ex
+
+        # The extractor's MediaXma must be the SAME object the model validates against.
+        assert ex.MediaXma is t.MediaXma
+
+        # Build an instance the way the extractor does (real HttpUrl video_url set).
+        xma_instance = ex.MediaXma(video_url="https://example.com/v.mp4", title="reel")
+        dm = t.DirectMessage(
+            id="1", user_id="42", timestamp=1_000_000,
+            item_type="xma_share", xma_share=xma_instance,
+        )
+        assert dm.xma_share is not None
+        assert dm.xma_share.video_url is not None
+
 
 # ─────────────────────────────────────────────────────────
 # 2. GQL verify 429 bypass
