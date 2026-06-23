@@ -37,9 +37,15 @@ Interfaccia unica sopra la Fase Lista, con due implementazioni intercambiabili s
 
 ```
 InboxListSource:
+    async def resume(saved_keys: set[user_id]) -> None
+        # porta il source al "fronte": salta (veloce) i contatti già salvati
+        # finché smette di vederne di noti. Usato sia a start sessione sia
+        # dopo un cambio engine. Correttezza garantita dal dedup, non dal cursore.
     async def next_page(state) -> InboxPage
         # InboxPage = { participants: list[(user_id, username)], resume_state, exhausted: bool }
 ```
+
+**Resume-by-frontier (perno per il riavvio e lo switch engine):** il cursore/marker persistito in `scrape_cursor` è solo un'**ottimizzazione intra-engine**. Il vero meccanismo di ripresa è il **dedup**: ogni engine, riavviato, salta i `Follower` già salvati di questa campagna fino al fronte. Questo rende ogni riavvio idempotente (mai duplicati) **a prescindere** dall'engine usato prima — base dello switch a metà campagna (§4.5).
 
 | | `ApiInboxSource` | `BrowserInboxSource` |
 |---|---|---|
@@ -84,11 +90,26 @@ Per il browser: ogni riga-thread espone l'handle nel link `/direct/t/<thread_id>
 
 `scrape_bios.py` pesca i `Follower(status=pending)`, chiama `user_info` (API) → bio + `extract_contacts`. Nessuna modifica. Vedi rischio residuo §8.
 
+### 4.5 Switch engine a metà campagna (in scope)
+
+Caso d'uso: parti `browser` su un account principale, scopri che l'inbox è enorme → passi ad `api` senza perdere i contatti già raccolti. Reso possibile dal **resume-by-frontier** (§4.1): i cursori dei due engine sono incompatibili (api = `oldest_cursor` opaco; browser = marker `thread_id`) ma **non vanno tradotti** — al cambio engine si invalida il cursore engine-specifico e si riparte dal fronte via dedup.
+
+Meccanica:
+1. `PATCH /campaigns/{id}` consente di cambiare `inbox_engine` **solo a campagna in pausa** (non in mezzo a una pagina in corso). Il vincolo 1-account resta identico.
+2. Allo switch: si azzera `scrape_cursor` (il token vecchio non è valido per il nuovo engine) e si setta un flag/heuristica perché il nuovo engine usi `resume(saved_keys)` invece del cursore.
+3. Ripresa: il nuovo engine fast-forwarda fino al fronte, poi raccoglie normalmente.
+
+Costi per direzione (esposti in UI):
+- **browser → api**: re-traversata via API = **economica** (veloce). Direzione consigliata, è la valvola di fuga per inbox enormi.
+- **api → browser**: il browser deve fast-scrollare fino al fronte = **costoso** sulla profondità già raggiunta (su inbox grandi reintroduce la spirale). **Warning in UI: sconsigliato su inbox grandi.**
+
+Fuori scope (vedi §11): lo switch **automatico** in base alla dimensione/spirale rilevata — si costruisce sopra questo switch manuale, è un future improvement.
+
 ## 5. Modello dati
 
 - `Campaign.scrape_mode`: nuovo valore ammesso `'dm_threads'` (oggi `followers` | `following`). È `String`, nessuna migrazione per il valore.
 - **`Campaign.inbox_engine`**: nuova colonna `String(10)`, default `'browser'`, nullable. → **Migrazione Alembic 019**.
-- `Campaign.scrape_cursor`: **riuso** della colonna esistente per `oldest_cursor` (engine api).
+- `Campaign.scrape_cursor`: **riuso** della colonna esistente per il resume intra-engine — `oldest_cursor` (api) o marker `thread_id` (browser). **Azzerata al cambio engine** (§4.5); il resume cade allora sul dedup-frontier.
 - `Campaign.target_username` / `target_user_id`: valorizzati con l'**account proprietario** dell'inbox (self).
 - `source_type` resta `'scrape'`.
 - `Follower`: riuso schema esistente, nessuna colonna nuova.
@@ -133,12 +154,14 @@ La Fase Bio fa una `user_info` **via API privata** per profilo: su un inbox gran
 - Form nuova campagna: opzione `scrape_mode` → "DM già avviati (inbox)".
   - Quando selezionata: nascondi il campo `target_username` (è l'account stesso); mostra radio **engine**: "🛡️ Browser (prudente, lento)" (default) / "⚡ API (veloce, più rischio)".
   - Selettore account limitato a 1 profilo.
+- Dettaglio campagna: controllo per **cambiare engine a campagna in pausa** (§4.5), con warning sulla direzione `api → browser` ("sconsigliato su inbox grandi").
 
 ## 10. Test
 
 - **Unit estrazione**: thread 1-1 outbound, 1-1 inbound, gruppo (skip), dedup su contatto già salvato. Mock dell'adapter `IGClient` (Protocol in `adapters/instagram.py`).
 - **Unit cursore api**: avanzamento `oldest_cursor`, stop su `has_older == false`, ripresa da `scrape_cursor` persistito.
 - **Unit/idempotenza browser**: re-scroll su lista parzialmente già salvata → nessun duplicato inserito.
+- **Switch engine (§4.5)**: cambio `inbox_engine` a campagna in pausa → `scrape_cursor` azzerato, nuovo engine fa resume-by-frontier, nessun duplicato, contatti pre-switch conservati. Test su entrambe le direzioni.
 - **Guard 1-account**: start con 0 e con 2 account → errore atteso; API assegnazione 2° account → 400.
 
 ## 11. Fuori scope Fase 1
@@ -147,6 +170,7 @@ La Fase Bio fa una `user_info` **via API privata** per profilo: su un inbox gran
 - Filtro anti-spam ("salta chi è in conversazione viva / ha già risposto", basato su `Follower.status == replied` da `reply_checker`) — da introdurre nella fase messaggi.
 - Pending/richieste inbox.
 - Bio via browser.
+- **Switch engine automatico** in base alla dimensione inbox / spirale rilevata — si costruisce sopra lo switch manuale (§4.5), future improvement.
 
 ## 12. Rischi e punti aperti
 
