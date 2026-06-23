@@ -45,7 +45,7 @@ InboxListSource:
 |---|---|---|
 | Meccanismo | `client.private_request("direct_v2/inbox/", params={cursor, thread_message_limit})` | Patchright: scroll del pannello `/direct/inbox/`, estrazione handle dalle righe-thread |
 | Pagina | ~20 thread/chiamata (dimensione fissa IG) | N righe per ciclo di scroll |
-| Ripresa tra sessioni | **Pulita**: `inbox.oldest_cursor` persistito in `Campaign.scrape_cursor` | **Re-scroll + dedup**: nessun cursore persistibile → al resume ri-scrolla dall'alto, i già-salvati vengono scartati (idempotente) |
+| Ripresa tra sessioni | **Pulita**: `inbox.oldest_cursor` persistito in `Campaign.scrape_cursor` | **Marker di profondità + dedup** (vedi §6.1): in-sessione il filo si tiene da sé; al break duro si salva il thread_id più vecchio raggiunto e al resume si fa fast-scroll fino al fronte |
 | Fine | `inbox.has_older == false` | nessuna nuova riga dopo scroll (raggiunto il fondo) |
 | Impronta per-richiesta | Più alta (client non-app, fingerprintabile) | Più bassa (browser reale, header/cookie/JS veri) |
 | Velocità | Più veloce | Più lento |
@@ -96,9 +96,25 @@ Per il browser: ogni riga-thread espone l'handle nel link `/direct/t/<thread_id>
 ## 6. Anti-detection
 
 - **1 account, nessuna rotazione** (è strutturale).
-- Engine `browser` (default, account principali): impronta per-richiesta bassa. Niente cursore persistibile → conviene **sessioni più lunghe e meno frequenti** (parametri `INBOX_BROWSER_*`) invece dei break corti, così si minimizza il re-scroll. Cadenza scroll umana via `human_behavior`.
 - Engine `api` (account secondari): stesso pacing del follower scraper (`INBOX_API_*`, default ≈ `list_*`: delay 5-10s, pausa lunga 30-60s ogni ~15-20 pagine).
 - Patch MediaXma già attiva al login instagrapi.
+
+### 6.1 Pacing e "filo dello scroll" — engine browser
+
+Modello: 20 min di scroll dritto non è credibile → burst di scroll alternati a distrazioni, con break duri brevi.
+
+**Parametri `INBOX_BROWSER_*` (default proposti, tutti in `.env`):**
+- Scroll step: **2-6s**, varianza lognormale.
+- Micro-pausa distrazione **in-place**: ogni ~8-15 step, sleep **5-30s** (eventuale mouse-jiggle). Non naviga → posizione preservata.
+- Feed-browse distrazione: con prob. ~5%, apre il feed in una **seconda tab**, scrolla **20-60s**, chiude la tab, torna all'inbox. La tab inbox resta scrollata in posizione.
+- Break duro: **30-60min** via `Retry(defer=...)` (no 1-2h).
+
+**Tenere il filo (3 livelli):**
+1. **In-sessione**: micro-pause in-place e feed-browse su tab separata **non toccano** lo scroll dell'inbox → filo gratis. Mai navigare via dalla tab inbox e tornare (l'inbox si ricarica dall'alto).
+2. **Correttezza al resume**: il dedup sui `Follower` già salvati rende il re-scroll **idempotente** (mai duplicati), a prescindere dal marker.
+3. **Efficienza al resume (marker)**: al break duro si persiste in `Campaign.scrape_cursor` il **thread_id più vecchio raggiunto** + conteggio. Al resume: riapri inbox → **fast-scroll** (senza i delay 2-6s) attraverso la zona già vista fino a superare il marker → riprendi la raccolta a ritmo normale dal fronte. Così non si ricomincia da zero.
+
+Nota: l'inbox è ~cronologico per ultima-attività; un messaggio in arrivo durante il break può rimescolare la cima. Il dedup lo assorbe (dup in cima scartato); il marker serve solo a saltare in fretta il già-fatto, non a garantire l'ordine.
 
 ## 7. Vincolo 1-account — hard-coded (3 livelli)
 
@@ -136,4 +152,5 @@ La Fase Bio fa una `user_info` **via API privata** per profilo: su un inbox gran
 
 - **`_fetch_inbox_page` api**: la helper `direct_threads(amount)` non espone un cursore persistibile → serve scendere a `private_request("direct_v2/inbox/")` parsando `threads` / `oldest_cursor` / `has_older`, con `thread_message_limit` minimo (in Fase 1 servono solo i partecipanti). È il punto nuovo più delicato dell'engine api.
 - **Browser virtualizzato**: la lista DM ricicla i nodi DOM durante lo scroll → estrazione **incrementale** obbligata (raccogli a ogni step, non a fine scroll) e dedup robusto.
-- **Resume browser costoso** su inbox enormi: mitigato da sessioni lunghe + idempotenza dedup. Se diventa un collo di bottiglia reale, valutare un marker di profondità (fuori scope ora).
+- **Feed-browse su tab separata**: gestire correttamente apertura/chiusura della 2ª pagina Patchright senza perdere il context né la tab inbox; fallback = solo micro-pause in-place se la 2ª tab dà problemi.
+- **Fast-scroll al resume** su inbox enormi: ripassare la zona già vista resta un costo (anche se senza i delay); il marker lo riduce ma non lo annulla. Accettabile per Fase 1.
