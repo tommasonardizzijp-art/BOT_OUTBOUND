@@ -236,6 +236,10 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         "bio_fetch_delay_min",
         "bio_fetch_delay_max",
         "scrape_daily_limit",
+        # inbox_engine has its OWN status guard below (draft/ready/paused/error);
+        # exclude it from the outer name/template gate so an errored campaign can
+        # switch engine to recover.
+        "inbox_engine",
     }
     if "daily_limit" in data.model_fields_set:
         campaign.daily_limit = data.daily_limit
