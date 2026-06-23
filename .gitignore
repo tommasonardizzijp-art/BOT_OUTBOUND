@@ -34,3 +34,6 @@ frontend/.env.local
 Thumbs.db
 
 .vercel
+
+# SDD scratch (briefs, reports, diffs, progress) — non versionare
+.superpowers/
