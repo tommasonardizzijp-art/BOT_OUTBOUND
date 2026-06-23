@@ -57,8 +57,10 @@ export interface Campaign {
   // M15 rev: per-campaign approval sampling
   require_approval: boolean
   approval_sample_size: number
-  // 'followers' = scrape who follows target; 'following' = scrape who target follows
-  scrape_mode: 'followers' | 'following'
+  // 'followers' = scrape who follows target; 'following' = scrape who target follows; 'dm_threads' = DM inbox già avviati
+  scrape_mode: 'followers' | 'following' | 'dm_threads'
+  // Engine usato per l'estrazione inbox DM (solo quando scrape_mode = 'dm_threads')
+  inbox_engine?: 'browser' | 'api'
   scrape_completed_at: string | null
   started_at: string | null
   completed_at: string | null
@@ -110,7 +112,8 @@ export interface CampaignCreate {
   daily_limit?: number | null
   require_approval?: boolean
   approval_sample_size?: number
-  scrape_mode?: 'followers' | 'following'
+  scrape_mode?: 'followers' | 'following' | 'dm_threads'
+  inbox_engine?: 'browser' | 'api'
   scrape_session_size?: number
   scrape_break_minutes_min?: number
   scrape_break_minutes_max?: number

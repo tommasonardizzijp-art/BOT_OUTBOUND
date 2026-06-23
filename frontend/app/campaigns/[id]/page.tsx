@@ -262,6 +262,9 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   })
   const [savingSettings, setSavingSettings] = useState(false)
 
+  // Inbox engine switch (solo campagne dm_threads in stato fermo)
+  const [switchingEngine, setSwitchingEngine] = useState(false)
+
   const openSettings = () => {
     if (!campaign) return
     setSettingsForm({
@@ -664,6 +667,25 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     }
   }
 
+  const handleInboxEngineSwitch = async (newEngine: 'browser' | 'api') => {
+    if (!campaign) return
+    const current = campaign.inbox_engine ?? 'browser'
+    if (newEngine === current) return
+    if (newEngine === 'browser' && current === 'api') {
+      if (!confirm('Sconsigliato su inbox grandi: il browser deve riattraversare quanto già fatto.\n\nContinuare comunque?')) return
+    }
+    setSwitchingEngine(true)
+    try {
+      await api.campaigns.update(id, { inbox_engine: newEngine })
+      await mutateCampaign()
+      toast.success(`Engine cambiato a ${newEngine === 'browser' ? 'Browser' : 'API'}`)
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Errore aggiornamento engine')
+    } finally {
+      setSwitchingEngine(false)
+    }
+  }
+
   // BUG-NEW-11: distinguish error (backend down) from loading (first fetch)
   if (campaignError) return (
     <div className="flex items-center gap-2 text-red-400 p-8">
@@ -748,10 +770,17 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               </>
             ) : (
               <>
-                <p className="text-gray-400 text-base">@{campaign.target_username}</p>
+                {campaign.scrape_mode !== 'dm_threads' && (
+                  <p className="text-gray-400 text-base">@{campaign.target_username}</p>
+                )}
                 <Badge variant="outline" className="text-xs text-gray-500 border-gray-700 py-0">
-                  {campaign.scrape_mode === 'following' ? 'following' : 'follower'}
+                  {campaign.scrape_mode === 'following' ? 'following' : campaign.scrape_mode === 'dm_threads' ? 'dm inbox' : 'follower'}
                 </Badge>
+                {campaign.scrape_mode === 'dm_threads' && campaign.inbox_engine && (
+                  <Badge variant="outline" className="text-xs text-gray-500 border-gray-700 py-0">
+                    {campaign.inbox_engine === 'api' ? '⚡ api' : '🛡️ browser'}
+                  </Badge>
+                )}
               </>
             )}
           </div>
@@ -907,6 +936,51 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <p className="text-sm text-yellow-300">
             Nessun account attivo assegnato. Assegna almeno un account prima di avviare la campagna.
           </p>
+        </div>
+      )}
+
+      {/* Inbox engine switch — solo campagne dm_threads in stato fermo */}
+      {campaign.scrape_mode === 'dm_threads' && (['draft', 'ready', 'paused', 'error'] as Campaign['status'][]).includes(campaign.status) && (
+        <div className="rounded-lg border border-gray-700/50 bg-gray-800/30 px-4 py-3 space-y-3">
+          <div>
+            <p className="text-sm text-gray-300 font-medium">Engine estrazione inbox</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Seleziona il motore usato per leggere i thread DM già avviati
+            </p>
+          </div>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              disabled={switchingEngine}
+              onClick={() => handleInboxEngineSwitch('browser')}
+              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
+                (campaign.inbox_engine ?? 'browser') === 'browser'
+                  ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              🛡️ Browser (prudente, lento)
+              <span className="block text-xs font-normal mt-0.5 opacity-70">Consigliato per account principali</span>
+            </button>
+            <button
+              type="button"
+              disabled={switchingEngine}
+              onClick={() => handleInboxEngineSwitch('api')}
+              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
+                campaign.inbox_engine === 'api'
+                  ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              ⚡ API (veloce, più rischio)
+              <span className="block text-xs font-normal mt-0.5 opacity-70">Solo account secondari</span>
+            </button>
+          </div>
+          {switchingEngine && (
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <Loader2 className="w-3 h-3 animate-spin" />Salvataggio...
+            </div>
+          )}
         </div>
       )}
 
@@ -1903,7 +1977,13 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                     <span className="text-gray-400">{campaign.source_type === 'import' ? 'Lista importata' : `@${campaign.target_username}`}</span>
                     {campaign.source_type === 'scrape' && <>
                       <span className="text-gray-500">Modalità</span>
-                      <span className="text-gray-400">{campaign.scrape_mode === 'following' ? 'Following' : 'Follower'}</span>
+                      <span className="text-gray-400">
+                        {campaign.scrape_mode === 'following' ? 'Following' : campaign.scrape_mode === 'dm_threads' ? 'DM inbox' : 'Follower'}
+                      </span>
+                    </>}
+                    {campaign.scrape_mode === 'dm_threads' && <>
+                      <span className="text-gray-500">Engine inbox</span>
+                      <span className="text-gray-400">{campaign.inbox_engine ?? 'browser'}</span>
                     </>}
                   </div>
                 </div>

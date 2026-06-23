@@ -22,7 +22,7 @@ export default function NewCampaignPage() {
   const [form, setForm] = useState({
     name: '',
     target_username: '',
-    scrape_mode: 'followers' as 'followers' | 'following',
+    scrape_mode: 'followers' as 'followers' | 'following' | 'dm_threads',
     base_message_template: '',
     message_template_b: '',
     ai_prompt_context: '',
@@ -31,6 +31,7 @@ export default function NewCampaignPage() {
     require_approval: false,
     approval_sample_size: '5',
   })
+  const [inboxEngine, setInboxEngine] = useState<'browser' | 'api'>('browser')
   const [messagingEnabled, setMessagingEnabled] = useState(true)
   const [advancedConfig, setAdvancedConfig] = useState({
     scrape_session_size: '250',
@@ -46,14 +47,14 @@ export default function NewCampaignPage() {
   const validate = () => {
     const errs: Record<string, string> = {}
     if (!form.name.trim()) errs.name = 'Il nome è obbligatorio'
-    if (sourceType === 'scrape') {
+    if (sourceType === 'scrape' && form.scrape_mode !== 'dm_threads') {
       const username = form.target_username.replace(/^@/, '').trim()
       if (!username) {
         errs.target_username = "L'username è obbligatorio"
       } else if (!IG_USERNAME_RE.test(username)) {
         errs.target_username = 'Username non valido. Solo lettere, numeri, punti e underscore (max 30 caratteri)'
       }
-    } else if (!importFile) {
+    } else if (sourceType !== 'scrape' && !importFile) {
       errs.import_file = 'Carica un file con i profili da contattare'
     }
     if (messagingEnabled && !form.base_message_template.trim()) errs.base_message_template = 'Il template è obbligatorio'
@@ -72,8 +73,11 @@ export default function NewCampaignPage() {
       const campaign = await api.campaigns.create({
         name: form.name.trim(),
         source_type: sourceType,
-        target_username: sourceType === 'scrape' ? form.target_username.replace(/^@/, '').trim() : null,
+        target_username: (sourceType === 'scrape' && form.scrape_mode !== 'dm_threads')
+          ? form.target_username.replace(/^@/, '').trim()
+          : null,
         scrape_mode: form.scrape_mode,
+        ...(form.scrape_mode === 'dm_threads' ? { inbox_engine: inboxEngine } : {}),
         messaging_enabled: messagingEnabled,
         base_message_template: messagingEnabled ? form.base_message_template : null,
         message_template_b: messagingEnabled && showTemplateB && form.message_template_b ? form.message_template_b : null,
@@ -147,24 +151,6 @@ export default function NewCampaignPage() {
             </div>
 
             {sourceType === 'scrape' && (<>
-            <div className="space-y-1.5">
-              <label className="text-sm text-gray-300 font-medium">Pagina target (username) *</label>
-              <Input
-                placeholder="@nomepagina o nomepagina"
-                value={form.target_username}
-                onChange={e => { setForm(f => ({ ...f, target_username: e.target.value })); setErrors(er => ({ ...er, target_username: '' })) }}
-                className={`bg-gray-800 border-gray-700 text-white ${errors.target_username ? 'border-red-600' : ''}`}
-              />
-              {errors.target_username
-                ? <p className="text-xs text-red-400">{errors.target_username}</p>
-                : <p className="text-xs text-gray-500">
-                    {form.scrape_mode === 'following'
-                      ? 'I profili seguiti da questa pagina verranno contattati'
-                      : 'I follower di questa pagina verranno contattati'}
-                  </p>
-              }
-            </div>
-
             <div className="space-y-2">
               <label className="text-sm text-gray-300 font-medium">Modalità raccolta profili</label>
               <div className="flex gap-3">
@@ -192,8 +178,74 @@ export default function NewCampaignPage() {
                   Following
                   <span className="block text-xs font-normal mt-0.5 opacity-70">Chi viene seguito dalla pagina target</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, scrape_mode: 'dm_threads' }))}
+                  className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${
+                    form.scrape_mode === 'dm_threads'
+                      ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                      : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+                  }`}
+                >
+                  DM già avviati (inbox)
+                  <span className="block text-xs font-normal mt-0.5 opacity-70">Thread DM esistenti nell&apos;account</span>
+                </button>
               </div>
             </div>
+
+            {form.scrape_mode !== 'dm_threads' && (
+            <div className="space-y-1.5">
+              <label className="text-sm text-gray-300 font-medium">Pagina target (username) *</label>
+              <Input
+                placeholder="@nomepagina o nomepagina"
+                value={form.target_username}
+                onChange={e => { setForm(f => ({ ...f, target_username: e.target.value })); setErrors(er => ({ ...er, target_username: '' })) }}
+                className={`bg-gray-800 border-gray-700 text-white ${errors.target_username ? 'border-red-600' : ''}`}
+              />
+              {errors.target_username
+                ? <p className="text-xs text-red-400">{errors.target_username}</p>
+                : <p className="text-xs text-gray-500">
+                    {form.scrape_mode === 'following'
+                      ? 'I profili seguiti da questa pagina verranno contattati'
+                      : 'I follower di questa pagina verranno contattati'}
+                  </p>
+              }
+            </div>
+            )}
+
+            {form.scrape_mode === 'dm_threads' && (
+            <div className="space-y-2 rounded-lg border border-gray-700/50 bg-gray-800/30 p-3">
+              <label className="text-sm text-gray-300 font-medium block">Engine estrazione lista</label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="inboxEngine"
+                  value="browser"
+                  checked={inboxEngine === 'browser'}
+                  onChange={() => setInboxEngine('browser')}
+                  className="accent-purple-500"
+                />
+                <span className="text-sm text-gray-300">
+                  🛡️ Browser (prudente, lento)
+                  <span className="ml-1 text-xs text-gray-500">— consigliato per account principali</span>
+                </span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="inboxEngine"
+                  value="api"
+                  checked={inboxEngine === 'api'}
+                  onChange={() => setInboxEngine('api')}
+                  className="accent-purple-500"
+                />
+                <span className="text-sm text-gray-300">
+                  ⚡ API (veloce, più rischio)
+                  <span className="ml-1 text-xs text-gray-500">— solo account secondari</span>
+                </span>
+              </label>
+            </div>
+            )}
             </>)}
 
             {sourceType === 'import' && (
