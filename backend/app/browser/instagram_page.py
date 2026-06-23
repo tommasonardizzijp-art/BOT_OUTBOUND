@@ -457,9 +457,9 @@ class InstagramPage:
         page = self._page
 
         # Each session has a random base typing speed, scaled by per-account timing multiplier.
-        # Tarato su un utente "digitale" veloce (~130 WPM di picco): 28-70 ms/char.
+        # Tarato su un utente "digitale" (~100 WPM di picco): 40-95 ms/char.
         # La varianza lognormale + pause/typo sotto tengono il risultato umano.
-        base_ms = random.uniform(28, 70) * self._tm
+        base_ms = random.uniform(40, 95) * self._tm
 
         # Su IG web Enter invia il DM: gli a-capo si battono come Shift+Enter
         # (newline senza invio). Tipiamo riga per riga, parola per parola.
@@ -477,20 +477,20 @@ class InstagramPage:
                     await asyncio.sleep(random.uniform(0.25, 1.0))
 
                 for char_idx, char in enumerate(word):
-                    # Typo: ~3.5% chance per char in words >3 letters (skip first/last char)
-                    if len(word) > 3 and 0 < char_idx < len(word) - 1 and random.random() < 0.035:
+                    # Typo: ~8% chance per char in words >3 letters (skip first/last char)
+                    if len(word) > 3 and 0 < char_idx < len(word) - 1 and random.random() < 0.08:
                         wrong = _typo_char(char)
                         if wrong:
                             err_delay = random.lognormvariate(math.log(base_ms), 0.45)
                             await page.keyboard.type(wrong)
-                            await asyncio.sleep(max(20, min(480, err_delay)) / 1000)
+                            await asyncio.sleep(max(30, min(480, err_delay)) / 1000)
                             await asyncio.sleep(random.uniform(0.12, 0.40))  # notice mistake
                             await page.keyboard.press("Backspace")
                             await asyncio.sleep(random.uniform(0.06, 0.20))  # before retyping
 
                     # Correct character with lognormal delay
                     delay_ms = random.lognormvariate(math.log(base_ms), 0.45)
-                    delay_ms = max(20, min(480, delay_ms))
+                    delay_ms = max(30, min(480, delay_ms))
                     await page.keyboard.type(char)
                     await asyncio.sleep(delay_ms / 1000)
                     # Rare micro-pause within a word (re-reading, hesitation)
