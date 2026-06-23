@@ -10,7 +10,7 @@ from loguru import logger
 from sqlalchemy import func, select
 
 from app.config import settings
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import CampaignStatus
 from app.models.campaign_account import CampaignAccount
 from app.models.account import InstagramAccount, AccountStatus
 from app.models.follower import Follower, FollowerStatus
@@ -59,8 +59,8 @@ async def _single_inbox_account(db, campaign_id: str):
 async def build_inbox_source(db, campaign):
     """Costruisce la sorgente inbox per l'engine scelto.
 
-    Ritorna (source, own_pk, cleanup) dove cleanup e' una coroutine factory da
-    awaitare nel finally (chiude browser / rilascia sessione).
+    Ritorna (source, own_pk, account, cleanup) dove cleanup e' una coroutine
+    factory da awaitare nel finally (chiude browser / rilascia sessione).
     """
     account = await _single_inbox_account(db, campaign.id)
     engine = getattr(campaign, "inbox_engine", "browser") or "browser"
@@ -75,11 +75,12 @@ async def build_inbox_source(db, campaign):
         async def _cleanup():
             return None
 
-        return source, own_pk, _cleanup
+        return source, own_pk, account, _cleanup
 
     # engine == "browser"
     from app.services.inbox_browser_source import build_browser_inbox_source
-    return await build_browser_inbox_source(db, campaign, account)
+    src, own_pk_b, cleanup = await build_browser_inbox_source(db, campaign, account)
+    return src, own_pk_b, account, cleanup
 
 
 async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
@@ -94,7 +95,7 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
     cleanup = None
     account = None
     try:
-        source, own_pk, cleanup = await build_inbox_source(db, campaign)
+        source, own_pk, account, cleanup = await build_inbox_source(db, campaign)
         emit_event(campaign_id, "scrape_start",
                    f"Fase Lista inbox avviata (engine {campaign.inbox_engine})")
 

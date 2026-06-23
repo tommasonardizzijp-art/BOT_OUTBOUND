@@ -303,7 +303,7 @@ def _setup_inbox_db(monkeypatch, pages: list[InboxPage], *, list_target=None):
         async def _noop_cleanup():
             return None
         own_pk = 999_999
-        return scripted_source, own_pk, _noop_cleanup
+        return scripted_source, own_pk, None, _noop_cleanup
 
     monkeypatch.setattr(scrape_inbox, "build_inbox_source", _fake_build_inbox_source)
 
