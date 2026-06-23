@@ -165,6 +165,25 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 emit_event(campaign_id, "scrape_break", f"Pausa inbox {int(minutes)} min dopo {already}")
                 return seconds
 
+        engine = getattr(campaign, "inbox_engine", "browser") or "browser"
+        if engine == "browser" and already == 0:
+            # Engine browser non ancora operativo (selettori DOM + risoluzione
+            # username->pk in verifica live): una run che esaurisce l'inbox senza
+            # raccogliere nulla NON e' un successo. Segnalala come errore azionabile
+            # invece di fingere "completata", cosi' l'operatore non crede che
+            # l'account non abbia DM. Rimuovere questo guard quando il browser
+            # engine sara' verificato live e capace di raccogliere contatti.
+            campaign.status = CampaignStatus.error
+            campaign.scrape_outcome = "browser_not_wired"
+            campaign.updated_at = datetime.utcnow()
+            await db.commit()
+            emit_event(
+                campaign_id,
+                "scrape_stopped",
+                "Engine browser non operativo (selettori/risoluzione pk in verifica live): 0 contatti raccolti. Usa l'engine API.",
+                level="error",
+            )
+            return None
         campaign.status = CampaignStatus.ready
         campaign.updated_at = datetime.utcnow()
         await db.commit()

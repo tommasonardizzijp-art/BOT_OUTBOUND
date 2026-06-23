@@ -448,28 +448,6 @@ def test_engine_switch_allowed_in_stopped_states(client, _temp_db, allowed_statu
     assert resp.json()["inbox_engine"] == "api"
 
 
-def test_engine_switch_on_error_fixed():
-    """
-    DEFECT NOW FIXED — documented for history.
-
-    Previously, inbox_engine was part of other_fields, so the outer gate
-    (lines 259-264, checking status not in {draft, ready, paused}) fired
-    BEFORE the inner inbox_engine guard (line 285, which allows error).
-    Result: a PUT inbox_engine on an error-state campaign got a misleading
-    400 "Only draft/ready/paused..." even though error was explicitly allowed
-    by the inner guard.
-
-    Fix applied (campaigns.py, always_editable set): 'inbox_engine' added to
-    always_editable so it is stripped from other_fields before the outer gate
-    evaluates. The inner guard (draft/ready/paused/error) still enforces the
-    stopped-state rule; active states (running/listing/scraping/etc.) still 400.
-
-    The corrected behavior is now asserted by parametrize in
-    test_engine_switch_allowed_in_stopped_states (error added to the list).
-    """
-    pass  # behaviour verified in test_engine_switch_allowed_in_stopped_states
-
-
 # ---------- B-6: engine switch does NOT clobber other fields -----------------
 
 def test_engine_switch_does_not_clobber_name(client, _temp_db):
