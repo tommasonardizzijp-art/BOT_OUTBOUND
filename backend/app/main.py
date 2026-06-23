@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 from loguru import logger
 from app.config import settings
 from app.database import setup_pragmas, AsyncSessionLocal
@@ -71,6 +73,33 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+class _CatchUnhandledMiddleware(BaseHTTPMiddleware):
+    """Converte ogni eccezione non gestita in una JSONResponse 500.
+
+    Senza questo, un'eccezione propagava fino a ServerErrorMiddleware (il layer
+    piu' esterno di Starlette, FUORI dal CORSMiddleware): il 500 risultante non
+    passava piu' dal CORS, quindi arrivava al browser SENZA header
+    `Access-Control-Allow-Origin`. Il frontend vedeva un errore CORS opaco /
+    "Failed to load resource" invece del messaggio gestito "Backend non
+    raggiungibile". Catturando qui (layer INTERNO al CORS, perche' aggiunto
+    prima), la risposta 500 riattraversa il CORSMiddleware e porta gli header.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        try:
+            return await call_next(request)
+        except Exception:
+            logger.exception(f"[API] Unhandled error on {request.method} {request.url.path}")
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Errore interno temporaneo del server. Riprova tra qualche secondo."},
+            )
+
+
+# IMPORTANTE: l'ordine conta. add_middleware mette il middleware piu' esterno per
+# ultimo, quindi CORSMiddleware va aggiunto DOPO _CatchUnhandledMiddleware per
+# avvolgerlo e aggiungere gli header CORS anche alle risposte d'errore.
+app.add_middleware(_CatchUnhandledMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,

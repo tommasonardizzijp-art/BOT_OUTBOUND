@@ -10,7 +10,6 @@ if sys.platform.startswith("win"):
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.pool import NullPool
 from sqlalchemy import text
 from loguru import logger
 from app.config import settings
@@ -37,7 +36,23 @@ _engine_kwargs = {
     "connect_args": _connect_args(),
 }
 if is_postgres(settings.database_url):
-    _engine_kwargs["poolclass"] = NullPool
+    # Bounded REUSED pool verso il pooler Supabase (transaction-mode, 6543).
+    # Prima era NullPool: ogni richiesta apriva una connessione nuova (~1.8s di
+    # setup verso il pooler) senza riuso. Sotto burst (la pagina campagna spara
+    # ~8 richieste in parallelo + il polling sidebar) le connessioni si
+    # serializzavano fino a >15s, sforando il connect timeout di asyncpg → 500
+    # (che, saltando il CORSMiddleware, arrivava al browser come errore CORS opaco).
+    # La compat con pgbouncer transaction-mode resta garantita dai connect_args
+    # (statement_cache_size=0 + prepared_statement_name_func unico): il pool lato
+    # client riusa la connessione client↔pgbouncer, pgbouncer multiplexa lato server
+    # per-transazione. pool_pre_ping scarta connessioni chiuse dal pooler.
+    _engine_kwargs.update(
+        pool_size=10,
+        max_overflow=10,
+        pool_timeout=20,
+        pool_recycle=1800,
+        pool_pre_ping=True,
+    )
 
 engine = create_async_engine(
     to_async_database_url(settings.database_url),
