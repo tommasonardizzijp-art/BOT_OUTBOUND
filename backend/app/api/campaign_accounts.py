@@ -7,7 +7,7 @@ account assignments, and remove them.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.database import get_db
 from app.models.campaign import Campaign, CampaignStatus
@@ -133,6 +133,18 @@ async def assign_account(
             raise HTTPException(
                 status_code=409,
                 detail=f"ACCOUNT_IN_USE:{names}",
+            )
+
+    # Hard-cap 1 account per le campagne inbox (dm_threads).
+    if campaign.scrape_mode == "dm_threads":
+        existing_count = await db.scalar(
+            select(func.count(CampaignAccount.account_id))
+            .where(CampaignAccount.campaign_id == campaign_id)
+        ) or 0
+        if existing_count >= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Le campagne inbox (DM) ammettono un solo account.",
             )
 
     ca = CampaignAccount(

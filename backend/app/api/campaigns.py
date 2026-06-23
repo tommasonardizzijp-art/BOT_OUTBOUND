@@ -69,6 +69,13 @@ def list_start_blocked(scrape_cursor, existing_count: int, list_target: int | No
     return existing_count >= list_target
 
 
+def inbox_account_count_ok(scrape_mode: str, active_count: int) -> bool:
+    """dm_threads richiede ESATTAMENTE 1 account attivo; altre modalita' libere."""
+    if scrape_mode == "dm_threads":
+        return active_count == 1
+    return True
+
+
 async def _enrich_campaign(campaign: Campaign, db: AsyncSession, include_today: bool = False) -> CampaignResponse:
     """Build CampaignResponse with live-reconciled counters from Follower.status GROUP BY."""
     counts_result = await db.execute(
@@ -489,6 +496,22 @@ async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: A
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not await has_active_role_account(db, campaign_id, ("scraping", "both"), (AccountStatus.active,)):
         raise HTTPException(status_code=400, detail="Nessun account attivo con ruolo scraping o 'entrambi'.")
+    if campaign.scrape_mode == "dm_threads":
+        active_count = await db.scalar(
+            select(func.count(CampaignAccount.account_id))
+            .join(InstagramAccount, InstagramAccount.id == CampaignAccount.account_id)
+            .where(
+                CampaignAccount.campaign_id == campaign_id,
+                CampaignAccount.is_active == True,  # noqa: E712
+                CampaignAccount.role.in_(("scraping", "both")),
+                InstagramAccount.status.in_((AccountStatus.active, AccountStatus.warming_up)),
+            )
+        ) or 0
+        if not inbox_account_count_ok("dm_threads", active_count):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Campagna inbox (DM): serve esattamente 1 account attivo (trovati {active_count}).",
+            )
     if not await _check_redis_reachable():
         raise HTTPException(status_code=503, detail="Redis non raggiungibile.")
     # Applica il nuovo target PRIMA del guard: alzarlo deve poter sbloccare il restart.
