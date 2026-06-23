@@ -12,13 +12,17 @@ def parse_thread_rows(rows_data, own_pk: int) -> list[tuple[int, str]]:
     """Da righe DOM (dict pk/username) a lista (ig_user_id, username) 1-a-1 valide."""
     out: list[tuple[int, str]] = []
     for row in rows_data or []:
+        if not isinstance(row, dict):
+            continue
         pk = row.get("pk")
         username = row.get("username")
         try:
             pk = int(pk)
         except (TypeError, ValueError):
             continue
-        if pk == int(own_pk) or not username:
+        if pk == int(own_pk):
+            continue
+        if not isinstance(username, str) or not username.strip():
             continue
         out.append((pk, username))
     return out
