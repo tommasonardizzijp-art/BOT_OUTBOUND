@@ -76,6 +76,11 @@ def inbox_account_count_ok(scrape_mode: str, active_count: int) -> bool:
     return True
 
 
+def engine_switch_resets_cursor(old_engine: str, new_engine: str) -> bool:
+    """True se il cambio engine invalida il cursore (token non interscambiabili)."""
+    return old_engine != new_engine
+
+
 async def _enrich_campaign(campaign: Campaign, db: AsyncSession, include_today: bool = False) -> CampaignResponse:
     """Build CampaignResponse with live-reconciled counters from Follower.status GROUP BY."""
     counts_result = await db.execute(
@@ -276,6 +281,15 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         campaign.approval_sample_size = data.approval_sample_size
     if data.scrape_mode is not None:
         campaign.scrape_mode = data.scrape_mode
+    if data.inbox_engine is not None:
+        if campaign.status not in (CampaignStatus.draft, CampaignStatus.ready, CampaignStatus.paused, CampaignStatus.error):
+            raise HTTPException(
+                status_code=400,
+                detail="L'engine inbox si cambia solo a campagna ferma (draft/ready/paused/error).",
+            )
+        if engine_switch_resets_cursor(campaign.inbox_engine, data.inbox_engine):
+            campaign.scrape_cursor = None  # cursore vecchio non valido per il nuovo engine
+        campaign.inbox_engine = data.inbox_engine
     if data.scrape_session_size is not None:
         campaign.scrape_session_size = data.scrape_session_size
     if data.scrape_break_minutes_min is not None:
