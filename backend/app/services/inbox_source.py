@@ -6,7 +6,7 @@ con le due implementazioni (API/browser). Vedi spec 2026-06-23-inbox-dm-scraping
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Protocol
 
 
 def extract_thread_participant(thread_users, own_pk: int) -> tuple[int, str] | None:
@@ -16,6 +16,7 @@ def extract_thread_participant(thread_users, own_pk: int) -> tuple[int, str] | N
     entrambe le direzioni. `thread_users` puo' contenere o meno l'utente self
     (instagrapi spesso lo esclude); filtriamo own_pk in ogni caso.
     """
+    own_pk = int(own_pk)
     others = []
     for u in thread_users or []:
         try:
@@ -24,13 +25,13 @@ def extract_thread_participant(thread_users, own_pk: int) -> tuple[int, str] | N
             continue
         if pk == own_pk:
             continue
-        others.append((pk, getattr(u, "username", None)))
+        username = getattr(u, "username", None)
+        if not isinstance(username, str) or not username.strip():
+            continue
+        others.append((pk, username))
     if len(others) != 1:
         return None
-    pk, username = others[0]
-    if not username:
-        return None
-    return (pk, username)
+    return others[0]
 
 
 @dataclass
