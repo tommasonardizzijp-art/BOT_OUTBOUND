@@ -83,14 +83,15 @@ def test_fetch_empty_dict():
 
 
 def test_fetch_inbox_is_none():
-    """{'inbox': None} — inbox.get() would crash without a guard.
+    """{'inbox': None} — must degrade gracefully (DEFECT #1 fixed).
 
-    This is DEFECT #1: (resp or {}).get('inbox', {}) returns None when the
-    key is explicitly present with value None, then None.get('threads') raises
-    AttributeError.  The test documents the expected robust behaviour.
+    (resp or {}).get('inbox') or {} now returns {} when the key is present
+    but null, preventing AttributeError on the subsequent .get('threads') call.
     """
-    with pytest.raises((AttributeError, TypeError)):
-        _fetch({"inbox": None})
+    threads, cursor, has_older = _fetch({"inbox": None})
+    assert threads == []
+    assert cursor is None
+    assert has_older is False
 
 
 def test_fetch_inbox_missing_threads():
@@ -112,32 +113,29 @@ def test_fetch_threads_is_none():
 
 
 def test_fetch_threads_is_dict():
-    """threads is a dict (not a list) — iterating dict yields its keys (strings).
+    """threads is a dict (not a list) — type guard must return [] (DEFECT #2 fixed).
 
-    The dict keys become 'thread' objects; _as_users falls back to getattr on a
-    string and returns [].  No crash, empty participants is the correct degradation.
+    isinstance(_threads, list) is False for a dict, so fetch_inbox_page now
+    returns [] instead of passing the raw dict through to the caller.
     """
     threads, cursor, has_older = _fetch(
         {"inbox": {"threads": {"key": "val"}, "oldest_cursor": None, "has_older": False}}
     )
-    # threads itself is the raw dict — iteration will yield dict keys downstream
-    assert isinstance(threads, dict)
-    # has_older False -> exhausted will be True
+    assert threads == []
     assert has_older is False
 
 
 def test_fetch_threads_is_int():
-    """threads=42 — not iterable; fetch_inbox_page itself returns it as-is,
-    crashing only when next_page iterates.  Document that fetch_inbox_page does
-    NOT crash, but the downstream iteration will.
+    """threads=42 — type guard must return [] (DEFECT #2 fixed).
 
-    This is DEFECT #2: next_page iterates threads without a guard.
+    isinstance(42, list) is False, so fetch_inbox_page now returns [] instead
+    of passing the non-iterable integer through to the caller.
     """
     threads, cursor, has_older = _fetch(
         {"inbox": {"threads": 42, "oldest_cursor": None, "has_older": False}}
     )
-    # fetch_inbox_page trusts the 'or []' only for falsy; 42 is truthy so passes through
-    assert threads == 42
+    assert threads == []
+    assert has_older is False
 
 
 def test_fetch_oldest_cursor_missing():
@@ -200,15 +198,16 @@ async def test_next_page_empty_dict():
 
 @pytest.mark.asyncio
 async def test_next_page_inbox_is_none():
-    """Client returns {'inbox': None} — this is DEFECT #1.
+    """Client returns {'inbox': None} — must not raise (DEFECT #1 fixed).
 
-    The test asserts that next_page does NOT raise, documenting the expected
-    robust behaviour.  Currently it DOES raise AttributeError.
+    With the 'or {}' guard, None is replaced by {}, so threads/cursor/has_older
+    all default to empty/False and next_page returns a fully exhausted InboxPage.
     """
     client = HostileClient([{"inbox": None}])
     src = ApiInboxSource(client, OWN)
-    with pytest.raises((AttributeError, TypeError)):
-        await src.next_page()
+    page = await src.next_page()
+    assert page.participants == []
+    assert page.exhausted is True
 
 
 @pytest.mark.asyncio
@@ -251,18 +250,18 @@ async def test_next_page_threads_is_dict():
 
 @pytest.mark.asyncio
 async def test_next_page_threads_is_int():
-    """threads=42 — not iterable — this is DEFECT #2.
+    """threads=42 — must not raise (DEFECT #2 fixed).
 
-    fetch_inbox_page lets 42 through (truthy, bypasses 'or []').
-    next_page then does 'for t in threads' which raises TypeError.
-    Test documents the crash.
+    The isinstance guard in fetch_inbox_page converts 42 to [], so next_page
+    iterates an empty list and returns an exhausted InboxPage with no participants.
     """
     client = HostileClient([
         {"inbox": {"threads": 42, "oldest_cursor": None, "has_older": False}}
     ])
     src = ApiInboxSource(client, OWN)
-    with pytest.raises(TypeError):
-        await src.next_page()
+    page = await src.next_page()
+    assert page.participants == []
+    assert page.exhausted is True
 
 
 @pytest.mark.asyncio
@@ -283,10 +282,10 @@ async def test_next_page_thread_missing_users_key():
 
 @pytest.mark.asyncio
 async def test_next_page_thread_users_is_none():
-    """Dict-thread where users=None — this is DEFECT #3.
+    """Dict-thread where users=None — must not raise (DEFECT #3 fixed).
 
-    _as_users does 'for u in users' where users is None -> TypeError.
-    Test documents the crash.
+    _as_users now uses 'raw_thread.get("users") or []' so None is replaced by
+    [], extract_thread_participant returns None (no others), thread is skipped.
     """
     client = HostileClient([{
         "inbox": {
@@ -296,8 +295,9 @@ async def test_next_page_thread_users_is_none():
         }
     }])
     src = ApiInboxSource(client, OWN)
-    with pytest.raises(TypeError):
-        await src.next_page()
+    page = await src.next_page()
+    assert page.participants == []
+    assert page.exhausted is True
 
 
 @pytest.mark.asyncio

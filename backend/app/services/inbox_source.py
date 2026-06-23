@@ -38,7 +38,7 @@ def extract_thread_participant(thread_users, own_pk: int) -> tuple[int, str] | N
 def _as_users(raw_thread) -> list:
     """Normalizza thread.users sia da oggetti instagrapi sia da dict raw."""
     if isinstance(raw_thread, dict):
-        users = raw_thread.get("users", [])
+        users = raw_thread.get("users") or []
         from types import SimpleNamespace
         return [SimpleNamespace(pk=u.get("pk"), username=u.get("username")) for u in users]
     return getattr(raw_thread, "users", []) or []
@@ -60,8 +60,9 @@ def fetch_inbox_page(client, cursor: str | None) -> tuple[list, str | None, bool
         params["cursor"] = cursor
         params["direction"] = "older"
     resp = client.private_request("direct_v2/inbox/", params=params)
-    inbox = (resp or {}).get("inbox", {})
-    threads = inbox.get("threads", []) or []
+    inbox = (resp or {}).get("inbox") or {}
+    _threads = inbox.get("threads")
+    threads = _threads if isinstance(_threads, list) else []
     next_cursor = inbox.get("oldest_cursor")
     has_older = bool(inbox.get("has_older"))
     return threads, next_cursor, has_older
