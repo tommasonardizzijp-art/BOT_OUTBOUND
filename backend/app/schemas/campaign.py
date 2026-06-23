@@ -19,7 +19,9 @@ class CampaignCreate(BaseModel):
     require_approval: bool = False
     approval_sample_size: int = Field(default=5, ge=1, le=50)
     # 'followers' = scrape who follows target; 'following' = scrape who target follows
-    scrape_mode: str = Field(default='followers', pattern='^(followers|following)$')
+    scrape_mode: str = Field(default='followers', pattern='^(followers|following|dm_threads)$')
+    # Engine estrazione lista per dm_threads (ignorato per followers/following).
+    inbox_engine: str = Field(default='browser', pattern='^(browser|api)$')
     # Session break config
     scrape_session_size: int = Field(default=250, ge=10, le=5000)
     scrape_break_minutes_min: int = Field(default=30, ge=5, le=240)
@@ -29,7 +31,8 @@ class CampaignCreate(BaseModel):
 
     @model_validator(mode='after')
     def _check_source(self):
-        if self.source_type == 'scrape' and not (self.target_username and self.target_username.strip()):
+        if self.source_type == 'scrape' and self.scrape_mode != 'dm_threads' \
+                and not (self.target_username and self.target_username.strip()):
             raise ValueError("target_username obbligatorio per source_type='scrape'")
         if self.messaging_enabled:
             t = (self.base_message_template or "").strip()
@@ -50,7 +53,8 @@ class CampaignUpdate(BaseModel):
     # M15 rev: approval sampling
     require_approval: bool | None = None
     approval_sample_size: int | None = Field(default=None, ge=1, le=50)
-    scrape_mode: str | None = Field(default=None, pattern='^(followers|following)$')
+    scrape_mode: str | None = Field(default=None, pattern='^(followers|following|dm_threads)$')
+    inbox_engine: str | None = Field(default=None, pattern='^(browser|api)$')
     # Session break config
     scrape_session_size: int | None = Field(default=None, ge=10, le=5000)
     scrape_break_minutes_min: int | None = Field(default=None, ge=5, le=240)
@@ -83,6 +87,7 @@ class CampaignResponse(BaseModel):
     require_approval: bool
     approval_sample_size: int
     scrape_mode: str
+    inbox_engine: str = 'browser'
     scrape_completed_at: datetime | None
     started_at: datetime | None
     completed_at: datetime | None

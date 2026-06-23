@@ -182,6 +182,7 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         require_approval=data.require_approval,
         approval_sample_size=data.approval_sample_size,
         scrape_mode=data.scrape_mode,
+        inbox_engine=data.inbox_engine,
         scrape_session_size=data.scrape_session_size,
         scrape_break_minutes_min=data.scrape_break_minutes_min,
         scrape_break_minutes_max=data.scrape_break_minutes_max,
