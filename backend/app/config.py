@@ -95,6 +95,27 @@ class Settings(BaseSettings):
     list_long_pause_min_seconds: int = 30
     list_long_pause_max_seconds: int = 60
 
+    # ── Inbox DM scraping (scrape_mode=dm_threads) ─────────────────────────
+    # Engine API (account secondari): pacing tra pagine direct_v2/inbox.
+    inbox_api_page_delay_min_seconds: int = 5
+    inbox_api_page_delay_max_seconds: int = 12
+    # Engine browser (account principali): scroll umano con micro-pause.
+    inbox_browser_scroll_min_seconds: float = 2.0
+    inbox_browser_scroll_max_seconds: float = 6.0
+    # Micro-pausa "distrazione" in-place ogni N step di scroll.
+    inbox_browser_micropause_every_min: int = 8
+    inbox_browser_micropause_every_max: int = 15
+    inbox_browser_micropause_min_seconds: int = 5
+    inbox_browser_micropause_max_seconds: int = 30
+    # Distrazione feed-browse su 2a tab.
+    inbox_browser_feedbrowse_probability: float = 0.05
+    inbox_browser_feedbrowse_min_seconds: int = 20
+    inbox_browser_feedbrowse_max_seconds: int = 60
+    # Quante chat raccolte prima del break di sessione (defer ARQ).
+    inbox_session_size: int = 300
+    inbox_break_min_minutes: int = 30
+    inbox_break_max_minutes: int = 60
+
     # Account defaults
     default_daily_limit: int = 20
     warmup_enabled: bool = True
