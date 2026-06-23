@@ -76,6 +76,10 @@ async def list_followers(campaign_id: str) -> int | None:
             await db.commit()
             emit_event(campaign_id, "scrape_resume", "Pausa lista terminata, ripresa")
 
+        if getattr(campaign, "scrape_mode", "followers") == "dm_threads":
+            from app.services.scrape_inbox import run_inbox_list
+            return await run_inbox_list(campaign_id, db, campaign)
+
         scrape_mode = getattr(campaign, "scrape_mode", "followers")
         mode_label = "following" if scrape_mode == "following" else "follower"
         pool = None
