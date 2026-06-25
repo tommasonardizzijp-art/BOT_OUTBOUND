@@ -21,7 +21,10 @@ class CampaignCreate(BaseModel):
     # 'followers' = scrape who follows target; 'following' = scrape who target follows
     scrape_mode: str = Field(default='followers', pattern='^(followers|following|dm_threads)$')
     # Engine estrazione lista per dm_threads (ignorato per followers/following).
-    inbox_engine: str = Field(default='browser', pattern='^(browser|api)$')
+    # Default 'api'. 'browser' e' DEPRECATO e no-op: lo scraping via browsing del
+    # DOM e' stato rimosso (la lista DM web non espone username/pk) — il backend
+    # usa sempre l'API. Il valore resta accettato per retrocompatibilita'.
+    inbox_engine: str = Field(default='api', pattern='^(browser|api)$')
     # Session break config
     scrape_session_size: int = Field(default=250, ge=10, le=5000)
     scrape_break_minutes_min: int = Field(default=30, ge=5, le=240)
@@ -87,7 +90,7 @@ class CampaignResponse(BaseModel):
     require_approval: bool
     approval_sample_size: int
     scrape_mode: str
-    inbox_engine: str = 'browser'
+    inbox_engine: str = 'api'
     scrape_completed_at: datetime | None
     started_at: datetime | None
     completed_at: datetime | None

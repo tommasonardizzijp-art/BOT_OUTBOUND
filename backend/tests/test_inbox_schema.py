@@ -7,7 +7,7 @@ from app.schemas.campaign import CampaignCreate
 def test_dm_threads_mode_accepted_without_target():
     c = CampaignCreate(name="x", scrape_mode="dm_threads", messaging_enabled=False)
     assert c.scrape_mode == "dm_threads"
-    assert c.inbox_engine == "browser"  # default
+    assert c.inbox_engine == "api"  # default (browser deprecato/no-op)
     assert c.target_username is None
 
 

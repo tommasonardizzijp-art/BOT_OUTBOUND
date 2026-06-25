@@ -1,15 +1,8 @@
-"""Regression tests for the browser-engine 0-contacts guard in run_inbox_list.
+"""Regression test: run_inbox_list con 0 contatti -> ready (inbox vuoto legittimo).
 
-When the inbox_engine is 'browser' and the run exhausts the source with 0
-contacts, the campaign must NOT be flipped to ready (false success). Instead
-it must land in error with scrape_outcome='browser_not_wired' so the operator
-knows the engine is not yet operational.
-
-When the inbox_engine is 'api' and the run exhausts with 0 contacts, the
-campaign must land in ready — legitimate empty-inbox scenario.
-
-These two cases together prove the guard is browser-scoped, not a blanket
-"0 contacts = error" policy.
+Lo scraping inbox via browser e' stato rimosso: ora c'e' un solo engine (API) e
+nessun guard 'browser_not_wired'. Una run che esaurisce l'inbox senza contatti
+significa che l'account non ha (ancora) thread DM: stato ready valido, non errore.
 """
 import asyncio
 import os
@@ -51,7 +44,7 @@ class _ScriptedSource:
         return page
 
 
-def _setup_inbox_db(monkeypatch, pages: list[InboxPage], *, inbox_engine: str = "browser"):
+def _setup_inbox_db(monkeypatch, pages: list[InboxPage], *, inbox_engine: str = "api"):
     """Create a throw-away SQLite DB with one campaign in listing state.
 
     Patches scrape_inbox.build_inbox_source to return a _ScriptedSource.
@@ -139,42 +132,11 @@ def _read_campaign(session_factory, campaign_id):
     return asyncio.run(_go())
 
 
-# ── Test 1: browser engine + 0 contacts → error (not false success) ──────────
-
-def test_browser_engine_zero_contacts_becomes_error(monkeypatch):
-    """browser engine exhausts with 0 contacts → status=error, scrape_outcome='browser_not_wired'.
-
-    The browser engine is not yet operationally verified (DOM selectors + pk
-    resolution pending live test). A run that collects nothing must surface as
-    an actionable error rather than silently completing as ready=OK.
-    """
-    pages = [InboxPage(participants=[], cursor=None, exhausted=True)]
-    session_factory, campaign_id, cleanup = _setup_inbox_db(
-        monkeypatch, pages, inbox_engine="browser"
-    )
-    try:
-        result = _run_inbox_list(session_factory, campaign_id)
-        status, outcome = _read_campaign(session_factory, campaign_id)
-
-        assert result is None, f"Expected None (no break scheduled), got {result!r}"
-        assert status == CampaignStatus.error, (
-            f"DEFECT: browser engine with 0 contacts must land in error, got {status!r}"
-        )
-        assert outcome == "browser_not_wired", (
-            f"DEFECT: scrape_outcome must be 'browser_not_wired', got {outcome!r}"
-        )
-    finally:
-        cleanup()
-
-
-# ── Test 2: api engine + 0 contacts → ready (legitimate empty inbox) ─────────
+# ── api engine + 0 contacts → ready (inbox vuoto legittimo) ──────────────────
 
 def test_api_engine_zero_contacts_stays_ready(monkeypatch):
-    """api engine exhausts with 0 contacts → status=ready (legitimate empty-inbox scenario).
-
-    The guard must be browser-scoped. An api run that exhausts without contacts
-    means the account genuinely has no DM threads yet — that is a valid ready
-    state, not an error.
+    """Esaurire l'inbox con 0 contatti → status=ready (inbox genuinamente vuoto),
+    non errore. scrape_outcome resta None.
     """
     pages = [InboxPage(participants=[], cursor=None, exhausted=True)]
     session_factory, campaign_id, cleanup = _setup_inbox_db(

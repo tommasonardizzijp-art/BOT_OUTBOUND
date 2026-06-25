@@ -57,30 +57,28 @@ async def _single_inbox_account(db, campaign_id: str):
 
 
 async def build_inbox_source(db, campaign):
-    """Costruisce la sorgente inbox per l'engine scelto.
+    """Costruisce la sorgente inbox (SOLO API).
 
-    Ritorna (source, own_pk, account, cleanup) dove cleanup e' una coroutine
-    factory da awaitare nel finally (chiude browser / rilascia sessione).
+    Lo scraping via browsing del DOM e' stato rimosso: la lista DM su Instagram
+    web espone solo il NOME VISUALIZZATO (es. "Tabaccheria Sileoni"), non
+    l'@username ne' il pk, e le righe non sono link al thread — quindi dal DOM
+    non si ricava nessun identificatore usabile per estrarre i contatti.
+    Verificato live (giugno 2026). L'API (direct_v2/inbox) restituisce invece
+    pk + username puliti e paginati, e funziona su account sani.
+
+    Ritorna (source, own_pk, account, cleanup); cleanup e' una factory da
+    awaitare nel finally.
     """
     account = await _single_inbox_account(db, campaign.id)
-    engine = getattr(campaign, "inbox_engine", "browser") or "browser"
+    client = await _login(account, db)
+    own_pk = int(client.user_id)
+    cursor = campaign.scrape_cursor or None  # oldest_cursor API
+    source = ApiInboxSource(client, own_pk, cursor=cursor)
 
-    if engine == "api":
-        client = await _login(account, db)
-        own_pk = int(client.user_id)
-        # cursore valido solo per engine api (oldest_cursor)
-        cursor = campaign.scrape_cursor or None
-        source = ApiInboxSource(client, own_pk, cursor=cursor)
+    async def _cleanup():
+        return None
 
-        async def _cleanup():
-            return None
-
-        return source, own_pk, account, _cleanup
-
-    # engine == "browser"
-    from app.services.inbox_browser_source import build_browser_inbox_source
-    src, own_pk_b, cleanup = await build_browser_inbox_source(db, campaign, account)
-    return src, own_pk_b, account, cleanup
+    return source, own_pk, account, _cleanup
 
 
 async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
@@ -96,8 +94,7 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
     account = None
     try:
         source, own_pk, account, cleanup = await build_inbox_source(db, campaign)
-        emit_event(campaign_id, "scrape_start",
-                   f"Fase Lista inbox avviata (engine {campaign.inbox_engine})")
+        emit_event(campaign_id, "scrape_start", "Fase Lista inbox avviata (API)")
 
         already = await db.scalar(
             select(func.count(Follower.id)).where(Follower.campaign_id == campaign_id)
@@ -149,10 +146,9 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 campaign.scrape_cursor = None
                 break
 
-            # pacing API tra pagine (il browser gestisce il proprio pacing interno)
-            if getattr(campaign, "inbox_engine", "browser") == "api":
-                lo, hi = settings.inbox_api_page_delay_min_seconds, settings.inbox_api_page_delay_max_seconds
-                await asyncio.sleep(random.uniform(lo, hi))
+            # pacing API tra pagine
+            lo, hi = settings.inbox_api_page_delay_min_seconds, settings.inbox_api_page_delay_max_seconds
+            await asyncio.sleep(random.uniform(lo, hi))
 
             if since_break >= settings.inbox_session_size:
                 minutes = random.uniform(settings.inbox_break_min_minutes, settings.inbox_break_max_minutes)
@@ -165,25 +161,6 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 emit_event(campaign_id, "scrape_break", f"Pausa inbox {int(minutes)} min dopo {already}")
                 return seconds
 
-        engine = getattr(campaign, "inbox_engine", "browser") or "browser"
-        if engine == "browser" and already == 0:
-            # Engine browser non ancora operativo (selettori DOM + risoluzione
-            # username->pk in verifica live): una run che esaurisce l'inbox senza
-            # raccogliere nulla NON e' un successo. Segnalala come errore azionabile
-            # invece di fingere "completata", cosi' l'operatore non crede che
-            # l'account non abbia DM. Rimuovere questo guard quando il browser
-            # engine sara' verificato live e capace di raccogliere contatti.
-            campaign.status = CampaignStatus.error
-            campaign.scrape_outcome = "browser_not_wired"
-            campaign.updated_at = datetime.utcnow()
-            await db.commit()
-            emit_event(
-                campaign_id,
-                "scrape_stopped",
-                "Engine browser non operativo (selettori/risoluzione pk in verifica live): 0 contatti raccolti. Usa l'engine API.",
-                level="error",
-            )
-            return None
         campaign.status = CampaignStatus.ready
         campaign.updated_at = datetime.utcnow()
         await db.commit()

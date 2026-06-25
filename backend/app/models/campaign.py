@@ -62,9 +62,11 @@ class Campaign(Base):
     scrape_break_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     scrape_break_prev_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     scrape_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Engine di estrazione lista per scrape_mode=dm_threads: 'browser' (prudente,
-    # default, account principali) | 'api' (veloce, account secondari). Vedi spec.
-    inbox_engine: Mapped[str] = mapped_column(String(10), nullable=False, default='browser', server_default='browser')
+    # Engine estrazione lista per scrape_mode=dm_threads. Default 'api'.
+    # 'browser' e' DEPRECATO/no-op: lo scraping via browsing del DOM e' stato
+    # rimosso (la lista DM web mostra solo il nome visualizzato, non username/pk)
+    # — il backend usa sempre l'API. Valore accettato per retrocompat. Migration 020.
+    inbox_engine: Mapped[str] = mapped_column(String(10), nullable=False, default='api', server_default='api')
     list_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bio_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 'completed' | 'partial' | 'rate_limited' — esito ultimo scraping
