@@ -38,11 +38,16 @@ ESSENTIAL_COOKIES = (
 )
 
 
-async def manual_browser_login(account_id: str, username: str) -> dict:
+async def manual_browser_login(account_id: str, username: str, proxy_url: str | None = None) -> dict:
     """
     Opens a visible browser to instagram.com/accounts/login/.
     Waits for the user to complete login manually.
     Returns verified instagrapi-compatible settings dict.
+
+    proxy_url MUST be resolved by the caller on the main event loop and passed in.
+    This function runs inside a thread-private event loop (see manual_browser_login_sync),
+    where touching the shared async DB pool — bound to the main loop — would raise
+    "Future attached to a different loop". So no DB lookup happens here.
 
     Raises:
         TimeoutError: if login not completed within LOGIN_TIMEOUT seconds.
@@ -56,14 +61,13 @@ async def manual_browser_login(account_id: str, username: str) -> dict:
         )
 
     from app.config import settings
-    from app.browser.context_manager import parse_proxy_url, _fetch_account_proxy, _build_fingerprint_script
+    from app.browser.context_manager import parse_proxy_url, _build_fingerprint_script
     from app.browser.fingerprint import get_fingerprint
 
     profile_dir = os.path.join(settings.browser_profiles_dir, account_id)
     os.makedirs(profile_dir, exist_ok=True)
 
     fingerprint = get_fingerprint(account_id)
-    proxy_url = await _fetch_account_proxy(account_id)
     proxy_cfg = parse_proxy_url(proxy_url)
     if proxy_url and not proxy_cfg:
         raise RuntimeError(
@@ -266,7 +270,7 @@ async def _build_session(cookies: dict, username: str) -> dict:
     return await asyncio.to_thread(_do_build)
 
 
-async def manual_browse_session(account_id: str, username: str, max_minutes: int = 60) -> dict:
+async def manual_browse_session(account_id: str, username: str, max_minutes: int = 60, proxy_url: str | None = None) -> dict:
     """
     Open Instagram in a real browser using account profile + proxy + fingerprint
     of `account_id`. User browses normally (scroll feed, like posts, view stories).
@@ -274,6 +278,9 @@ async def manual_browse_session(account_id: str, username: str, max_minutes: int
 
     Purpose: warm-up dormant accounts and accumulate organic activity signals
     on the SAME profile/proxy/fingerprint that the bot will later use for DMs.
+
+    proxy_url MUST be resolved by the caller on the main loop and passed in — same
+    thread-private-loop reason as manual_browser_login.
 
     Returns: {"duration_seconds": int, "closed_by": "user" | "timeout"}
     """
@@ -286,7 +293,7 @@ async def manual_browse_session(account_id: str, username: str, max_minutes: int
 
     logger.info(f"Avvio sessione browse manuale per @{username} (max {max_minutes}min)")
 
-    async with get_browser_context(account_id, headless=False) as context:
+    async with get_browser_context(account_id, headless=False, proxy_url=proxy_url) as context:
         page = await context.new_page()
         await page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
 
@@ -308,16 +315,17 @@ async def manual_browse_session(account_id: str, username: str, max_minutes: int
     return {"duration_seconds": duration, "closed_by": closed_by}
 
 
-def manual_browse_session_sync(account_id: str, username: str, max_minutes: int = 60) -> dict:
-    """Synchronous wrapper for manual_browse_session — same pattern as manual_browser_login_sync."""
+def manual_browse_session_sync(account_id: str, username: str, max_minutes: int = 60, proxy_url: str | None = None) -> dict:
+    """Synchronous wrapper for manual_browse_session — same pattern as manual_browser_login_sync.
+    proxy_url must be resolved on the main loop by the caller (see that wrapper)."""
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(manual_browse_session(account_id, username, max_minutes))
+        return loop.run_until_complete(manual_browse_session(account_id, username, max_minutes, proxy_url))
     finally:
         loop.close()
 
 
-def manual_browser_login_sync(account_id: str, username: str) -> dict:
+def manual_browser_login_sync(account_id: str, username: str, proxy_url: str | None = None) -> dict:
     """
     Synchronous wrapper for manual_browser_login.
 
@@ -325,10 +333,14 @@ def manual_browser_login_sync(account_id: str, username: str) -> dict:
     This is needed because FastAPI/uvicorn already runs its own asyncio loop,
     and Patchright's async_playwright() can conflict with it.
 
+    proxy_url MUST be resolved on the MAIN loop by the caller and passed in. The
+    shared async DB pool (app.database.engine) is bound to the main loop; querying
+    it from this thread-private loop raises "Future attached to a different loop".
+
     Called from the endpoint via: await asyncio.to_thread(manual_browser_login_sync, ...)
     """
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(manual_browser_login(account_id, username))
+        return loop.run_until_complete(manual_browser_login(account_id, username, proxy_url))
     finally:
         loop.close()

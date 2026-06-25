@@ -15,15 +15,28 @@ from loguru import logger
 from app.config import settings
 from app.browser.fingerprint import get_fingerprint
 
+# Sentinel: distinguishes "proxy not provided, fetch from DB" (worker path, runs
+# on the main loop) from "proxy explicitly None = no proxy" (resolved by the caller
+# on the main loop and passed down into a thread-private loop, e.g. manual login).
+_UNSET = object()
+
 # Per-account mutex: prevents two concurrent browser launches for the same
 # Chromium profile directory, which causes about:blank pages and session corruption.
-_account_locks: dict[str, asyncio.Lock] = {}
+# Keyed by (account_id) -> (loop, Lock). An asyncio.Lock binds to the loop on which
+# it is first awaited; the manual-login/browse sync wrappers spin a NEW loop in a
+# thread, so a lock created on the main loop would raise "attached to a different
+# loop" there. Storing the owning loop lets us hand out a fresh lock per loop.
+_account_locks: dict[str, tuple] = {}
 
 
 def _get_account_lock(account_id: str) -> asyncio.Lock:
-    if account_id not in _account_locks:
-        _account_locks[account_id] = asyncio.Lock()
-    return _account_locks[account_id]
+    loop = asyncio.get_running_loop()
+    entry = _account_locks.get(account_id)
+    if entry is None or entry[0] is not loop:
+        lock = asyncio.Lock()
+        _account_locks[account_id] = (loop, lock)
+        return lock
+    return entry[1]
 
 
 def parse_proxy_url(url: str | None) -> dict | None:
@@ -67,9 +80,15 @@ def _import_async_playwright():
     return async_playwright
 
 
-async def _prepare_launch(account_id: str, headless: bool | None) -> tuple[dict, dict]:
+async def _prepare_launch(account_id: str, headless: bool | None, proxy_url=_UNSET) -> tuple[dict, dict]:
     """Build (launch_kwargs, fingerprint) for a Patchright persistent context.
-    Validates proxy and sets --no-proxy-server when no proxy is configured."""
+    Validates proxy and sets --no-proxy-server when no proxy is configured.
+
+    proxy_url: pass a value (str or None) already resolved on the main loop to skip
+    the DB lookup here — required when this runs inside a thread-private event loop
+    (manual login/browse), because the shared async DB pool is bound to the main loop
+    and querying it from another loop raises "Future attached to a different loop".
+    Left as _UNSET (worker path on the main loop), the proxy is fetched from the DB."""
     profile_dir = os.path.join(settings.browser_profiles_dir, account_id)
     os.makedirs(profile_dir, exist_ok=True)
 
@@ -86,7 +105,8 @@ async def _prepare_launch(account_id: str, headless: bool | None) -> tuple[dict,
             logger.warning(f"Could not remove {lock_file} for {account_id[:8]}…: {e}")
 
     fingerprint = get_fingerprint(account_id)
-    proxy_url = await _fetch_account_proxy(account_id)
+    if proxy_url is _UNSET:
+        proxy_url = await _fetch_account_proxy(account_id)
     proxy_cfg = parse_proxy_url(proxy_url)
     if proxy_url and not proxy_cfg:
         logger.error(
@@ -128,7 +148,7 @@ async def _prepare_launch(account_id: str, headless: bool | None) -> tuple[dict,
 
 
 @asynccontextmanager
-async def get_browser_context(account_id: str, headless: bool | None = None):
+async def get_browser_context(account_id: str, headless: bool | None = None, proxy_url=_UNSET):
     """
     Context manager that provides a Patchright browser context for the given account.
     The browser profile is stored persistently at {BROWSER_PROFILES_DIR}/{account_id}/
@@ -147,7 +167,7 @@ async def get_browser_context(account_id: str, headless: bool | None = None):
 
     lock = _get_account_lock(account_id)
     async with lock:
-        launch_kwargs, fingerprint = await _prepare_launch(account_id, headless)
+        launch_kwargs, fingerprint = await _prepare_launch(account_id, headless, proxy_url)
 
         async with async_playwright() as pw:
             context = await pw.chromium.launch_persistent_context(**launch_kwargs)

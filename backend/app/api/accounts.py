@@ -404,14 +404,20 @@ async def manual_login_account(account_id: str, db: AsyncSession = Depends(get_d
     import traceback
     from loguru import logger
     from app.services.manual_login import manual_browser_login_sync
+    from app.browser.context_manager import _fetch_account_proxy
 
     account = await _get_or_404(account_id, db)
+
+    # Resolve the proxy HERE, on the main loop, before handing off to the
+    # thread-private loop. The async DB pool is bound to this loop; querying it
+    # from the worker loop raises "Future attached to a different loop".
+    proxy_url = await _fetch_account_proxy(account.id)
 
     try:
         # Run browser in a separate thread with its own event loop
         # to avoid conflicts with uvicorn's asyncio loop
         settings_dict = await asyncio.to_thread(
-            manual_browser_login_sync, account.id, account.username
+            manual_browser_login_sync, account.id, account.username, proxy_url
         )
 
         account.session_data = json.dumps(settings_dict)
@@ -465,12 +471,16 @@ async def browse_session(account_id: str, db: AsyncSession = Depends(get_db), ma
     import traceback
     from loguru import logger
     from app.services.manual_login import manual_browse_session_sync
+    from app.browser.context_manager import _fetch_account_proxy
 
     account = await _get_or_404(account_id, db)
 
+    # Resolve proxy on the main loop before the thread-private loop (see browser-login).
+    proxy_url = await _fetch_account_proxy(account.id)
+
     try:
         result = await asyncio.to_thread(
-            manual_browse_session_sync, account.id, account.username, max_minutes
+            manual_browse_session_sync, account.id, account.username, max_minutes, proxy_url
         )
         log = ActivityLog(
             account_id=account.id,
