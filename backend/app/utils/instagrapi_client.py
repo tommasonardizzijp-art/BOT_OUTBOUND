@@ -145,15 +145,6 @@ async def _do_login(account: InstagramAccount, db, skip_gql_verify: bool = False
         session = json.loads(account.session_data)
         client.set_settings(session)
 
-        # Sessions saved before the header-auth fix lack this flag, which
-        # instagrapi's canonical login_by_sessionid always sets. Without it
-        # Instagram 404s header-auth mobile endpoints (direct_v2/inbox →
-        # "Endpoint does not exist"). Inject defensively so already-saved
-        # sessions work without forcing a manual re-login; it persists on the
-        # session_data re-save below (get_settings includes authorization_data).
-        if isinstance(getattr(client, "authorization_data", None), dict):
-            client.authorization_data.setdefault("should_use_header_over_cookies", True)
-
         if not skip_gql_verify:
             # Verify session via WEB GraphQL (not mobile API).
             # Calling mobile `account_info()` right after a fresh manual web login

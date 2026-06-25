@@ -252,11 +252,6 @@ async def _build_session(cookies: dict, username: str) -> dict:
         default_settings["authorization_data"] = {
             "ds_user_id": cookies.get("ds_user_id", ""),
             "sessionid": cookies.get("sessionid", ""),
-            # Mirror instagrapi's canonical login_by_sessionid: this flag tells
-            # Instagram to authenticate the private mobile API via the Bearer
-            # header. Without it, header-auth endpoints like direct_v2/inbox
-            # return 404 ("Endpoint does not exist") — breaks DM inbox scraping.
-            "should_use_header_over_cookies": True,
         }
         client.set_settings(default_settings)
 
