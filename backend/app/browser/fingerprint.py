@@ -82,8 +82,15 @@ def get_fingerprint(account_id: str) -> dict:
     return {
         "viewport": viewport,
         "user_agent": rng.choice(USER_AGENTS),
-        "locale": rng.choice(["it-IT", "en-US", "en-GB"]),
-        "timezone_id": rng.choice(["Europe/Rome", "Europe/London", "America/New_York"]),
+        # Geo coherence: pin browser locale+timezone to Italy. Gli account escono da
+        # un IP italiano (SIM/proxy IT); un browser dichiarato en-US o fuso New York
+        # su IP italiano e' un mismatch che alza il sospetto anti-bot di Instagram.
+        # Manteniamo rng.choice su liste a 1 elemento (invece di valori secchi) per
+        # NON alterare la sequenza del rng: cosi' i campi deterministici a valle
+        # (hardware_concurrency, device_memory, timing_multiplier) restano IDENTICI
+        # per ogni account — cambiano solo locale e fuso, niente shift di fingerprint.
+        "locale": rng.choice(["it-IT"]),
+        "timezone_id": rng.choice(["Europe/Rome"]),
         "hardware_concurrency": rng.choice([4, 8, 12, 16]),
         "device_memory": rng.choice([4, 8]),
         "webgl_renderer": webgl["renderer"],

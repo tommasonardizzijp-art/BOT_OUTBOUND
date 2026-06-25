@@ -229,6 +229,22 @@ async def manual_browser_login(account_id: str, username: str, proxy_url: str | 
     return await _build_session(essential, username)
 
 
+def _rome_utc_offset_seconds() -> int:
+    """Offset UTC corrente di Europe/Rome in secondi (CET=3600 inverno, CEST=7200 estate).
+
+    L'app IG invia l'offset live ad ogni richiesta; lo calcoliamo al momento del
+    login cosi' e' corretto per la stagione. Fallback a 3600 (CET) se il tz
+    database non e' disponibile (zoneinfo su Windows puo' richiedere `tzdata`).
+    """
+    try:
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        off = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Rome")).utcoffset()
+        return int(off.total_seconds()) if off else 3600
+    except Exception:
+        return 3600
+
+
 async def _build_session(cookies: dict, username: str) -> dict:
     """
     Build an instagrapi-compatible settings dict from web cookies.
@@ -254,6 +270,20 @@ async def _build_session(cookies: dict, username: str) -> dict:
             "sessionid": cookies.get("sessionid", ""),
         }
         client.set_settings(default_settings)
+
+        # ── Geo coherence: device mobile italiano ──
+        # instagrapi nasce con un device USA (locale en_US, country US, fuso New
+        # York GMT-4). I nostri account escono da un IP italiano: un device USA su
+        # IP italiano e' un mismatch persistente che insospettisce l'API mobile di
+        # Instagram (usata da scraping + lettura inbox DM) e contribuisce ai
+        # checkpoint. Allineiamo locale/country/country_code/fuso all'Italia.
+        # set_locale("it_IT") riscrive anche il locale dentro lo user-agent e
+        # imposta country=IT da solo. Applicato qui (login nuovo): le sessioni
+        # gia' salvate adottano il device IT al prossimo "Login Browser", senza
+        # cambio-device a meta' vita su account sani.
+        client.set_locale("it_IT")
+        client.set_country_code(39)
+        client.set_timezone_offset(_rome_utc_offset_seconds())
 
         if not client.user_id:
             raise RuntimeError(
