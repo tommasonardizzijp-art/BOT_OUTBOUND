@@ -1,3 +1,6 @@
+# Contatti estratti dall'inbox (PII reali) — output, mai in git
+backend/contatti_chat_*.csv
+
 # Python
 backend/venv/
 backend/__pycache__/
