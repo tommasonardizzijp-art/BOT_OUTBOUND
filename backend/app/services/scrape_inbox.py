@@ -37,6 +37,26 @@ def inbox_collect(participants, existing_ids) -> list[tuple[int, str]]:
     return out
 
 
+async def _inbox_page_delay() -> None:
+    """Pacing umano tra pagine inbox: lognormale (scroll attivo) + pausa lunga
+    occasionale ("si ferma a leggere/rispondere"). Distribuzione bimodale:
+    la maggior parte delle pagine veloci, raramente uno stop lungo. Piu' credibile
+    dell'uniforme piatto perche' un umano non aspetta lo stesso intervallo a ogni
+    caricamento.
+    """
+    if random.random() < settings.inbox_long_pause_probability:
+        delay = random.uniform(
+            settings.inbox_long_pause_min_seconds, settings.inbox_long_pause_max_seconds
+        )
+        logger.info(f"[InboxLista] Pausa lunga {delay:.0f}s (legge/risponde)")
+    else:
+        lo, hi = settings.inbox_api_page_delay_min_seconds, settings.inbox_api_page_delay_max_seconds
+        mid = (lo + hi) / 2
+        # lognormvariate(0, 0.4): mediana 1.0 -> mediana delay = mid, code asimmetriche.
+        delay = min(hi, max(lo, random.lognormvariate(0, 0.4) * mid))
+    await asyncio.sleep(delay)
+
+
 async def _single_inbox_account(db, campaign_id: str):
     """Ritorna l'unico account assegnato attivo per la campagna inbox, o solleva."""
     rows = (await db.execute(
@@ -146,9 +166,8 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 campaign.scrape_cursor = None
                 break
 
-            # pacing API tra pagine
-            lo, hi = settings.inbox_api_page_delay_min_seconds, settings.inbox_api_page_delay_max_seconds
-            await asyncio.sleep(random.uniform(lo, hi))
+            # pacing umano tra pagine (lognormale + pausa lunga occasionale)
+            await _inbox_page_delay()
 
             if since_break >= settings.inbox_session_size:
                 minutes = random.uniform(settings.inbox_break_min_minutes, settings.inbox_break_max_minutes)

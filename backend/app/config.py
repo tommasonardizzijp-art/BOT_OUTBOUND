@@ -98,8 +98,13 @@ class Settings(BaseSettings):
     # ── Inbox DM scraping (scrape_mode=dm_threads) ─────────────────────────
     # Solo engine API (direct_v2/inbox): pacing tra pagine. Lo scraping via
     # browser e' stato rimosso (la lista DM web non espone username/pk).
-    inbox_api_page_delay_min_seconds: int = 5
-    inbox_api_page_delay_max_seconds: int = 12
+    # Delay base tra pagine inbox: lognormale clampato a [min,max] (scroll attivo).
+    inbox_api_page_delay_min_seconds: int = 2
+    inbox_api_page_delay_max_seconds: int = 5
+    # Pausa lunga occasionale tra pagine inbox ("si ferma a leggere/rispondere").
+    inbox_long_pause_probability: float = 0.08
+    inbox_long_pause_min_seconds: int = 20
+    inbox_long_pause_max_seconds: int = 60
     # Quante chat raccolte prima del break di sessione (defer ARQ).
     inbox_session_size: int = 300
     inbox_break_min_minutes: int = 30
