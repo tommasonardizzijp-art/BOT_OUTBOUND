@@ -134,6 +134,26 @@ async def _do_login(account: InstagramAccount, db, skip_gql_verify: bool = False
     if account.proxy:
         client.set_proxy(account.proxy)
 
+    # Fail-fast sul verify GQL. L'endpoint web (web_profile_info) viene 429-ato da IG
+    # in modo sistematico su quasi ogni IP: è un limite dell'endpoint, non un flag
+    # sull'account (verificato: stesso 429 da IP casa e da proxy mobile). instagrapi
+    # monta di default una Retry(total=3, backoff_factor=2) sulla sessione `public` →
+    # ~15s persi a OGNI login, sempre, per un 429 inevitabile. Riduciamo a 1 retry
+    # senza backoff: il 429 torna in ~1-2s e si prosegue con la sessione mobile.
+    # NON tocca l'anti-ban: la chiamata-web "gentile" pre-mobile (baking) resta, fa
+    # solo meno richieste ripetute = meno aggressivo, non di più.
+    try:
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        _fast_retry = HTTPAdapter(max_retries=Retry(
+            total=1, backoff_factor=0, status_forcelist=[429, 500, 502, 503, 504],
+        ))
+        client.public.mount("https://", _fast_retry)
+        client.public.mount("http://", _fast_retry)
+    except Exception as _retry_exc:
+        logger.debug(f"fast-retry public non applicato per @{account.username}: {_retry_exc}")
+
     if not account.session_data:
         raise ScraperError(
             f"@{account.username} non ha una sessione salvata. "
