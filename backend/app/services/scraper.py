@@ -286,7 +286,8 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
     Ritorna una tupla ``(outcome, account_used, error)``:
       - outcome: 'done' | 'soft_block' | 'capped' | 'challenge' | 'network' | 'error'
       - account_used: l'account che ha eseguito la chiamata IG (None se 'capped')
-      - error: l'eccezione catturata su 'challenge'/'error' (None altrimenti)
+      - error: l'eccezione catturata su 'challenge'/'soft_block'/'network'/'error'
+        (None su 'done'/'capped')
 
     Il chiamante riceve cosi' l'account REALE usato per la chiamata: indispensabile
     per isolare l'account giusto su challenge (con la rotazione pool round-robin il
@@ -304,9 +305,9 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
             return "challenge", current_account, e
         es = str(e).lower()
         if "protect" in es or "restrict" in es or "community" in es:
-            return "soft_block", current_account, None
+            return "soft_block", current_account, e
         if "429" in es or "too many" in es or "rate" in es:
-            return "soft_block", current_account, None
+            return "soft_block", current_account, e
         # Connessione caduta (tethering USB staccato, proxy giu', DNS): NON e' colpa
         # del profilo. Il chiamante mette in pausa la run preservando i pending,
         # invece di skippare profili buoni o ciclare a vuoto.

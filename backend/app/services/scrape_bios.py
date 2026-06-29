@@ -129,6 +129,10 @@ async def scrape_bios(campaign_id: str) -> int | None:
 
                 if outcome == "soft_block":
                     consecutive_soft += 1
+                    logger.warning(
+                        f"[Bio] @{follower.username} via @{account.username if account else '?'} "
+                        f"429/soft-block ({consecutive_soft}/3): {err}"
+                    )
                     if consecutive_soft >= 3:
                         raise SoftBlockError("3 soft block consecutivi")
                     await asyncio.sleep(random.uniform(90, 180))
