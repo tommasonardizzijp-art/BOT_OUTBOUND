@@ -205,7 +205,7 @@ Una campagna = una sorgente di profili + un template messaggio.
 Join table campagne ↔ account Instagram.
 - `daily_limit_override`: override del limite giornaliero per questo account su questa campagna
 - `is_active`: flag per abilitare/disabilitare l'account su questa campagna
-- `role`: `'scraping'` | `'dm'` | `'both'` (default) — ruolo account nella campagna. Scraper usa solo `scraping`/`both`. Worker DM usano solo `dm`/`both`.
+- `role`: capability componibili (stringa `String(16)`, default `both`). Base: `'scraping'` (solo bio), `'dm'` (solo invio), `'both'`. Capability **inbox** (listing dei DM-thread, solo `scrape_mode='dm_threads'`), combinabile: `'inbox'`, `'inbox_scraping'`, `'inbox_dm'`, `'inbox_both'`. **Una sola** capability inbox per campagna (un account legge una sola inbox DM); gli account scraping/dm sono illimitati → bio/DM si spalmano. Fonte di verità unica: `app/utils/roles.py` (`SCRAPE_ROLES`/`DM_ROLES`/`INBOX_ROLES` + `can_scrape`/`can_dm`/`is_inbox`); **mai** filtrare per tuple inline. Scraper (bio) usa `SCRAPE_ROLES`, worker DM `DM_ROLES`, il listing inbox `INBOX_ROLES` (esattamente 1).
 
 ### `followers`
 Ogni riga è un follower della pagina target in una campagna specifica.

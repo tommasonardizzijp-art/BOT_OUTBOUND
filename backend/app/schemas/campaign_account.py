@@ -2,19 +2,26 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Literal
 
+# Keep in sync with app.utils.roles.ALL_ROLES. 'inbox*' = carries the DM-inbox
+# capability (capped at 1 account/campaign); combinable with scraping/dm.
+AccountRole = Literal[
+    "scraping", "dm", "both",
+    "inbox", "inbox_scraping", "inbox_dm", "inbox_both",
+]
+
 
 class CampaignAccountAssign(BaseModel):
     account_id: str
     # NULL = use account's global daily_message_limit (possibly warmup-adjusted)
     daily_limit_override: int | None = Field(default=None, ge=1, le=200)
-    role: Literal["scraping", "dm", "both"] = "both"
+    role: AccountRole = "both"
 
 
 class CampaignAccountUpdate(BaseModel):
     # Set to None to clear override (revert to account global limit)
     daily_limit_override: int | None = Field(default=None, ge=1, le=200)
     is_active: bool | None = None
-    role: Literal["scraping", "dm", "both"] | None = None
+    role: AccountRole | None = None
 
 
 class CampaignAccountResponse(BaseModel):

@@ -13,6 +13,7 @@ from app.models.activity_log import ActivityLog
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.campaign_account import CampaignAccount
 from app.models.follower import Follower, FollowerStatus
+from app.utils.roles import SCRAPE_ROLES, DM_ROLES, INBOX_ROLES
 from app.services.work_enqueue import (
     enqueue_bios,
     enqueue_campaign_run,
@@ -167,23 +168,20 @@ async def resume_campaign_control(
     # up with a campaign in "running" with no enqueued worker (silent failure).
     counts = {"scrape_jobs": 0, "dm_jobs": 0}
     if campaign.scrape_completed_at is None:
-        has_scrape_account = await has_active_role_account(
-            db, campaign_id, ("scraping", "both"), (AccountStatus.active,)
-        )
-        if not has_scrape_account:
-            raise CampaignControlError(
-                "Nessun account attivo con ruolo scraping/both. "
-                "Assegna un account scraper prima di riprendere."
-            )
-
         if campaign.source_type != "import":
             # Two-phase scraping: la ripresa non deve mai riavviare lo scraper
             # legacy interleaved. Discrimina la fase: scrape_cursor valorizzato =>
             # Fase Lista interrotta a meta' (riprende la lista); altrimenti, se
             # restano follower pending => Fase Bio; altrimenti riparte la lista.
+            # Il ruolo richiesto dipende dalla fase: la Fase Lista di una campagna
+            # dm_threads la fa l'account inbox; follower/following e la Fase Bio
+            # richiedono uno scraper.
+            is_dm_threads = campaign.scrape_mode == "dm_threads"
+            list_roles = INBOX_ROLES if is_dm_threads else SCRAPE_ROLES
             if campaign.scrape_cursor:
-                campaign.status = CampaignStatus.listing
-                action = "list_resumed"
+                target_status, action, need_roles = (
+                    CampaignStatus.listing, "list_resumed", list_roles,
+                )
             else:
                 pending = await db.scalar(
                     select(func.count(Follower.id)).where(
@@ -192,13 +190,31 @@ async def resume_campaign_control(
                     )
                 ) or 0
                 if pending:
-                    campaign.status = CampaignStatus.scraping
-                    action = "bios_resumed"
+                    target_status, action, need_roles = (
+                        CampaignStatus.scraping, "bios_resumed", SCRAPE_ROLES,
+                    )
                 else:
-                    campaign.status = CampaignStatus.listing
-                    action = "list_resumed"
+                    target_status, action, need_roles = (
+                        CampaignStatus.listing, "list_resumed", list_roles,
+                    )
+            if not await has_active_role_account(db, campaign_id, need_roles, (AccountStatus.active,)):
+                detail = (
+                    "Nessun account inbox attivo per la lista DM."
+                    if need_roles is INBOX_ROLES
+                    else "Nessun account attivo con ruolo scraping/both."
+                )
+                raise CampaignControlError(f"{detail} Assegna l'account giusto prima di riprendere.")
+            campaign.status = target_status
         else:
-            has_dm_account = await has_active_role_account(db, campaign_id, ("dm", "both"))
+            has_scrape_account = await has_active_role_account(
+                db, campaign_id, SCRAPE_ROLES, (AccountStatus.active,)
+            )
+            if not has_scrape_account:
+                raise CampaignControlError(
+                    "Nessun account attivo con ruolo scraping/both. "
+                    "Assegna un account scraper prima di riprendere."
+                )
+            has_dm_account = await has_active_role_account(db, campaign_id, DM_ROLES)
             if campaign.auto_generate:
                 ensure_campaign_can_send_messages(campaign)
             if campaign.auto_generate and not has_dm_account:
@@ -214,7 +230,7 @@ async def resume_campaign_control(
                 action = "scrape_resumed"
     else:
         ensure_campaign_can_send_messages(campaign)
-        if not await has_active_role_account(db, campaign_id, ("dm", "both")):
+        if not await has_active_role_account(db, campaign_id, DM_ROLES):
             raise CampaignControlError(
                 "Nessun account attivo con ruolo DM/both. "
                 "Assegna un account DM prima di riprendere."
@@ -281,7 +297,7 @@ async def pause_campaigns_without_usable_dm_accounts(db: AsyncSession, account_i
         .where(
             CampaignAccount.account_id == account_id,
             CampaignAccount.is_active == True,
-            CampaignAccount.role.in_(("dm", "both")),
+            CampaignAccount.role.in_(DM_ROLES),
             Campaign.status.in_((CampaignStatus.running, CampaignStatus.scraping_and_running)),
         )
     )
@@ -294,7 +310,7 @@ async def pause_campaigns_without_usable_dm_accounts(db: AsyncSession, account_i
             .where(
                 CampaignAccount.campaign_id == campaign_id,
                 CampaignAccount.is_active == True,
-                CampaignAccount.role.in_(("dm", "both")),
+                CampaignAccount.role.in_(DM_ROLES),
                 InstagramAccount.status.in_((AccountStatus.active, AccountStatus.warming_up)),
             )
             .limit(1)

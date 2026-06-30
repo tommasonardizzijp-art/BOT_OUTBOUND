@@ -315,11 +315,11 @@ def test_assign_first_account_dm_threads_succeeds(client, _temp_db):
     assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
 
 
-def test_assign_second_account_dm_threads_rejected(client, _temp_db):
+def test_assign_second_inbox_account_dm_threads_rejected(client, _temp_db):
     """
-    Assigning a second account to a dm_threads campaign must return 400.
-    The hard-cap guard in assign_account counts ALL rows (active + inactive)
-    and must block on existing_count >= 1.
+    NEW MODEL: only ONE inbox-capable account per campaign. A first inbox
+    account is assigned; assigning a SECOND inbox-capable account must 400.
+    (Non-inbox accounts are unlimited — see the next test.)
     """
     _, sf = _temp_db
     camp_id = str(uuid.uuid4())
@@ -329,7 +329,7 @@ def test_assign_second_account_dm_threads_rejected(client, _temp_db):
     async def _seed(db):
         camp = Campaign(
             id=camp_id,
-            name="B1-second-block",
+            name="B1-second-inbox-block",
             source_type="scrape",
             target_username="target2",
             scrape_mode="dm_threads",
@@ -343,9 +343,9 @@ def test_assign_second_account_dm_threads_rejected(client, _temp_db):
             id=acc2_id, username="acc_b1_b",
             encrypted_password="x", status=AccountStatus.active, daily_message_limit=20,
         )
-        # Pre-seed: first account already assigned
+        # Pre-seed: first account already carries the inbox capability
         ca = CampaignAccount(
-            campaign_id=camp_id, account_id=acc1_id, is_active=True, role="both"
+            campaign_id=camp_id, account_id=acc1_id, is_active=True, role="inbox_both"
         )
         db.add_all([camp, acc1, acc2, ca])
         await db.commit()
@@ -354,33 +354,22 @@ def test_assign_second_account_dm_threads_rejected(client, _temp_db):
 
     resp = client.post(
         f"/api/campaigns/{camp_id}/accounts",
-        json={"account_id": acc2_id, "role": "both"},
+        json={"account_id": acc2_id, "role": "inbox"},
         params={"force": "true"},
     )
     assert resp.status_code == 400, (
-        f"Expected 400 (second account blocked), got {resp.status_code}: {resp.text}"
+        f"Expected 400 (second inbox account blocked), got {resp.status_code}: {resp.text}"
     )
-    assert "inbox" in resp.json()["detail"].lower() or "dm" in resp.json()["detail"].lower(), (
-        f"Error detail does not mention inbox/DM: {resp.json()['detail']}"
+    assert "inbox" in resp.json()["detail"].lower(), (
+        f"Error detail does not mention inbox: {resp.json()['detail']}"
     )
 
 
-# --------------------------------------------------------------------------
-# B-2: INACTIVE first account — does the assignment guard count it?
-#       If the count includes inactive rows, a 2nd assign is correctly blocked.
-#       If it counts only active rows, a 2nd account could slip in.
-# --------------------------------------------------------------------------
-
-def test_assign_second_account_when_first_is_inactive_dm_threads(client, _temp_db):
+def test_assign_second_non_inbox_account_dm_threads_allowed(client, _temp_db):
     """
-    ADVERSARIAL: the first assignment is present but is_active=False.
-    The assign_account guard counts ALL rows (active+inactive) via:
-      SELECT COUNT(*) FROM campaign_accounts WHERE campaign_id = ?
-    So a second account MUST still be rejected (400).
-
-    If this test fails (returns 201), we have a defect: the guard only counts
-    active assignments, letting a second account bypass the cap when the first
-    is deactivated but not removed.
+    NEW MODEL: with the inbox account already present, adding extra
+    scraping/dm accounts to the SAME dm_threads campaign must succeed (201).
+    This is the whole point of the feature: spread bio/DM across accounts.
     """
     _, sf = _temp_db
     camp_id = str(uuid.uuid4())
@@ -390,7 +379,62 @@ def test_assign_second_account_when_first_is_inactive_dm_threads(client, _temp_d
     async def _seed(db):
         camp = Campaign(
             id=camp_id,
-            name="B2-inactive-bypass",
+            name="B1-second-scraper-ok",
+            source_type="scrape",
+            target_username="target2b",
+            scrape_mode="dm_threads",
+            status=CampaignStatus.draft,
+        )
+        acc1 = InstagramAccount(
+            id=acc1_id, username="acc_b1c_inbox",
+            encrypted_password="x", status=AccountStatus.active, daily_message_limit=20,
+        )
+        acc2 = InstagramAccount(
+            id=acc2_id, username="acc_b1c_scraper",
+            encrypted_password="x", status=AccountStatus.active, daily_message_limit=20,
+        )
+        ca = CampaignAccount(
+            campaign_id=camp_id, account_id=acc1_id, is_active=True, role="inbox"
+        )
+        db.add_all([camp, acc1, acc2, ca])
+        await db.commit()
+
+    _run(sf, _seed)
+
+    resp = client.post(
+        f"/api/campaigns/{camp_id}/accounts",
+        json={"account_id": acc2_id, "role": "scraping"},
+        params={"force": "true"},
+    )
+    assert resp.status_code == 201, (
+        f"Expected 201 (extra scraping account allowed), got {resp.status_code}: {resp.text}"
+    )
+
+
+# --------------------------------------------------------------------------
+# B-2: INACTIVE first account — does the assignment guard count it?
+#       If the count includes inactive rows, a 2nd assign is correctly blocked.
+#       If it counts only active rows, a 2nd account could slip in.
+# --------------------------------------------------------------------------
+
+def test_assign_second_inbox_when_first_inbox_is_inactive_rejected(client, _temp_db):
+    """
+    ADVERSARIAL: the first INBOX assignment is present but is_active=False.
+    The cap counts ALL inbox rows (active+inactive), so a second inbox account
+    MUST still be rejected (400) — you can't bypass by deactivating the first.
+
+    If this fails (201), the cap only counts active rows and a disabled inbox
+    account would let a second one slip in.
+    """
+    _, sf = _temp_db
+    camp_id = str(uuid.uuid4())
+    acc1_id = str(uuid.uuid4())
+    acc2_id = str(uuid.uuid4())
+
+    async def _seed(db):
+        camp = Campaign(
+            id=camp_id,
+            name="B2-inactive-inbox-bypass",
             source_type="scrape",
             target_username="target3",
             scrape_mode="dm_threads",
@@ -404,9 +448,9 @@ def test_assign_second_account_when_first_is_inactive_dm_threads(client, _temp_d
             id=acc2_id, username="acc_b2_new",
             encrypted_password="x", status=AccountStatus.active, daily_message_limit=20,
         )
-        # First account assigned but INACTIVE (is_active=False)
+        # First inbox account assigned but INACTIVE (is_active=False)
         ca = CampaignAccount(
-            campaign_id=camp_id, account_id=acc1_id, is_active=False, role="both"
+            campaign_id=camp_id, account_id=acc1_id, is_active=False, role="inbox"
         )
         db.add_all([camp, acc1, acc2, ca])
         await db.commit()
@@ -415,15 +459,14 @@ def test_assign_second_account_when_first_is_inactive_dm_threads(client, _temp_d
 
     resp = client.post(
         f"/api/campaigns/{camp_id}/accounts",
-        json={"account_id": acc2_id, "role": "both"},
+        json={"account_id": acc2_id, "role": "inbox"},
         params={"force": "true"},
     )
-    # The guard counts ALL rows (including inactive). Must still block.
+    # The cap counts ALL inbox rows (including inactive). Must still block.
     assert resp.status_code == 400, (
-        f"DEFECT: second account was allowed even though a (deactivated) first row exists. "
+        f"DEFECT: second inbox account allowed even though a (deactivated) inbox row exists. "
         f"Got {resp.status_code}: {resp.text}. "
-        f"The assign_account guard counts ALL CampaignAccount rows regardless of is_active, "
-        f"which is correct — but if this assertion fails the guard is only counting active rows."
+        f"The cap must count ALL inbox CampaignAccount rows regardless of is_active."
     )
 
 
@@ -468,15 +511,15 @@ def test_start_list_dm_threads_with_zero_accounts_rejected(client, _temp_db):
 #       (bypassing the assignment API guard) → must be 400
 # --------------------------------------------------------------------------
 
-def test_start_list_dm_threads_with_two_active_accounts_rejected(client, _temp_db):
+def test_start_list_dm_threads_with_two_inbox_accounts_rejected(client, _temp_db):
     """
-    ADVERSARIAL: bypass the assignment API guard by inserting 2 CampaignAccount
-    rows directly into the DB (simulating e.g. a DB migration that inserts rows,
-    or a race condition). Then call start_list.
+    ADVERSARIAL: bypass the assignment API cap by inserting 2 INBOX
+    CampaignAccount rows directly into the DB (simulating a migration or race).
+    Then call start_list.
 
-    The start_list guard must independently count active+eligible accounts and
-    reject if count != 1. If this test fails (returns anything other than 400),
-    start_list has no guard of its own and relies solely on assign_account.
+    The start_list guard must independently count active INBOX accounts and
+    reject if count != 1. If this fails (≠400), start_list relies solely on the
+    assignment cap and a DB-level bypass would start with 2 inbox accounts.
     """
     _, sf = _temp_db
     camp_id = str(uuid.uuid4())
@@ -486,7 +529,7 @@ def test_start_list_dm_threads_with_two_active_accounts_rejected(client, _temp_d
     async def _seed(db):
         camp = Campaign(
             id=camp_id,
-            name="B4-two-accounts-bypass",
+            name="B4-two-inbox-bypass",
             source_type="scrape",
             target_username="target5",
             scrape_mode="dm_threads",
@@ -500,12 +543,12 @@ def test_start_list_dm_threads_with_two_active_accounts_rejected(client, _temp_d
             id=acc2_id, username="acc_b4_two",
             encrypted_password="x", status=AccountStatus.active, daily_message_limit=20,
         )
-        # Insert BOTH directly — bypassing the assign API guard
+        # Insert BOTH inbox-capable directly — bypassing the assign API cap
         ca1 = CampaignAccount(
-            campaign_id=camp_id, account_id=acc1_id, is_active=True, role="both"
+            campaign_id=camp_id, account_id=acc1_id, is_active=True, role="inbox"
         )
         ca2 = CampaignAccount(
-            campaign_id=camp_id, account_id=acc2_id, is_active=True, role="both"
+            campaign_id=camp_id, account_id=acc2_id, is_active=True, role="inbox_both"
         )
         db.add_all([camp, acc1, acc2, ca1, ca2])
         await db.commit()
@@ -514,9 +557,9 @@ def test_start_list_dm_threads_with_two_active_accounts_rejected(client, _temp_d
 
     resp = client.post(f"/api/campaigns/{camp_id}/list/start")
     assert resp.status_code == 400, (
-        f"DEFECT: start_list allowed a dm_threads campaign with 2 active accounts. "
+        f"DEFECT: start_list allowed a dm_threads campaign with 2 active inbox accounts. "
         f"Got {resp.status_code}: {resp.text}. "
-        f"The start_list guard must independently validate active_count == 1."
+        f"The start_list guard must independently validate inbox_count == 1."
     )
     detail = resp.json().get("detail", "")
     # Check it's the inbox guard, not just the Redis check or some other error

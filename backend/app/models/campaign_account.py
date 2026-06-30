@@ -32,7 +32,10 @@ class CampaignAccount(Base):
     # Per-account, per-campaign daily DM cap. NULL = fall back to account's global limit.
     daily_limit_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    # Role: 'scraping' = only bio fetch, 'dm' = only send DMs, 'both' = both operations
+    # Role / capabilities. Base: 'scraping' (bio only), 'dm' (send only),
+    # 'both' (scrape+dm). Inbox-capable variants (DM-thread listing, max 1 per
+    # campaign): 'inbox', 'inbox_scraping', 'inbox_dm', 'inbox_both'.
+    # Single source of truth: app.utils.roles. Longest value 'inbox_scraping' = 14 chars.
     role: Mapped[str] = mapped_column(String(16), nullable=False, default="both")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False

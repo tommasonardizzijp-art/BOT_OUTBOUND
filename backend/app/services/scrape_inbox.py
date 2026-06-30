@@ -19,6 +19,7 @@ from app.services.scraper import is_challenge_exception, isolate_challenged_acco
 from app.services.inbox_source import ApiInboxSource
 from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, ScraperError
 from app.utils.instagrapi_client import login as _login
+from app.utils.roles import INBOX_ROLES
 
 
 def inbox_collect(participants, existing_ids) -> list[tuple[int, str]]:
@@ -58,20 +59,24 @@ async def _inbox_page_delay() -> None:
 
 
 async def _single_inbox_account(db, campaign_id: str):
-    """Ritorna l'unico account assegnato attivo per la campagna inbox, o solleva."""
+    """Ritorna l'unico account inbox attivo per la campagna, o solleva.
+
+    Il listing dell'inbox DM lo fa l'account con capability inbox (una sola per
+    campagna). Eventuali account scraping/dm aggiuntivi non leggono l'inbox e
+    qui sono esclusi: contano solo gli INBOX_ROLES."""
     rows = (await db.execute(
         select(InstagramAccount)
         .join(CampaignAccount, CampaignAccount.account_id == InstagramAccount.id)
         .where(
             CampaignAccount.campaign_id == campaign_id,
             CampaignAccount.is_active == True,  # noqa: E712
-            CampaignAccount.role.in_(("scraping", "both")),
+            CampaignAccount.role.in_(INBOX_ROLES),
             InstagramAccount.status.in_((AccountStatus.active, AccountStatus.warming_up)),
         )
     )).scalars().all()
     if len(rows) != 1:
         raise ScrapeBudgetError(
-            f"Campagna inbox richiede esattamente 1 account attivo (trovati {len(rows)})"
+            f"Campagna inbox richiede esattamente 1 account inbox attivo (trovati {len(rows)})"
         )
     return rows[0]
 

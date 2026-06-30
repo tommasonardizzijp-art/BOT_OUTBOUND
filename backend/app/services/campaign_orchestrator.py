@@ -25,6 +25,7 @@ from loguru import logger
 from sqlalchemy import select, update, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.utils.events import emit as emit_event
+from app.utils.roles import can_dm
 
 from app.database import AsyncSessionLocal
 from app.models.account import InstagramAccount, AccountStatus
@@ -289,7 +290,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 logger.info(f"[Worker] Account {account_id[:8]} disabled (is_active=False) — stopping DM worker")
                 emit_event(campaign_id, "worker_stopped", "Account disabilitato sulla campagna — worker fermato", level="warn")
                 return
-            if getattr(_ca, 'role', 'both') not in ("dm", "both"):
+            if not can_dm(getattr(_ca, 'role', 'both')):
                 logger.info(f"[Worker] Account {account_id[:8]} role changed to '{_ca.role}' — stopping DM worker")
                 emit_event(campaign_id, "worker_stopped", f"Account ruolo '{_ca.role}' — non abilitato per DM", level="warn")
                 return
@@ -488,7 +489,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 )
             )
             _ca_now = _ca_recheck.scalar_one_or_none()
-            if _ca_now is None or not _ca_now.is_active or getattr(_ca_now, 'role', 'both') not in ("dm", "both"):
+            if _ca_now is None or not _ca_now.is_active or not can_dm(getattr(_ca_now, 'role', 'both')):
                 follower.locked_by_account_id = None
                 follower.locked_at = None
                 await db.commit()

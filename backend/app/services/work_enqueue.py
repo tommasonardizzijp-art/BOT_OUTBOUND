@@ -16,6 +16,7 @@ from app.models.campaign import Campaign, CampaignStatus
 from app.models.campaign_account import CampaignAccount
 from app.models.follower import Follower
 from app.models.message import Message, MessageStatus
+from app.utils.roles import DM_ROLES
 from app.services.notifier import send_campaign_auto_pause_alert
 from app.utils.events import emit as emit_event
 
@@ -121,7 +122,7 @@ async def _enqueue_dm_workers_with_redis(redis, campaign_id: str) -> int:
             .where(
                 CampaignAccount.campaign_id == campaign_id,
                 CampaignAccount.is_active == True,
-                CampaignAccount.role.in_(("dm", "both")),
+                CampaignAccount.role.in_(DM_ROLES),
                 InstagramAccount.status.in_((AccountStatus.active, AccountStatus.warming_up)),
             )
         )

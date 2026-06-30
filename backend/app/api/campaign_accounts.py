@@ -18,6 +18,7 @@ from app.schemas.campaign_account import (
     CampaignAccountUpdate,
     CampaignAccountResponse,
 )
+from app.utils.roles import INBOX_ROLES, is_inbox
 
 router = APIRouter(prefix="/campaigns/{campaign_id}/accounts", tags=["campaign-accounts"])
 
@@ -47,6 +48,30 @@ def _block_structural_change_while_active(campaign: Campaign) -> None:
                 "Campagna attiva: mettila in pausa prima di aggiungere, rimuovere, "
                 "abilitare/disabilitare o cambiare ruolo agli account assegnati."
             ),
+        )
+
+
+async def _ensure_no_other_inbox_account(
+    db: AsyncSession, campaign_id: str, exclude_account_id: str | None
+) -> None:
+    """Raise 400 if another account on this campaign already carries the inbox
+    capability. Counts ALL rows (active + inactive) so a disabled inbox account
+    can't be bypassed by adding/promoting a second one. `exclude_account_id`
+    skips the row being updated in place (role change on the same account)."""
+    query = (
+        select(func.count(CampaignAccount.account_id))
+        .where(
+            CampaignAccount.campaign_id == campaign_id,
+            CampaignAccount.role.in_(INBOX_ROLES),
+        )
+    )
+    if exclude_account_id is not None:
+        query = query.where(CampaignAccount.account_id != exclude_account_id)
+    existing_inbox = await db.scalar(query) or 0
+    if existing_inbox >= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Una campagna può avere un solo account con capability inbox (lettura DM).",
         )
 
 
@@ -135,17 +160,11 @@ async def assign_account(
                 detail=f"ACCOUNT_IN_USE:{names}",
             )
 
-    # Hard-cap 1 account per le campagne inbox (dm_threads).
-    if campaign.scrape_mode == "dm_threads":
-        existing_count = await db.scalar(
-            select(func.count(CampaignAccount.account_id))
-            .where(CampaignAccount.campaign_id == campaign_id)
-        ) or 0
-        if existing_count >= 1:
-            raise HTTPException(
-                status_code=400,
-                detail="Le campagne inbox (DM) ammettono un solo account.",
-            )
+    # Cap: una sola capability inbox per campagna (un account legge una sola
+    # inbox DM). Gli account scraping/dm/both restano illimitati. Conta TUTTE
+    # le righe inbox (anche is_active=False) per evitare il bypass disattiva+aggiungi.
+    if is_inbox(data.role):
+        await _ensure_no_other_inbox_account(db, campaign_id, exclude_account_id=None)
 
     ca = CampaignAccount(
         campaign_id=campaign_id,
@@ -195,6 +214,10 @@ async def update_campaign_account(
     if data.is_active is not None:
         ca.is_active = data.is_active
     if data.role is not None:
+        # Promoting an account to an inbox-capable role: enforce the 1-inbox cap
+        # (excluding this same row, which may already be inbox-capable).
+        if is_inbox(data.role) and not is_inbox(ca.role):
+            await _ensure_no_other_inbox_account(db, campaign_id, exclude_account_id=account_id)
         ca.role = data.role
 
     await db.commit()

@@ -23,6 +23,7 @@ import {
   Settings, FileText
 } from 'lucide-react'
 import type { Campaign, Follower, FollowerStatus, CampaignAccount, Account, AccountStatus, ABStats, ApprovalQueueItem, ApprovalQueue, WorkerEvent, AccountRole, ImportStatusResponse } from '@/lib/types'
+import { canDm } from '@/lib/roles'
 
 const FOLLOWER_STATUS_LABEL: Record<FollowerStatus, string> = {
   pending: 'In attesa',
@@ -825,7 +826,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             </Button>
           )}
           {/* Avvia DM in parallelo mentre scraping gira (non per import: fase singola) */}
-          {campaign.messaging_enabled && campaign.source_type !== 'import' && campaign.status === 'scraping' && !campaign.scrape_completed_at && (campaignAccounts?.some(ca => ca.is_active && (ca.role === 'dm' || ca.role === 'both')) ?? false) && (
+          {campaign.messaging_enabled && campaign.source_type !== 'import' && campaign.status === 'scraping' && !campaign.scrape_completed_at && (campaignAccounts?.some(ca => ca.is_active && canDm(ca.role)) ?? false) && (
             <Button size="sm" className="bg-green-700 hover:bg-green-600 text-white"
               onClick={() => action(() => api.campaigns.startDmAuto(id))} disabled={loadingAction}
               title="Avvia invio DM mentre lo scraping continua in background (auto-gen)">
@@ -1242,6 +1243,14 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                         <option value="both">Scraping + DM</option>
                         <option value="scraping">Solo scraping</option>
                         <option value="dm">Solo DM</option>
+                        {campaign.scrape_mode === 'dm_threads' && (
+                          <optgroup label="Inbox DM (max 1 account)">
+                            <option value="inbox">Solo inbox</option>
+                            <option value="inbox_scraping">Inbox + scraping</option>
+                            <option value="inbox_dm">Inbox + DM</option>
+                            <option value="inbox_both">Inbox + tutto</option>
+                          </optgroup>
+                        )}
                       </select>
                     </div>
 
@@ -1740,9 +1749,18 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 <option value="both">Scraping + DM</option>
                 <option value="scraping">Solo scraping</option>
                 <option value="dm">Solo DM</option>
+                {campaign.scrape_mode === 'dm_threads' && (
+                  <optgroup label="Inbox DM (max 1 account)">
+                    <option value="inbox">Solo inbox</option>
+                    <option value="inbox_scraping">Inbox + scraping</option>
+                    <option value="inbox_dm">Inbox + DM</option>
+                    <option value="inbox_both">Inbox + tutto</option>
+                  </optgroup>
+                )}
               </select>
               <p className="text-xs text-gray-500">
                 Scraping = solo bio fetch. DM = solo invio messaggi. Entrambi = comportamento classico.
+                {campaign.scrape_mode === 'dm_threads' && ' Inbox = legge la lista DM (un solo account per campagna; può anche scrapare/inviare).'}
               </p>
             </div>
           </div>
