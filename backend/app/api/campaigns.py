@@ -15,6 +15,7 @@ from app.models.activity_log import ActivityLog
 from app.models.imported_profile import ImportedProfile
 from app.services.import_resolver import store_imported_lines
 from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignResponse
+from app.utils.roles import SCRAPE_ROLES, DM_ROLES, INBOX_ROLES
 from app.services.campaign_control import (
     CampaignControlError,
     check_redis_reachable,
@@ -438,14 +439,21 @@ async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
                 detail="Nessun profilo importato da risolvere. Carica un file prima di avviare.",
             )
 
+    # dm_threads (non-import): la Fase Lista è il listing dell'inbox → serve
+    # l'account inbox. Import e follower/following → serve uno scraper.
+    needs_inbox = (not is_import) and campaign.scrape_mode == "dm_threads"
+    start_roles = INBOX_ROLES if needs_inbox else SCRAPE_ROLES
     if not await has_active_role_account(
-        db, campaign_id, ("scraping", "both"), (AccountStatus.active,)
+        db, campaign_id, start_roles, (AccountStatus.active,)
     ):
-        raise HTTPException(
-            status_code=400,
-            detail="Nessun account attivo con ruolo scraping o 'entrambi'. "
-            "Assegna un account scraper prima di avviare lo scraping.",
+        detail = (
+            "Nessun account attivo con capability inbox per la campagna DM. "
+            "Assegna l'account inbox prima di avviare."
+            if needs_inbox
+            else "Nessun account attivo con ruolo scraping o 'entrambi'. "
+            "Assegna un account scraper prima di avviare lo scraping."
         )
+        raise HTTPException(status_code=400, detail=detail)
 
     if not await _check_redis_reachable():
         raise HTTPException(
@@ -512,23 +520,33 @@ async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: A
         await ensure_bot_accepts_work(db)
     except CampaignControlError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if not await has_active_role_account(db, campaign_id, ("scraping", "both"), (AccountStatus.active,)):
-        raise HTTPException(status_code=400, detail="Nessun account attivo con ruolo scraping o 'entrambi'.")
-    if campaign.scrape_mode == "dm_threads":
-        active_count = await db.scalar(
+    # La Fase Lista di una campagna dm_threads è il listing dell'inbox DM, fatto
+    # dall'account con capability inbox; per follower/following serve uno scraper.
+    is_dm_threads = campaign.scrape_mode == "dm_threads"
+    list_roles = INBOX_ROLES if is_dm_threads else SCRAPE_ROLES
+    if not await has_active_role_account(db, campaign_id, list_roles, (AccountStatus.active,)):
+        detail = (
+            "Nessun account attivo con capability inbox per la campagna DM."
+            if is_dm_threads
+            else "Nessun account attivo con ruolo scraping o 'entrambi'."
+        )
+        raise HTTPException(status_code=400, detail=detail)
+    if is_dm_threads:
+        # Esattamente 1 account inbox attivo legge la lista DM.
+        active_inbox = await db.scalar(
             select(func.count(CampaignAccount.account_id))
             .join(InstagramAccount, InstagramAccount.id == CampaignAccount.account_id)
             .where(
                 CampaignAccount.campaign_id == campaign_id,
                 CampaignAccount.is_active == True,  # noqa: E712
-                CampaignAccount.role.in_(("scraping", "both")),
+                CampaignAccount.role.in_(INBOX_ROLES),
                 InstagramAccount.status.in_((AccountStatus.active, AccountStatus.warming_up)),
             )
         ) or 0
-        if not inbox_account_count_ok("dm_threads", active_count):
+        if not inbox_account_count_ok("dm_threads", active_inbox):
             raise HTTPException(
                 status_code=400,
-                detail=f"Campagna inbox (DM): serve esattamente 1 account attivo (trovati {active_count}).",
+                detail=f"Campagna inbox (DM): serve esattamente 1 account inbox attivo (trovati {active_inbox}).",
             )
     if not await _check_redis_reachable():
         raise HTTPException(status_code=503, detail="Redis non raggiungibile.")
@@ -591,7 +609,7 @@ async def start_bios(campaign_id: str, body: PhaseStartBody | None = None, db: A
         await ensure_bot_accepts_work(db)
     except CampaignControlError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if not await has_active_role_account(db, campaign_id, ("scraping", "both"), (AccountStatus.active,)):
+    if not await has_active_role_account(db, campaign_id, SCRAPE_ROLES, (AccountStatus.active,)):
         raise HTTPException(status_code=400, detail="Nessun account attivo con ruolo scraping o 'entrambi'.")
     if not await _check_redis_reachable():
         raise HTTPException(status_code=503, detail="Redis non raggiungibile.")
@@ -646,7 +664,7 @@ async def start_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
         .where(
             CampaignAccount.campaign_id == campaign_id,
             CampaignAccount.is_active == True,
-            CampaignAccount.role.in_(("dm", "both")),
+            CampaignAccount.role.in_(DM_ROLES),
             InstagramAccount.status.in_((AccountStatus.active, AccountStatus.warming_up)),
         )
         .limit(1)
@@ -854,7 +872,7 @@ async def start_dm_auto(campaign_id: str, db: AsyncSession = Depends(get_db)):
         .where(
             CampaignAccount.campaign_id == campaign_id,
             CampaignAccount.is_active == True,
-            CampaignAccount.role.in_(("dm", "both")),
+            CampaignAccount.role.in_(DM_ROLES),
             InstagramAccount.status.in_((AccountStatus.active, AccountStatus.warming_up)),
         )
         .limit(1)

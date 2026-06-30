@@ -137,8 +137,12 @@ export interface ABStats {
   variant_b: ABVariantStats | null
 }
 
-// Campaign ↔ Account assignment types
-export type AccountRole = 'scraping' | 'dm' | 'both'
+// Campaign ↔ Account assignment types.
+// 'inbox*' = carries the DM-inbox capability (max 1 account per campaign),
+// combinable with scraping/dm. Keep in sync with backend app.utils.roles.
+export type AccountRole =
+  | 'scraping' | 'dm' | 'both'
+  | 'inbox' | 'inbox_scraping' | 'inbox_dm' | 'inbox_both'
 
 export interface CampaignAccount {
   id: string

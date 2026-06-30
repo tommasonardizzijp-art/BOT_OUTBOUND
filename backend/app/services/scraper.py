@@ -25,6 +25,7 @@ from app.models.campaign import Campaign, CampaignStatus
 from app.models.follower import Follower, FollowerStatus
 from app.models.activity_log import ActivityLog
 from app.utils.crypto import decrypt
+from app.utils.roles import SCRAPE_ROLES
 from app.utils.exceptions import (
     BotHaltedError, ScraperError, TargetPrivateError, RateLimitError, AccountChallengeError, SoftBlockError
 )
@@ -378,7 +379,7 @@ async def _get_available_account(db, campaign_id: str | None = None) -> Instagra
         eligible_sq = select(CampaignAccount.account_id).where(
             CampaignAccount.campaign_id == campaign_id,
             CampaignAccount.is_active == True,
-            CampaignAccount.role.in_(("scraping", "both")),
+            CampaignAccount.role.in_(SCRAPE_ROLES),
         )
         query = query.where(InstagramAccount.id.in_(eligible_sq))
 
@@ -413,7 +414,7 @@ async def _get_fallback_account(db, exclude_id: str, campaign_id: str | None = N
         eligible_sq = select(CampaignAccount.account_id).where(
             CampaignAccount.campaign_id == campaign_id,
             CampaignAccount.is_active == True,
-            CampaignAccount.role.in_(("scraping", "both")),
+            CampaignAccount.role.in_(SCRAPE_ROLES),
         )
         query = query.where(InstagramAccount.id.in_(eligible_sq))
 
@@ -432,7 +433,7 @@ async def _eligible_scraping_accounts(db, campaign_id: str) -> list[InstagramAcc
     eligible_sq = select(CampaignAccount.account_id).where(
         CampaignAccount.campaign_id == campaign_id,
         CampaignAccount.is_active == True,
-        CampaignAccount.role.in_(("scraping", "both")),
+        CampaignAccount.role.in_(SCRAPE_ROLES),
     )
     result = await db.execute(
         select(InstagramAccount).where(

@@ -33,6 +33,7 @@ from app.models.message import Message, MessageStatus
 from app.models.activity_log import ActivityLog
 from app.utils.instagrapi_client import login as _login
 from app.utils.events import emit as emit_event
+from app.utils.roles import can_dm
 
 
 class _InstagrapiParseError(Exception):
@@ -76,7 +77,7 @@ def _can_resume_dm_worker(
         return False
     if account.status not in (AccountStatus.active, AccountStatus.warming_up):
         return False
-    return assignment.is_active and assignment.role in ("dm", "both")
+    return assignment.is_active and can_dm(assignment.role)
 
 
 async def recover_sending_messages() -> dict:

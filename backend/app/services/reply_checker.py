@@ -18,6 +18,7 @@ from app.models.campaign_account import CampaignAccount
 from app.models.follower import Follower, FollowerStatus
 from app.models.activity_log import ActivityLog
 from app.utils.instagrapi_client import login as _login
+from app.utils.roles import DM_ROLES
 
 
 async def check_all_replies() -> int:
@@ -80,7 +81,7 @@ async def _check_campaign(campaign_id: str, db) -> int:
         select(CampaignAccount).where(
             CampaignAccount.campaign_id == campaign_id,
             CampaignAccount.is_active == True,
-            CampaignAccount.role.in_(("dm", "both")),
+            CampaignAccount.role.in_(DM_ROLES),
         )
     )
     campaign_accounts = ca_result.scalars().all()
