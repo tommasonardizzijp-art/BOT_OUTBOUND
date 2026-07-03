@@ -155,6 +155,46 @@ async def send_campaign_auto_pause_alert(
     await send_telegram("\n".join(lines), level=level)
 
 
+async def _resolve_campaign_name(campaign_id: str) -> str | None:
+    """Best-effort lookup del nome campagna (import lazy: evita cicli e
+    non lega il notifier al DB quando non serve)."""
+    from sqlalchemy import select
+    from app.database import AsyncSessionLocal
+    from app.models.campaign import Campaign
+
+    async with AsyncSessionLocal() as db:
+        return await db.scalar(select(Campaign.name).where(Campaign.id == campaign_id))
+
+
+async def send_scrape_stop_alert(campaign_id: str, detail: str) -> None:
+    """Alert operatore quando la fase scraping (lista/bio/import) si ferma
+    per errore. Mai raise: e' chiamata fire-and-forget da events.emit()."""
+    try:
+        name = None
+        try:
+            name = await _resolve_campaign_name(campaign_id)
+        except Exception as exc:
+            logger.debug(f"[Notifier] nome campagna non risolto ({exc}) — uso l'ID")
+
+        lines = ["*Scraping fermato*"]
+        if name:
+            lines.append(f"Campagna: *{name}*")
+        else:
+            lines.append(f"Campagna ID: `{campaign_id}`")
+        lines.extend(
+            [
+                "",
+                f"Motivo: {_clip(detail, 420)}",
+                "",
+                "Cosa fare: controlla proxy/connessione e il live log della "
+                "campagna, poi riprendi dopo il fix.",
+            ]
+        )
+        await send_telegram("\n".join(lines), level="error")
+    except Exception as e:
+        logger.warning(f"[Notifier] scrape stop alert failed: {e}")
+
+
 async def send_telegram(
     message: str,
     level: str = "info",

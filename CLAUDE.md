@@ -427,6 +427,7 @@ Il layer browser in `app/browser/` gestisce:
   - `/halt [motivo]` attiva il kill-switch globale di emergenza.
   - `/unhalt` disattiva il kill-switch globale e riaccoda solo il lavoro ancora in stato attivo.
 - `campaign_control.py` centralizza pausa/ripresa per API web e Telegram, con pre-check Redis prima di portare una campagna a running.
+- **Alert Telegram su stop scraping (2026-07-03)**: ogni `emit_event(action="scrape_stopped", level="error")` viene specchiato su Telegram da un hook in `app/utils/events.py` (fire-and-forget, `notifier.send_scrape_stop_alert`). Copre in un punto solo tutti gli stop errore di Fase Lista/Bio/import/challenge (rete giù, N fallimenti consecutivi, soft block, budget/pool, errori inattesi) — prima la fase scraping non aveva NESSUNA notifica Telegram (solo live log UI): gli alert esistevano solo nel percorso DM. I `level="warn"` (pausa globale, cap giornaliero) restano senza notifica: sono stati attesi/benigni. Test: `tests/test_scrape_stop_alerts.py`.
 - Problemi su singolo account non fermano tutto il bot: `cooldown`, `challenge_required` e `banned` isolano l'account; vengono pausate solo le campagne che non hanno altri account DM utilizzabili. Il kill-switch resta per problemi sistemici o comando manuale.
 
 ### Two-phase scraping: Fase Lista + Fase Bio (✅ IMPLEMENTATA)

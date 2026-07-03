@@ -219,9 +219,15 @@ async def list_followers(campaign_id: str) -> int | None:
             if is_challenge_exception(e) and account is not None:
                 await isolate_challenged_account(db, campaign, account, e)
             else:
+                from app.utils.events import emit as emit_event
                 logger.error(f"[Lista] Errore campaign {campaign_id}: {e}")
                 campaign.status = CampaignStatus.error
                 await db.commit()
+                emit_event(
+                    campaign_id, "scrape_stopped",
+                    f"Fase Lista interrotta da errore inatteso: {e}",
+                    level="error",
+                )
         finally:
             if pool is not None:
                 try:

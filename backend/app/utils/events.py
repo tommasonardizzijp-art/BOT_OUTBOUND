@@ -22,6 +22,10 @@ def _get_redis() -> redis.Redis:
 
 _COUNTER_KEY = "worker_event_counter"
 
+# Riferimenti ai task Telegram fire-and-forget: senza, il GC puo' cancellare
+# un task ancora in volo (pattern standard asyncio.create_task).
+_ALERT_TASKS: set = set()
+
 
 def emit(campaign_id: str, action: str, detail: str = "", level: str = "info") -> None:
     """Emit a structured worker event. Safe to call from any process."""
@@ -42,6 +46,23 @@ def emit(campaign_id: str, action: str, detail: str = "", level: str = "info") -
         r.expire(key, 86400)    # expire after 24h of inactivity
     except Exception:
         pass  # never crash the worker because of event logging
+
+    # Ponte Telegram: ogni stop errore della fase scraping (lista/bio/import/
+    # challenge) deve raggiungere l'operatore anche lontano dalla UI. Hook qui
+    # e non nei singoli servizi: un punto solo copre tutti i call site, anche
+    # futuri. Solo level=error: i warn (pausa globale, cap) sono attesi/benigni.
+    if action == "scrape_stopped" and level == "error":
+        try:
+            import asyncio
+            from app.services import notifier
+
+            task = asyncio.get_running_loop().create_task(
+                notifier.send_scrape_stop_alert(campaign_id, detail)
+            )
+            _ALERT_TASKS.add(task)
+            task.add_done_callback(_ALERT_TASKS.discard)
+        except Exception:
+            pass  # nessun event loop (contesto sync) o notifier ko: mai rompere emit
 
 
 def get_events(campaign_id: str, since_id: int = 0, limit: int = 200) -> list[dict]:
