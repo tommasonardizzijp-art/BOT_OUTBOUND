@@ -5,6 +5,7 @@ log and move on. It MUST NEVER raise, since it's called from error paths
 inside the orchestrator and an exception there would mask the real bug.
 """
 import asyncio
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -193,6 +194,81 @@ async def send_scrape_stop_alert(campaign_id: str, detail: str) -> None:
         await send_telegram("\n".join(lines), level="error")
     except Exception as e:
         logger.warning(f"[Notifier] scrape stop alert failed: {e}")
+
+
+# Cooldown per (campaign_id, kind): un proxy che flappa genera decine di
+# occorrenze in pochi minuti — una notifica ogni 15 min basta all'operatore.
+_WARN_COOLDOWN_SECONDS = 15 * 60
+_warn_last_sent: dict[tuple[str, str], float] = {}
+
+_SCRAPE_WARNING_COPY = {
+    "soft_block": {
+        "title": "Instagram sta rallentando lo scraping (429/soft-block)",
+        "meaning": (
+            "Instagram ha risposto 429/soft-block: segnala che il ritmo e' "
+            "troppo alto. Il bot attende 1.5-3 minuti e riprova; al 3o di "
+            "fila si ferma da solo."
+        ),
+        "action": (
+            "Se preferisci non insistere, metti in pausa la campagna col "
+            "bottone sotto, o ferma tutto con /halt."
+        ),
+    },
+    "network_flaky": {
+        "title": "Proxy/connessione instabile durante lo scraping",
+        "meaning": (
+            "Piu' errori di rete ravvicinati in questa run: per ora i retry "
+            "recuperano, ma il proxy sta andando e venendo e ogni retry "
+            "insiste su Instagram."
+        ),
+        "action": (
+            "Controlla proxy/tethering. Per intervenire con calma: pausa "
+            "campagna col bottone sotto, o /halt per fermare tutto."
+        ),
+    },
+}
+
+
+async def send_scrape_warning_alert(campaign_id: str, kind: str, detail: str = "") -> None:
+    """Warning operatore per condizioni scraping che meritano un occhio MENTRE
+    la run continua (429, proxy che flappa). Throttled, mai raise."""
+    try:
+        now = time.monotonic()
+        key = (campaign_id, kind)
+        last = _warn_last_sent.get(key)
+        if last is not None and now - last < _WARN_COOLDOWN_SECONDS:
+            return
+        _warn_last_sent[key] = now
+
+        name = None
+        try:
+            name = await _resolve_campaign_name(campaign_id)
+        except Exception as exc:
+            logger.debug(f"[Notifier] nome campagna non risolto ({exc}) — uso l'ID")
+
+        copy = _SCRAPE_WARNING_COPY.get(kind, {})
+        lines = [f"*{copy.get('title', 'Scraping: serve un controllo')}*"]
+        if name:
+            lines.append(f"Campagna: *{name}*")
+        else:
+            lines.append(f"Campagna ID: `{campaign_id}`")
+        lines.extend(
+            [
+                "",
+                f"Cosa succede: {copy.get('meaning', 'Condizione anomala rilevata durante lo scraping.')}",
+                f"Cosa fare: {copy.get('action', 'Controlla il live log; per fermare: pausa o /halt.')}",
+            ]
+        )
+        if detail:
+            lines.extend(["", f"Dettaglio: `{_clip(detail, 420)}`"])
+        reply_markup = {
+            "inline_keyboard": [
+                [{"text": "Metti in pausa la campagna", "callback_data": f"pause:{campaign_id}"}]
+            ]
+        }
+        await send_telegram("\n".join(lines), level="warning", reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning(f"[Notifier] scrape warning alert failed: {e}")
 
 
 async def send_telegram(

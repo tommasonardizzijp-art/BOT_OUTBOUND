@@ -11,6 +11,7 @@ from app.database import AsyncSessionLocal
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.follower import Follower, FollowerStatus
 from app.services.bot_state_service import is_halted
+from app.services.notifier import send_scrape_warning_alert
 from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty, ScrapingSlotsBusy
 from app.services.scraper import fetch_and_store_bio, is_challenge_exception, isolate_challenged_account
 from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, SoftBlockError
@@ -18,6 +19,9 @@ from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, SoftBlockErr
 
 # Ritenta lo STESSO profilo prima di skippare/pausare (assorbe blip transitori).
 MAX_BIO_ATTEMPTS = 3
+# Errori di rete totali nella run (anche recuperati dai retry) oltre i quali
+# avvisare l'operatore: il proxy flappa, la run continua ma va guardata.
+NETWORK_FLAP_WARN_THRESHOLD = 3
 # Fallimenti di fila oltre i quali la run si ferma (problema sistemico, non profilo).
 MAX_CONSECUTIVE_BIO_FAIL = 5
 # Micro-yield: ogni quante bio estratte (o secondi di wall-clock) il job cede ad ARQ
@@ -78,6 +82,7 @@ async def scrape_bios(campaign_id: str) -> int | None:
         ) or 0
         consecutive_soft = 0
         consecutive_fail = 0
+        network_errors = 0
         attempts: dict[str, int] = {}
         try:
             from app.utils.events import emit as emit_event
@@ -133,6 +138,13 @@ async def scrape_bios(campaign_id: str) -> int | None:
                         f"[Bio] @{follower.username} via @{account.username if account else '?'} "
                         f"429/soft-block ({consecutive_soft}/3): {err}"
                     )
+                    # Warning subito (non solo allo stop): l'operatore puo'
+                    # pausare prima di insistere. Throttle nel notifier.
+                    await send_scrape_warning_alert(
+                        campaign_id, "soft_block",
+                        f"@{follower.username} via @{account.username if account else '?'} "
+                        f"({consecutive_soft}/3): {err}",
+                    )
                     if consecutive_soft >= 3:
                         raise SoftBlockError("3 soft block consecutivi")
                     await asyncio.sleep(random.uniform(90, 180))
@@ -144,6 +156,15 @@ async def scrape_bios(campaign_id: str) -> int | None:
                     # blip di rete o parse sporadici prima di decidere.
                     fid = follower.id
                     attempts[fid] = attempts.get(fid, 0) + 1
+                    if outcome == "network":
+                        network_errors += 1
+                        # Anche se i retry recuperano, un proxy che flappa va
+                        # segnalato: la run continua ma insiste su Instagram.
+                        if network_errors >= NETWORK_FLAP_WARN_THRESHOLD:
+                            await send_scrape_warning_alert(
+                                campaign_id, "network_flaky",
+                                f"{network_errors} errori di rete in questa run — ultimo: {err}",
+                            )
                     if attempts[fid] < MAX_BIO_ATTEMPTS:
                         backoff = random.uniform(5, 12) * attempts[fid]
                         logger.warning(
