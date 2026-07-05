@@ -53,8 +53,9 @@ async def _inbox_page_delay() -> None:
     else:
         lo, hi = settings.inbox_api_page_delay_min_seconds, settings.inbox_api_page_delay_max_seconds
         mid = (lo + hi) / 2
-        # lognormvariate(0, 0.4): mediana 1.0 -> mediana delay = mid, code asimmetriche.
-        delay = min(hi, max(lo, random.lognormvariate(0, 0.4) * mid))
+        # lognormvariate(0, 0.9): mediana 1.0 -> mediana delay = mid (6s con 2-10),
+        # sigma alto = varianza ampia; il clamp [lo, hi] tiene i bound.
+        delay = min(hi, max(lo, random.lognormvariate(0, 0.9) * mid))
     await asyncio.sleep(delay)
 
 

@@ -99,8 +99,9 @@ class Settings(BaseSettings):
     # Solo engine API (direct_v2/inbox): pacing tra pagine. Lo scraping via
     # browser e' stato rimosso (la lista DM web non espone username/pk).
     # Delay base tra pagine inbox: lognormale clampato a [min,max] (scroll attivo).
+    # Mediana = (min+max)/2 = 6s; sigma alto in scrape_inbox per varianza ampia.
     inbox_api_page_delay_min_seconds: int = 2
-    inbox_api_page_delay_max_seconds: int = 5
+    inbox_api_page_delay_max_seconds: int = 10
     # Pausa lunga occasionale tra pagine inbox ("si ferma a leggere/rispondere").
     inbox_long_pause_probability: float = 0.08
     inbox_long_pause_min_seconds: int = 20

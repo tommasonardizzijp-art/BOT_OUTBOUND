@@ -7,12 +7,10 @@ def test_inbox_api_pacing_present():
     assert settings.inbox_api_page_delay_min_seconds >= 1
 
 
-def test_inbox_browser_pacing_present():
-    assert 2 <= settings.inbox_browser_scroll_min_seconds <= settings.inbox_browser_scroll_max_seconds
-    assert settings.inbox_browser_micropause_every_min <= settings.inbox_browser_micropause_every_max
-    assert settings.inbox_browser_micropause_min_seconds <= settings.inbox_browser_micropause_max_seconds
-    assert 0.0 <= settings.inbox_browser_feedbrowse_probability <= 1.0
-    assert settings.inbox_browser_feedbrowse_min_seconds <= settings.inbox_browser_feedbrowse_max_seconds
+def test_inbox_api_delay_bounds_updated():
+    # Bound 2-10 con mediana (min+max)/2 = 6s (lognormale sigma 0.9 in scrape_inbox).
+    assert settings.inbox_api_page_delay_min_seconds == 2
+    assert settings.inbox_api_page_delay_max_seconds == 10
 
 
 def test_inbox_session_and_break_bounds():
