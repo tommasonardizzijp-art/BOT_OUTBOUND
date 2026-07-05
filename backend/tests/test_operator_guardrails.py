@@ -6,6 +6,8 @@ from app.api.campaign_accounts import _block_structural_change_while_active
 from app.models.campaign import Campaign, CampaignStatus
 from app.services.work_enqueue import (
     DM_STARTUP_STAGGER_MAX_SECONDS,
+    DM_STARTUP_STAGGER_MIN_SECONDS,
+    dm_startup_stagger_seconds,
     dm_worker_job_id,
     dm_worker_redis_keys,
     _dm_worker_queued_detail,
@@ -43,7 +45,19 @@ def test_disabling_account_reports_active_campaigns():
 
 
 def test_dm_startup_stagger_is_bounded_to_five_minutes():
+    assert DM_STARTUP_STAGGER_MIN_SECONDS == 3 * 60
     assert DM_STARTUP_STAGGER_MAX_SECONDS == 5 * 60
+
+
+def test_first_dm_worker_starts_immediately():
+    assert dm_startup_stagger_seconds(0) == 0
+
+
+def test_later_dm_workers_are_shifted_three_to_five_minutes_each():
+    for index in (1, 2, 3):
+        for _ in range(20):
+            defer = dm_startup_stagger_seconds(index)
+            assert index * DM_STARTUP_STAGGER_MIN_SECONDS <= defer <= index * DM_STARTUP_STAGGER_MAX_SECONDS
 
 
 def test_worker_queued_detail_makes_defer_visible():

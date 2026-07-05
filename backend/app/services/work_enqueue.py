@@ -23,6 +23,7 @@ from app.utils.events import emit as emit_event
 
 ARQ_MAIN_QUEUE = "arq:queue"
 ARQ_CRON_QUEUE = "arq:cron"
+DM_STARTUP_STAGGER_MIN_SECONDS = 3 * 60
 DM_STARTUP_STAGGER_MAX_SECONDS = 5 * 60
 # A restart should not pause a campaign while a worker is still legitimately
 # active. Inter-message delays are up to 8 min and session-break heartbeats
@@ -135,9 +136,9 @@ async def _enqueue_dm_workers_with_redis(redis, campaign_id: str) -> int:
     enqueued = 0
     from app.utils.events import emit as emit_event
 
-    for ca, account_username in campaign_accounts:
+    for index, (ca, account_username) in enumerate(campaign_accounts):
         job_id = dm_worker_job_id(campaign_id, ca.account_id)
-        defer_seconds = dm_startup_stagger_seconds()
+        defer_seconds = dm_startup_stagger_seconds(index)
         await redis.delete(*dm_worker_redis_keys(campaign_id, ca.account_id))
         await redis.enqueue_job(
             "run_campaign_task",
@@ -160,9 +161,19 @@ async def _enqueue_dm_workers_with_redis(redis, campaign_id: str) -> int:
     return enqueued
 
 
-def dm_startup_stagger_seconds() -> int:
-    """Randomize DM worker start time without sleeping inside an ARQ job."""
-    return random.randint(0, DM_STARTUP_STAGGER_MAX_SECONDS)
+def dm_startup_stagger_seconds(index: int = 0) -> int:
+    """Stagger DM worker start times without sleeping inside an ARQ job.
+
+    Il primo account parte subito; ogni account successivo viene spostato
+    di altri 3-5 minuti rispetto al precedente, cosi' i profili non
+    sembrano partire tutti insieme ma il primo DM non aspetta mai.
+    """
+    if index <= 0:
+        return 0
+    return sum(
+        random.randint(DM_STARTUP_STAGGER_MIN_SECONDS, DM_STARTUP_STAGGER_MAX_SECONDS)
+        for _ in range(index)
+    )
 
 
 def _dm_worker_queued_detail(account_username: str, defer_seconds: int) -> str:
