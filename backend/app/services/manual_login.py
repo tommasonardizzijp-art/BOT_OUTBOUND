@@ -264,17 +264,20 @@ async def _build_session(cookies: dict, username: str) -> dict:
     def _do_build():
         client = Client()
 
-        # ── Device unico e STABILE per account ──
+        # ── Device unico e STABILE per account (DIETRO FLAG, OFF di default) ──
         # instagrapi Client() nasce con UN device di default fisso (OnePlus 6T "devitron",
         # Android 8): tutti gli account uscirebbero dallo stesso telefono simulato = firma
-        # da cluster. Assegniamo un device hardware scelto in modo deterministico dallo
-        # username (stesso account -> sempre lo stesso telefono; account diversi -> telefoni
-        # diversi). set_app (dentro set_device) tiene un app_version coerente su tutti
-        # (fissa anche il disallineamento 364 vs 385). set_locale piu' sotto rigenera lo
-        # user-agent dal nuovo device. Applicato SOLO qui (login nuovo) -> nessun cambio
-        # device a meta' vita: entra in vigore al prossimo "Login Browser".
-        from app.utils.device_pool import device_for_account
-        client.set_device(device_for_account(username))
+        # da cluster. device_for_account(username) assegna un device deterministico dallo
+        # username (stesso account -> sempre lo stesso telefono; account diversi -> diversi).
+        # set_app tiene un app_version coerente; set_locale piu' sotto rigenera lo UA.
+        # ⚠️ OFF di default: il pool device NON e' ancora verificato su user-agent REALI.
+        # Un device con codename/SoC/dpi incoerente e' una firma PEGGIORE del default (che e'
+        # un device reale). Abilitare (device_diversify_enabled) SOLO dopo aver verificato ogni
+        # entry del pool contro un UA Instagram Android reale. Applicato solo al Login Browser.
+        from app.config import settings
+        if getattr(settings, "device_diversify_enabled", False):
+            from app.utils.device_pool import device_for_account
+            client.set_device(device_for_account(username))
 
         default_settings = client.get_settings()
         default_settings["cookies"] = cookies

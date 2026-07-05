@@ -163,6 +163,15 @@ class Settings(BaseSettings):
     # a "scraping che gira" sul "checkpoint del giorno dopo".
     bio_realistic_from_module_enabled: bool = False
 
+    # ── Device unico per account (device_pool) ──
+    # OFF di default. Se ON, ogni "Login Browser" assegna all'account un device dal pool
+    # (device_pool.py) invece del OnePlus 6T di default instagrapi, per rompere la firma
+    # "tutti sullo stesso telefono". ⚠️ NON abilitare finche' ogni entry del pool non e'
+    # stata verificata contro uno user-agent Instagram Android REALE: un device incoerente
+    # (codename/SoC/dpi che nessun telefono vero emette) e' una firma PEGGIORE del default,
+    # che almeno e' un device reale. Meglio un device reale condiviso che uno unico ma finto.
+    device_diversify_enabled: bool = False
+
     # Warm-up daily limits — format "day_start-day_end:limit,..." (ranges inclusive).
     # Applies to accounts with warmup_day in 1..14. Day 0 = warmup finished.
     warmup_limits: str = "1-3:5,4-7:12,8-14:20"

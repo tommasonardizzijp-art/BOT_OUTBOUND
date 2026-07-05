@@ -16,7 +16,17 @@ uno alla volta, scaglionati su piu' giorni.
 
 Chiavi = solo HARDWARE. app_version/version_code/bloks li tiene instagrapi (set_app),
 coerenti su tutti = build app unica e valida (fissa anche il disallineamento 364 vs 385).
-Specs curate su device reali (manufacturer/model/codename/cpu/dpi/resolution coerenti).
+
+⚠️⚠️ STATO: NON VERIFICATO — il flag `device_diversify_enabled` e' OFF di default. ⚠️⚠️
+Queste specs sono scritte a mano su conoscenza generale. Alcune entry (codename/SoC di
+certi Samsung/Xiaomi/OnePlus) NON sono garantite contro uno user-agent Instagram Android
+REALE. Un device incoerente (es. model/codename/cpu/dpi che nessun telefono vero emette) e'
+una firma PEGGIORE del OnePlus 6T di default (che e' un device reale e coerente). Prima di
+abilitare: verificare OGNI entry contro un UA IG Android reale (catturato da un telefono
+vero o da una fonte autorevole) e togliere quelle non confermate. Formato UA reale:
+`Instagram <app> Android (<api>/<rel>; <dpi>; <res>; <manuf>; <model>; <device>; <cpu>; <locale>; <vcode>)`.
+Esempi reali noti: Samsung SM-N910F/trlte/qcom (23/6.0.1; 640dpi; 1440x2560),
+Samsung SM-G930P/heroqltespr (24/7.0; 480dpi; 1080x1920), OnePlus 6T/devitron/qcom (default).
 """
 import hashlib
 
