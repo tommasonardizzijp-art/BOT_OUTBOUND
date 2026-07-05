@@ -34,11 +34,17 @@ def fetch_profile_app_like(client, pk: str):
     mantenendo il fetch post e il fallback qui sotto.
     """
     from loguru import logger
+    from app.config import settings
 
     user = client.user_info_v1(pk, from_module=pick_from_module())
-    # Post-grid come l'app (best-effort, scartati): non deve MAI rompere la bio.
-    try:
-        client.user_medias_v1(pk, amount=12)  # prima pagina della griglia post
-    except Exception as e:
-        logger.debug(f"[ProfileLookup] fetch post best-effort fallito per {pk}: {e}")
+    # Post-grid come l'app — DIETRO FLAG, OFF di default. Su sessione API nuda questa 2a
+    # chiamata (endpoint /feed/user, rate-limit piu' aggressivo, a gap zero dopo user_info)
+    # RADDOPPIA il volume per profilo e anticipa il 429: osservato live 05/07 con 429 dopo
+    # pochi lookup. L'app-like vero appartiene al canale browser, non all'API mobile nuda.
+    # Best-effort quando attivo: non deve MAI rompere la bio.
+    if settings.bio_app_like_media_enabled:
+        try:
+            client.user_medias_v1(pk, amount=12)  # prima pagina della griglia post
+        except Exception as e:
+            logger.debug(f"[ProfileLookup] fetch post best-effort fallito per {pk}: {e}")
     return user

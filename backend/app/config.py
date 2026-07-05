@@ -143,6 +143,16 @@ class Settings(BaseSettings):
     bio_browser_batch_min: int = 10               # min profili scrapati per pausa
     bio_browser_batch_max: int = 15               # max profili scrapati per pausa
 
+    # ── App-like media fetch dopo user_info in Fase Bio (Ramo B) ──
+    # DISATTIVO di default. Su sessione API "nuda" ogni user_medias_v1 e' una 2a
+    # chiamata a gap zero dopo user_info, sull'endpoint /feed/user che IG rate-limita
+    # molto piu' duro di /info/ -> RADDOPPIA il volume per profilo e ANTICIPA il 429
+    # (osservato live 05/07). L'apertura profilo app-like vera va fatta sul canale
+    # browser (bio_browser_batch), non sull'API mobile. Riattivare SOLO dietro un test
+    # volume che dimostri che regge il rate. from_module realistico resta sempre attivo
+    # (e' gratis: solo un parametro, zero carico extra).
+    bio_app_like_media_enabled: bool = False
+
     # Warm-up daily limits — format "day_start-day_end:limit,..." (ranges inclusive).
     # Applies to accounts with warmup_day in 1..14. Day 0 = warmup finished.
     warmup_limits: str = "1-3:5,4-7:12,8-14:20"
