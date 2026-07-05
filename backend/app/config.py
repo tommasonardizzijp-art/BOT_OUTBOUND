@@ -128,6 +128,13 @@ class Settings(BaseSettings):
     # infila una breve sessione organica (5-10 min) mentre il job API e' parcheggiato.
     warmup_browse_on_pause_min_pause_minutes: float = 20.0
 
+    # ── Bio via browser alternata all'API (Step 3) ──
+    # Frazione [0..1] dei profili in Fase Bio estratti navigando il profilo con
+    # Patchright (piu' credibile, NON consuma il cap API) invece che via user_info_v1
+    # mobile. 0.0 = OFF (solo API, comportamento invariato). Es. 0.3 = ~30% via browser.
+    # Ritmo umano tra i profili browser gestito da browser_bio.human_profile_pause (5-10s).
+    bio_browser_ratio: float = 0.0
+
     # Warm-up daily limits — format "day_start-day_end:limit,..." (ranges inclusive).
     # Applies to accounts with warmup_day in 1..14. Day 0 = warmup finished.
     warmup_limits: str = "1-3:5,4-7:12,8-14:20"

@@ -14,7 +14,9 @@ from app.services.bot_state_service import is_halted
 from app.services.notifier import send_scrape_warning_alert
 from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty, ScrapingSlotsBusy
 from app.services.scraper import fetch_and_store_bio, is_challenge_exception, isolate_challenged_account
+from app.services.browser_bio import fetch_and_store_bio_browser, human_profile_pause
 from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, SoftBlockError
+from app.config import settings
 
 
 # Ritenta lo STESSO profilo prima di skippare/pausare (assorbe blip transitori).
@@ -40,6 +42,41 @@ def bio_should_continue(target: int | None, done: int) -> bool:
     if target is None:
         return True
     return done < target
+
+
+async def _open_bio_browser(db, campaign_id: str):
+    """Apre una BrowserSession su un account scraping/both della campagna per la
+    bio-via-browser. Ritorna la sessione aperta e loggata, o None se non ci sono
+    account idonei / il login browser non e' presente (fallback all'API). Difensivo:
+    non solleva mai — un fallimento qui deve solo far ripiegare sull'API."""
+    from sqlalchemy import select
+    from app.models.campaign_account import CampaignAccount
+    from app.models.account import InstagramAccount, AccountStatus
+    from app.utils.roles import SCRAPE_ROLES
+    try:
+        rows = (await db.execute(
+            select(InstagramAccount)
+            .join(CampaignAccount, CampaignAccount.account_id == InstagramAccount.id)
+            .where(
+                CampaignAccount.campaign_id == campaign_id,
+                CampaignAccount.is_active == True,  # noqa: E712
+                CampaignAccount.role.in_(SCRAPE_ROLES),
+                InstagramAccount.status == AccountStatus.active,
+            )
+        )).scalars().all()
+        if not rows:
+            logger.warning("[BioBrowser] nessun account scraping idoneo — fallback API")
+            return None
+        acc = random.choice(rows)
+        from app.browser.context_manager import BrowserSession
+        session = BrowserSession(acc.id, headless=settings.warmup_browse_headless)
+        await session.open()
+        await session.page.ensure_logged_in(acc.id)
+        logger.info(f"[BioBrowser] sessione browser aperta su @{acc.username}")
+        return session
+    except Exception as e:
+        logger.warning(f"[BioBrowser] apertura sessione browser fallita ({type(e).__name__}: {e}) — fallback API")
+        return None
 
 
 async def scrape_bios(campaign_id: str) -> int | None:
@@ -71,6 +108,7 @@ async def scrape_bios(campaign_id: str) -> int | None:
 
         pool = None
         account = None
+        browser_session = None  # bio-via-browser: aperta pigra al primo profilo browser
         # bio_target e' un TOTALE, non un per-run: seed done con le bio gia' estratte
         # cosi' un resume punta al totale (coerente con bio_progress nella UI) invece
         # di rifare bio_target lookup da capo ad ogni ripresa.
@@ -116,9 +154,29 @@ async def scrape_bios(campaign_id: str) -> int | None:
                     logger.info(f"[Bio] Nessun pending rimasto ({done} fatti)")
                     break
 
-                # fetch_and_store_bio ritorna l'account REALE usato per la lookup
-                # (rotazione pool interna): serve per isolare quello giusto su challenge.
-                outcome, account, err = await fetch_and_store_bio(follower, campaign, db, pool)
+                # Alternanza engine (Step 3): una frazione dei profili viene estratta
+                # navigando il profilo con Patchright (piu' credibile, NON consuma il cap
+                # API) invece che via user_info_v1 mobile. La sessione browser e' aperta
+                # pigra e riusata; ritmo umano tra profili. Fallback all'API se il browser
+                # non e' apribile (no account idoneo / no login browser).
+                via_browser = (
+                    settings.bio_browser_ratio > 0
+                    and bool(follower.username)
+                    and random.random() < settings.bio_browser_ratio
+                )
+                if via_browser:
+                    if browser_session is None:
+                        browser_session = await _open_bio_browser(db, campaign_id)
+                    if browser_session is not None:
+                        outcome, err = await fetch_and_store_bio_browser(follower, campaign, db, browser_session)
+                        account = None  # via browser: nessun account API attribuibile
+                    else:
+                        via_browser = False  # apertura fallita -> ripiega su API
+                        outcome, account, err = await fetch_and_store_bio(follower, campaign, db, pool)
+                else:
+                    # fetch_and_store_bio ritorna l'account REALE usato per la lookup
+                    # (rotazione pool interna): serve per isolare quello giusto su challenge.
+                    outcome, account, err = await fetch_and_store_bio(follower, campaign, db, pool)
 
                 if outcome == "capped":
                     campaign.status = CampaignStatus.paused
@@ -215,16 +273,32 @@ async def scrape_bios(campaign_id: str) -> int | None:
                     await asyncio.sleep(random.uniform(3, 8))
                     continue
 
+                if outcome in ("not_found", "private"):
+                    # Esiti tipici solo del percorso browser: profilo inesistente o
+                    # privato senza dati pubblici. Skip benigno (NON conta come
+                    # fallimento sistemico), poi avanza a ritmo umano.
+                    follower.status = FollowerStatus.skipped
+                    follower.skip_reason = f"browser_{outcome}"
+                    follower.updated_at = datetime.utcnow()
+                    await db.commit()
+                    emit_event(campaign_id, "scrape_progress", f"@{follower.username} {outcome} (browser)", level="warn")
+                    await human_profile_pause()
+                    continue
+
                 if outcome == "done":
                     consecutive_soft = 0
                     consecutive_fail = 0
                     done += 1
                     processed_this_job += 1
-                    delay = random.uniform(
-                        getattr(campaign, "bio_fetch_delay_min", 5.0) or 5.0,
-                        getattr(campaign, "bio_fetch_delay_max", 8.0) or 8.0,
-                    )
-                    await asyncio.sleep(delay)
+                    if via_browser:
+                        # Ritmo umano tra profili aperti nel browser (5-10s + pausa rara).
+                        await human_profile_pause()
+                    else:
+                        delay = random.uniform(
+                            getattr(campaign, "bio_fetch_delay_min", 5.0) or 5.0,
+                            getattr(campaign, "bio_fetch_delay_max", 8.0) or 8.0,
+                        )
+                        await asyncio.sleep(delay)
 
                     # Pausa lunga anti-block (cadenza "umana", invariata): ogni `size`
                     # bio totali. Dentro il ramo "done" (mai dopo uno skip) e ancorata a
@@ -331,6 +405,11 @@ async def scrape_bios(campaign_id: str) -> int | None:
                 )
 
         finally:
+            if browser_session is not None:
+                try:
+                    await browser_session.close()
+                except Exception as exc:
+                    logger.warning(f"[BioBrowser] close sessione fallito: {exc}")
             if pool is not None:
                 try:
                     await pool.save_sessions(db)
