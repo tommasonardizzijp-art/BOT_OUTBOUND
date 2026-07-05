@@ -115,6 +115,19 @@ class Settings(BaseSettings):
     warmup_enabled: bool = True
     max_concurrent_browsers: int = 3
 
+    # ── Warm-up browser alternato (diliuisce il pattern "solo API" per account) ──
+    # Sessione organica Patchright (feed scroll, post, like ~35%) eseguita PRIMA di
+    # ogni fase di scraping e DURANTE le pause lunghe. Riusa InstagramPage.browse_feed.
+    # Migliora il rapporto organico:automatico che il risk-scoring notturno IG misura.
+    # NON cura il mismatch web->mobile dell'API: e' mitigazione trust, non una cura.
+    warmup_browse_enabled: bool = False           # OFF di default: attivare per campagna/test
+    warmup_browse_min_minutes: float = 4.0        # durata min sessione organica
+    warmup_browse_max_minutes: float = 9.0        # durata max sessione organica
+    warmup_browse_headless: bool = True           # headless in produzione worker
+    # Warm-up durante le pause lunghe di lista/bio: se la pausa e' >= questa soglia,
+    # infila una breve sessione organica (5-10 min) mentre il job API e' parcheggiato.
+    warmup_browse_on_pause_min_pause_minutes: float = 20.0
+
     # Warm-up daily limits — format "day_start-day_end:limit,..." (ranges inclusive).
     # Applies to accounts with warmup_day in 1..14. Day 0 = warmup finished.
     warmup_limits: str = "1-3:5,4-7:12,8-14:20"
