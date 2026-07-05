@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     # Max user_info lookups/day/account for scraping (anti-ban). Per-campaign override on campaigns.scrape_daily_limit.
     scrape_daily_limit: int = 300
 
+    # Cap random della mini-sessione bio prima della pausa lunga (era 250 fisso = firma).
+    # Pescato per-sessione in [min,max] e persistito su campaigns.current_session_cap.
+    bio_session_cap_min: int = 150
+    bio_session_cap_max: int = 300
+
     # Fase Lista: dimensione pagina randomizzata passata come max_amount a
     # user_followers_v1_chunk. Senza un valore piccolo, instagrapi drena l'intera
     # lista in un burst count=200 senza delay -> challenge IG. Con 20-40 ogni

@@ -163,13 +163,14 @@ def test_micro_yield_defers_then_resumes_to_completion(monkeypatch):
 
 
 def test_long_break_still_fires_and_survives_restart(monkeypatch):
-    """La pausa lunga anti-block scatta ancora a scrape_session_size (qui 5) con un
-    defer lungo (status scraping_break) e, al rientro, la run riprende e completa."""
+    """La pausa lunga anti-block scatta al cap della mini-sessione (current_session_cap,
+    qui 5) con un defer lungo (status scraping_break) e, al rientro, la run riprende e
+    completa. Il cap e' persistito -> next_long_break sopravvive al restart del job."""
     # MICRO_YIELD_EVERY alto: non interferisce con la pausa lunga a 5.
     monkeypatch.setattr(scrape_bios, "MICRO_YIELD_EVERY", 10000)
     session_factory, campaign_id, cleanup = _setup(
         monkeypatch, 8,
-        scrape_session_size=5,
+        current_session_cap=5,  # cap mini-sessione pre-fissato (nuovo meccanismo)
         scrape_break_minutes_min=30,
         scrape_break_minutes_max=45,
     )

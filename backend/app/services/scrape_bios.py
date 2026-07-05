@@ -16,6 +16,7 @@ from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty, Scraping
 from app.services.scraper import fetch_and_store_bio, is_challenge_exception, isolate_challenged_account
 from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, SoftBlockError
 from app.utils.timing import bio_fetch_delay_seconds
+from app.config import settings
 
 
 # Ritenta lo STESSO profilo prima di skippare/pausare (assorbe blip transitori).
@@ -41,6 +42,14 @@ def bio_should_continue(target: int | None, done: int) -> bool:
     if target is None:
         return True
     return done < target
+
+
+def pick_session_cap(min_v: int, max_v: int) -> int:
+    """Cap random di bio per mini-sessione prima della pausa lunga. Sostituisce il 250
+    fisso: un cap costante e' una firma. Va PERSISTITO (campaigns.current_session_cap)
+    perche' next_long_break e' deterministico ai restart del job (micro-yield)."""
+    lo, hi = (min_v, max_v) if min_v <= max_v else (max_v, min_v)
+    return random.randint(lo, hi)
 
 
 async def scrape_bios(campaign_id: str) -> int | None:
@@ -93,7 +102,14 @@ async def scrape_bios(campaign_id: str) -> int | None:
             # Cadenza pausa lunga anti-block ancorata a `done` (count bio_scraped,
             # persistito in DB): sopravvive ai micro-yield/restart, che azzerano i
             # contatori locali. Prossima pausa al primo multiplo di `size` oltre `done`.
-            size = getattr(campaign, "scrape_session_size", 250) or 250
+            # Cap random per mini-sessione, PERSISTITO: fissato una volta e riusato ai
+            # restart del job (micro-yield), cosi' next_long_break resta deterministico.
+            if not getattr(campaign, "current_session_cap", None):
+                campaign.current_session_cap = pick_session_cap(
+                    settings.bio_session_cap_min, settings.bio_session_cap_max
+                )
+                await db.commit()
+            size = campaign.current_session_cap
             next_long_break = ((done // size) + 1) * size
             # Contatori del SINGOLO job (azzerati a ogni restart): governano il micro-yield.
             processed_this_job = 0
@@ -241,6 +257,7 @@ async def scrape_bios(campaign_id: str) -> int | None:
                         campaign.scrape_break_prev_status = CampaignStatus.scraping.value
                         campaign.status = CampaignStatus.scraping_break
                         campaign.scrape_break_until = datetime.utcnow() + timedelta(seconds=seconds)
+                        campaign.current_session_cap = None  # nuova mini-sessione -> nuovo cap random
                         campaign.updated_at = datetime.utcnow()
                         await db.commit()
                         emit_event(campaign_id, "scrape_break", f"Pausa bio {int(minutes)} min dopo {done}")

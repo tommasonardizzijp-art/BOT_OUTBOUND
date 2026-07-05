@@ -50,6 +50,9 @@ class Campaign(Base):
     scrape_mode: Mapped[str] = mapped_column(String(20), nullable=False, default='followers')
     # Parallel scraping + DM config (per-campaign)
     scrape_session_size: Mapped[int] = mapped_column(Integer, default=250, nullable=False)
+    # Cap random della mini-sessione bio in corso (persistito per restart-safety del
+    # next_long_break; None = da pescare). Vedi bio_session_cap_min/max in config.
+    current_session_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scrape_break_minutes_min: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     scrape_break_minutes_max: Mapped[int] = mapped_column(Integer, default=45, nullable=False)
     bio_fetch_delay_min: Mapped[float] = mapped_column(Float, default=5.0, nullable=False)
