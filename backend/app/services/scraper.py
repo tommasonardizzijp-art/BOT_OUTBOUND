@@ -300,7 +300,8 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
         return "capped", None, None
     current_account, current_client = sel
     try:
-        user_info = await asyncio.to_thread(current_client.user_info_v1, follower.ig_user_id)
+        from app.services.profile_lookup import fetch_profile_app_like
+        user_info = await asyncio.to_thread(fetch_profile_app_like, current_client, follower.ig_user_id)
     except Exception as e:
         if is_challenge_exception(e):
             return "challenge", current_account, e
