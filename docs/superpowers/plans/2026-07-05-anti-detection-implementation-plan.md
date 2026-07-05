@@ -542,3 +542,15 @@ Riavvia worker DM + cron + scraping. Lancia una campagna Fase Bio piccola, osser
 - **Placeholder**: nessuno — codice completo in ogni step.
 - **Coerenza tipi**: `pick_from_module`/`fetch_profile_app_like` (Task 1→3), `pick_session_cap` (Task 4), `run_pause_browser_all_accounts`/`_scraping_accounts_of_campaign` (Task 5) coerenti tra definizione e uso. `run_pause_browser_activity` cambia firma in Task 5 (campaign_id invece di campaign+db): aggiornare TUTTI i chiamati (il break di scrape_bios, Step 6).
 - **Rischio aperto**: Task 3 ramo A vs B deciso dallo spike Task 2 (gate esplicito). Default ramo B (instagrapi-supported, basso rischio) se lo spike non conferma full_detail_info.
+
+---
+
+## Esito esecuzione (2026-07-05)
+
+Tutti i task implementati (TDD, 22 test nuovi verdi; full suite 361 passed, 1 flaky pre-esistente `test_reservation`). Validazione live eseguita:
+- **Task 4 / migrazione 021**: applicata (`alembic current = 021`, colonna `current_session_cap` presente in DB).
+- **Task 2 spike `full_detail_info` → 404** "Endpoint does not exist" (instagrapi 2.3.0). **Ramo A escluso** → **ramo B confermato** (nessun cambio codice: era già il default).
+- **Task 3 ramo B validato live**: `fetch_profile_app_like` ritorna il profilo (user_info app-like + `user_medias_v1` post, nessun crash).
+- **Task 5 cattura browser validata live**: `BrowserSession` su @primeroa_adv7 (proxy `10.154.185.77:8080` → coerenza IP ok) → `_capture_web_profile_info` ritorna il JSON corretto, no 429 sulla singola chiamata.
+- **Flag `.env` accesi** (`WARMUP_BROWSE_ENABLED`/`BIO_BROWSER_BATCH_ENABLED`/`WARMUP_BROWSE_HEADLESS=false`). ⚠️ I worker girano dal restart precedente → feature browser attive al **prossimo restart**; delay/cap/lookup app-like già live.
+- **Aperto**: test volume browser-bio (rate `web_profile_info` prima del 429), merge branch su master.
