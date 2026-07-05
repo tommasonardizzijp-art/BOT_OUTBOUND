@@ -274,14 +274,11 @@ async def scrape_bios(campaign_id: str) -> int | None:
                         # SCALATO dal defer, cosi' la pausa TOTALE resta ~minutes e il re-fire
                         # coincide con scrape_break_until (gia' fissato a now+seconds).
                         spent_seconds = 0
-                        if account is not None:
-                            try:
-                                from app.services.browser_bio import run_pause_browser_activity
-                                spent_seconds = await run_pause_browser_activity(
-                                    campaign, db, account.id, getattr(account, "username", None)
-                                )
-                            except Exception as e:
-                                logger.warning(f"[Bio] attivita' browser in pausa fallita (ignoro): {e}")
+                        try:
+                            from app.services.browser_bio import run_pause_browser_all_accounts
+                            spent_seconds = await run_pause_browser_all_accounts(campaign_id)
+                        except Exception as e:
+                            logger.warning(f"[Bio] attivita' browser in pausa fallita (ignoro): {e}")
 
                         return max(60, seconds - int(spent_seconds or 0))
 

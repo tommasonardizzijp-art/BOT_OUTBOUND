@@ -270,15 +270,36 @@ async def _scrape_batch(campaign, db, browser_session, count: int) -> int:
     return done
 
 
-async def run_pause_browser_activity(campaign, db, account_id: str, username: str | None = None) -> int:
-    """Durante la pausa lunga della Fase Bio: UNA sessione browser coerente sull'account
-    appena usato = scroll organico (warm-up) + eventuale BLOCCO di profili scrapati.
-    Ritorna i secondi totali spesi (0 se tutto disabilitato o fallito). Difensivo: non
-    solleva mai — il chiamante scala questo tempo dal defer della pausa.
+async def _scraping_accounts_of_campaign(campaign_id: str):
+    """(account_id, username) degli account scraping/both attivi della campagna."""
+    from app.database import AsyncSessionLocal
+    from sqlalchemy import select
+    from app.models.campaign_account import CampaignAccount
+    from app.models.account import InstagramAccount, AccountStatus
+    from app.utils.roles import SCRAPE_ROLES
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(InstagramAccount.id, InstagramAccount.username)
+            .join(CampaignAccount, CampaignAccount.account_id == InstagramAccount.id)
+            .where(
+                CampaignAccount.campaign_id == campaign_id,
+                CampaignAccount.is_active == True,  # noqa: E712
+                CampaignAccount.role.in_(SCRAPE_ROLES),
+                InstagramAccount.status == AccountStatus.active,
+            )
+        )).all()
+    return [(r[0], r[1]) for r in rows]
 
-    Coerenza IP: BrowserSession esce dallo STESSO account.proxy dell'API. Nessuna
-    concorrenza: gira mentre il job API e' in procinto di defer (job singolo seriale).
-    Un solo login/apertura sessione per pausa (non per profilo) = comportamento umano.
+
+async def run_pause_browser_activity(campaign_id: str, account_id: str, username: str | None = None) -> int:
+    """Durante la pausa lunga della Fase Bio: UNA sessione browser coerente su UN account
+    = scroll organico (warm-up) + eventuale BLOCCO di profili scrapati. Ritorna i secondi
+    spesi (0 se disabilitato/fallito). Difensivo: non solleva mai.
+
+    Apre la PROPRIA db session (via AsyncSessionLocal) SOLO per il batch, cosi' e'
+    sicura chiamata in parallelo su piu' account (le sessioni SQLAlchemy async non sono
+    concorrenti-safe). Coerenza IP: BrowserSession esce dallo STESSO account.proxy dell'API.
+    Un solo login/apertura sessione per account (non per profilo) = comportamento umano.
     """
     do_scroll = settings.warmup_browse_enabled
     do_batch = settings.bio_browser_batch_enabled
@@ -308,7 +329,15 @@ async def run_pause_browser_activity(campaign, db, account_id: str, username: st
             hi = max(settings.bio_browser_batch_min, settings.bio_browser_batch_max)
             n = random.randint(lo, hi)
             logger.info(f"[BioBrowser] {tag}: batch di {n} profili via browser")
-            await _scrape_batch(campaign, db, session, n)
+            from app.database import AsyncSessionLocal
+            from app.models.campaign import Campaign
+            from sqlalchemy import select
+            async with AsyncSessionLocal() as db:  # db propria = parallel-safe
+                campaign = (await db.execute(
+                    select(Campaign).where(Campaign.id == campaign_id)
+                )).scalar_one_or_none()
+                if campaign is not None:
+                    await _scrape_batch(campaign, db, session, n)
 
         return int(time.monotonic() - start)
     except Exception as e:
@@ -320,3 +349,32 @@ async def run_pause_browser_activity(campaign, db, account_id: str, username: st
                 await session.close()
             except Exception as e:  # pragma: no cover
                 logger.debug(f"[BioBrowser] {tag}: close fallita ({e})")
+
+
+async def run_pause_browser_all_accounts(campaign_id: str) -> int:
+    """Ogni account scraping della campagna fa la sua sessione scroll+batch in pausa.
+    Parallelo con partenze SCAGLIONATE (offset random 1-3 min tra account, mai tutti
+    nello stesso istante) e cap sui browser concorrenti (max_concurrent_browsers).
+    Ritorna i secondi totali spesi (0 se disabilitato / nessun account). Difensivo."""
+    if not (settings.warmup_browse_enabled or settings.bio_browser_batch_enabled):
+        return 0
+    accounts = await _scraping_accounts_of_campaign(campaign_id)
+    if not accounts:
+        return 0
+
+    start = time.monotonic()
+    sem = asyncio.Semaphore(max(1, settings.max_concurrent_browsers))
+
+    async def _one(account_id, username, idx):
+        # Stagger: parte dopo idx * (1-3 min), cosi' non tutti nello stesso istante.
+        if idx:
+            await asyncio.sleep(random.uniform(60.0, 180.0) * idx)
+        async with sem:
+            await run_pause_browser_activity(campaign_id, account_id, username)
+
+    await asyncio.gather(
+        *[_one(a, u, i) for i, (a, u) in enumerate(accounts)],
+        return_exceptions=True,  # un account che fallisce non blocca gli altri
+    )
+    logger.info(f"[BioBrowser] pausa: sessioni browser completate su {len(accounts)} account")
+    return int(time.monotonic() - start)
