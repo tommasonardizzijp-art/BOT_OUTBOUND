@@ -4,15 +4,27 @@ from app.services.profile_lookup import fetch_profile_app_like
 from app.config import settings
 
 
-def test_uses_app_like_from_module_not_self_profile():
+def test_default_from_module_is_self_profile_baseline():
+    # DEFAULT (flag OFF): call IDENTICA alla baseline storica -> from_module="self_profile".
+    # E' la chiamata che NON dava 429 immediato; il modulo realistico e' opt-in.
+    assert settings.bio_realistic_from_module_enabled is False
     client = MagicMock()
     fake_user = object()
     client.user_info_v1.return_value = fake_user
     out = fetch_profile_app_like(client, "123")
-    # Deve chiamare user_info_v1 con from_module realistico (non self_profile).
+    _, kwargs = client.user_info_v1.call_args
+    assert kwargs.get("from_module") == "self_profile"
+    assert out is fake_user
+
+
+def test_realistic_from_module_when_flag_enabled(monkeypatch):
+    # Opt-in: col flag ON usa un modulo realistico non-self (feed/reel).
+    monkeypatch.setattr(settings, "bio_realistic_from_module_enabled", True)
+    client = MagicMock()
+    client.user_info_v1.return_value = object()
+    fetch_profile_app_like(client, "123")
     _, kwargs = client.user_info_v1.call_args
     assert kwargs.get("from_module") in ("feed_timeline", "reel_feed_timeline")
-    assert out is fake_user
 
 
 def test_no_media_call_by_default():

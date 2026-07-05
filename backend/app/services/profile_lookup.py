@@ -36,13 +36,24 @@ def fetch_profile_app_like(client, pk: str):
     from loguru import logger
     from app.config import settings
 
-    user = client.user_info_v1(pk, from_module=pick_from_module())
+    # from_module — DIETRO FLAG, OFF di default => "self_profile" = call IDENTICA alla
+    # baseline storica (quella che NON dava 429 immediato). Il modulo realistico
+    # (feed/reel -> entry_point=profile) e' opt-in: piu' credibile come signature ma
+    # sospettato di throttle 429 piu' duro su sessione nuda. getattr con default: se il
+    # config in RAM e' stale/disallineato NON crasha, degrada al baseline.
+    from_module = (
+        pick_from_module()
+        if getattr(settings, "bio_realistic_from_module_enabled", False)
+        else "self_profile"
+    )
+    user = client.user_info_v1(pk, from_module=from_module)
+
     # Post-grid come l'app — DIETRO FLAG, OFF di default. Su sessione API nuda questa 2a
     # chiamata (endpoint /feed/user, rate-limit piu' aggressivo, a gap zero dopo user_info)
     # RADDOPPIA il volume per profilo e anticipa il 429: osservato live 05/07 con 429 dopo
     # pochi lookup. L'app-like vero appartiene al canale browser, non all'API mobile nuda.
-    # Best-effort quando attivo: non deve MAI rompere la bio.
-    if settings.bio_app_like_media_enabled:
+    # Best-effort quando attivo: non deve MAI rompere la bio. getattr: robusto a config stale.
+    if getattr(settings, "bio_app_like_media_enabled", False):
         try:
             client.user_medias_v1(pk, amount=12)  # prima pagina della griglia post
         except Exception as e:

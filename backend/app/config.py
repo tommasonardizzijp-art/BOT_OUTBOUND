@@ -149,9 +149,19 @@ class Settings(BaseSettings):
     # molto piu' duro di /info/ -> RADDOPPIA il volume per profilo e ANTICIPA il 429
     # (osservato live 05/07). L'apertura profilo app-like vera va fatta sul canale
     # browser (bio_browser_batch), non sull'API mobile. Riattivare SOLO dietro un test
-    # volume che dimostri che regge il rate. from_module realistico resta sempre attivo
-    # (e' gratis: solo un parametro, zero carico extra).
+    # volume che dimostri che regge il rate.
     bio_app_like_media_enabled: bool = False
+
+    # ── from_module realistico su user_info in Fase Bio ──
+    # DISATTIVO di default. `user_info_v1` di serie usa from_module="self_profile"; su
+    # profili altrui e' una firma per il checkpoint "attività automatizzata" del giorno
+    # dopo. Cambiarlo in feed_timeline/reel_feed_timeline manda entry_point=profile: piu'
+    # realistico come SIGNATURE, ma su sessione nuda senza feed/reel realmente caricati e'
+    # una claim di contesto che la sessione non regge, sospettata di throttle 429 piu' duro
+    # (osservato 05/07, non provato). OFF = call identica alla baseline storica (self_profile)
+    # che NON dava 429 immediato. Riattivare solo su account sani + A/B controllato: priorita'
+    # a "scraping che gira" sul "checkpoint del giorno dopo".
+    bio_realistic_from_module_enabled: bool = False
 
     # Warm-up daily limits — format "day_start-day_end:limit,..." (ranges inclusive).
     # Applies to accounts with warmup_day in 1..14. Day 0 = warmup finished.
