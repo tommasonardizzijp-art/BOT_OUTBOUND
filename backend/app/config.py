@@ -129,12 +129,14 @@ class Settings(BaseSettings):
     # infila una breve sessione organica (5-10 min) mentre il job API e' parcheggiato.
     warmup_browse_on_pause_min_pause_minutes: float = 20.0
 
-    # ── Bio via browser alternata all'API (Step 3) ──
-    # Frazione [0..1] dei profili in Fase Bio estratti navigando il profilo con
-    # Patchright (piu' credibile, NON consuma il cap API) invece che via user_info_v1
-    # mobile. 0.0 = OFF (solo API, comportamento invariato). Es. 0.3 = ~30% via browser.
-    # Ritmo umano tra i profili browser gestito da browser_bio.human_profile_pause (5-10s).
-    bio_browser_ratio: float = 0.0
+    # ── Bio via browser a BLOCCO nella pausa (Step 3) ──
+    # Lo screening via browser NON e' per-profilo sparso tra le chiamate API (aprire il
+    # browser per 1 solo profilo non e' umano). Gira a BLOCCO dentro la pausa lunga bio,
+    # nella STESSA sessione dello scroll organico: prima scroll, poi N profili scrapati.
+    # Naviga il profilo con Patchright (piu' credibile, NON consuma il cap API mobile).
+    bio_browser_batch_enabled: bool = False       # OFF default: attivare per test
+    bio_browser_batch_min: int = 10               # min profili scrapati per pausa
+    bio_browser_batch_max: int = 15               # max profili scrapati per pausa
 
     # Warm-up daily limits — format "day_start-day_end:limit,..." (ranges inclusive).
     # Applies to accounts with warmup_day in 1..14. Day 0 = warmup finished.

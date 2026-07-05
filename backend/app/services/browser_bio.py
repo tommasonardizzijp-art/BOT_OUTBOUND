@@ -21,11 +21,13 @@ scritti sugli stessi campi Follower + `upsert_lead` di `fetch_and_store_bio`.
 import asyncio
 import json as _json
 import random
+import time
 from datetime import datetime
 from types import SimpleNamespace
 
 from loguru import logger
 
+from app.config import settings
 from app.models.follower import FollowerStatus
 
 # App-id pubblico del web di Instagram (usato dal suo stesso JS per web_profile_info).
@@ -222,3 +224,99 @@ async def human_profile_pause() -> None:
         extra = random.uniform(15.0, 45.0)
         logger.debug(f"[BioBrowser] pausa breve {extra:.0f}s (distrazione)")
         await asyncio.sleep(extra)
+
+
+async def _scrape_batch(campaign, db, browser_session, count: int) -> int:
+    """Scrapa fino a `count` follower pending via la sessione browser gia' aperta,
+    a ritmo umano. Ritorna quante bio estratte. Difensivo: non solleva."""
+    from sqlalchemy import select
+    from app.models.follower import Follower
+
+    done = 0
+    for _ in range(count):
+        follower = (await db.execute(
+            select(Follower).where(
+                Follower.campaign_id == campaign.id,
+                Follower.status == FollowerStatus.pending,
+            ).limit(1)
+        )).scalar_one_or_none()
+        if follower is None:
+            break  # niente piu' pending
+
+        try:
+            outcome, err = await fetch_and_store_bio_browser(follower, campaign, db, browser_session)
+        except Exception as e:
+            logger.warning(f"[BioBrowser] batch: errore inatteso su @{follower.username} ({e}) — stop batch")
+            break
+
+        if outcome == "done":
+            done += 1
+        elif outcome in ("not_found", "private", "error"):
+            # Skip benigno: marca skipped cosi' non ri-seleziona lo stesso pending
+            # (limit(1) senza ORDER BY ritornerebbe lo stesso -> loop).
+            follower.status = FollowerStatus.skipped
+            follower.skip_reason = f"browser_{outcome}"
+            follower.updated_at = datetime.utcnow()
+            await db.commit()
+        elif outcome in ("soft_block", "network"):
+            # 429/soft-block o rete giu': fermati, NON bruciare i pending buoni
+            # (restano pending per l'API alla ripresa).
+            logger.warning(f"[BioBrowser] batch stop ({outcome}) su @{follower.username}: {err}")
+            break
+
+        await human_profile_pause()
+
+    logger.info(f"[BioBrowser] batch pausa: {done} bio estratte")
+    return done
+
+
+async def run_pause_browser_activity(campaign, db, account_id: str, username: str | None = None) -> int:
+    """Durante la pausa lunga della Fase Bio: UNA sessione browser coerente sull'account
+    appena usato = scroll organico (warm-up) + eventuale BLOCCO di profili scrapati.
+    Ritorna i secondi totali spesi (0 se tutto disabilitato o fallito). Difensivo: non
+    solleva mai — il chiamante scala questo tempo dal defer della pausa.
+
+    Coerenza IP: BrowserSession esce dallo STESSO account.proxy dell'API. Nessuna
+    concorrenza: gira mentre il job API e' in procinto di defer (job singolo seriale).
+    Un solo login/apertura sessione per pausa (non per profilo) = comportamento umano.
+    """
+    do_scroll = settings.warmup_browse_enabled
+    do_batch = settings.bio_browser_batch_enabled
+    if not do_scroll and not do_batch:
+        return 0
+
+    tag = f"@{username}" if username else account_id[:8] + "…"
+    start = time.monotonic()
+    session = None
+    try:
+        from app.browser.context_manager import BrowserSession
+        session = BrowserSession(account_id, headless=settings.warmup_browse_headless)
+        await session.open()
+        await session.page.ensure_logged_in(account_id)
+
+        # 1) Scroll organico (warm-up): feed scroll, post, like ~35%.
+        if do_scroll:
+            scroll_s = int(random.uniform(
+                settings.warmup_browse_min_minutes, settings.warmup_browse_max_minutes
+            ) * 60)
+            logger.info(f"[BioBrowser] {tag}: scroll organico ~{scroll_s}s")
+            await session.page.browse_feed(scroll_s)
+
+        # 2) Blocco di profili scrapati nella STESSA sessione (piu' umano di 1 sporadico).
+        if do_batch:
+            lo = min(settings.bio_browser_batch_min, settings.bio_browser_batch_max)
+            hi = max(settings.bio_browser_batch_min, settings.bio_browser_batch_max)
+            n = random.randint(lo, hi)
+            logger.info(f"[BioBrowser] {tag}: batch di {n} profili via browser")
+            await _scrape_batch(campaign, db, session, n)
+
+        return int(time.monotonic() - start)
+    except Exception as e:
+        logger.warning(f"[BioBrowser] {tag}: attivita' in pausa fallita ({type(e).__name__}: {e}) — ingoiato")
+        return int(time.monotonic() - start)
+    finally:
+        if session is not None:
+            try:
+                await session.close()
+            except Exception as e:  # pragma: no cover
+                logger.debug(f"[BioBrowser] {tag}: close fallita ({e})")
