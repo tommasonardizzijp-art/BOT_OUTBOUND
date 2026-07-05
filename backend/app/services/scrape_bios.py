@@ -242,7 +242,28 @@ async def scrape_bios(campaign_id: str) -> int | None:
                         await db.commit()
                         emit_event(campaign_id, "scrape_break", f"Pausa bio {int(minutes)} min dopo {done}")
                         logger.info(f"[Bio] Pausa sessione {int(minutes)}min dopo {done} bio — defer job")
-                        return seconds
+
+                        # Warm-up organico DENTRO la pausa lunga: mentre l'API mobile e'
+                        # ferma (stiamo per fare defer, nessun lookup in corso — job
+                        # singolo seriale), l'account fa browsing umano reale via
+                        # Patchright sullo STESSO account.proxy. Diluisce la giornata
+                        # "solo chiamate API" che il risk-scoring notturno IG penalizza.
+                        # Self-guard sul flag warmup_browse_enabled (OFF default = no-op).
+                        # Difensivo: non solleva mai. Il tempo del warm-up e' SCALATO dal
+                        # defer, cosi' la pausa TOTALE resta ~minutes (browsing al posto di
+                        # dormire, non in aggiunta); scrape_break_until era gia' fissato a
+                        # now+seconds, quindi il re-fire coincide col countdown UI.
+                        warmup_seconds = 0
+                        if account is not None:
+                            try:
+                                from app.services.warmup_browse import run_warmup
+                                res = await run_warmup(account.id, getattr(account, "username", None))
+                                if res.get("ran"):
+                                    warmup_seconds = int(res.get("duration_seconds", 0))
+                            except Exception as e:
+                                logger.warning(f"[Bio] warm-up in pausa fallito (ignoro): {e}")
+
+                        return max(60, seconds - warmup_seconds)
 
                 # Micro-yield: cede il job ad ARQ ben prima di job_timeout (3600s).
                 # Defer brevissimo, status RESTA 'scraping' (niente *_break, nessun
