@@ -22,6 +22,28 @@ def random_delay_seconds() -> float:
     return max(min_s, min(max_s, delay))
 
 
+def bio_fetch_delay_seconds(min_s: float, max_s: float) -> float:
+    """Delay tra due lookup bio in Fase Bio.
+
+    Prima era `random.uniform(min, max)` con range stretto (5-8) -> cadenza quasi
+    piatta: con N account round-robin IG vedeva uno screening a intervalli regolari
+    (~40s con 4 account) = firma da bot. Qui usiamo una lognormale a sigma alto con
+    **coda lunga** (fino a ~3x max): la maggior parte dei gap resta breve, ma ogni
+    tanto capita una pausa piu' lunga (l'utente si ferma), rompendo la periodicita'.
+
+    `min_s`/`max_s` sono i valori per-campagna (`bio_fetch_delay_min/max`). Se sono
+    uguali o invertiti li si sistema per garantire varianza.
+    """
+    lo = max(1.0, float(min_s))
+    hi = float(max_s)
+    if hi <= lo:
+        hi = lo + 3.0  # min==max -> forza un range (una cadenza fissa e' una firma)
+    mid = (lo + hi) / 2.0
+    ceiling = hi * 3.0  # coda: pause piu' lunghe occasionali senza clampare via la varianza
+    t = random.lognormvariate(math.log(mid), 0.75)
+    return max(lo, min(ceiling, t))
+
+
 def distraction_pause_seconds() -> float:
     """
     Occasional longer pause simulating human distraction.

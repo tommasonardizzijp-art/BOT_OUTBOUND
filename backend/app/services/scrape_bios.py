@@ -15,6 +15,7 @@ from app.services.notifier import send_scrape_warning_alert
 from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty, ScrapingSlotsBusy
 from app.services.scraper import fetch_and_store_bio, is_challenge_exception, isolate_challenged_account
 from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, SoftBlockError
+from app.utils.timing import bio_fetch_delay_seconds
 
 
 # Ritenta lo STESSO profilo prima di skippare/pausare (assorbe blip transitori).
@@ -222,7 +223,7 @@ async def scrape_bios(campaign_id: str) -> int | None:
                     consecutive_fail = 0
                     done += 1
                     processed_this_job += 1
-                    delay = random.uniform(
+                    delay = bio_fetch_delay_seconds(
                         getattr(campaign, "bio_fetch_delay_min", 5.0) or 5.0,
                         getattr(campaign, "bio_fetch_delay_max", 8.0) or 8.0,
                     )

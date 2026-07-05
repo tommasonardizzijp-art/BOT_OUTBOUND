@@ -37,21 +37,19 @@ mitigazione (comportamento più umano) + alternanza browser, NON riscrittura tot
 - **Obiettivo**: cadenza irregolare, niente periodicità leggibile.
 
 ### 3. Warm-up + browser batch nella pausa su TUTTI gli account (non solo l'ultimo)
-- **Ora**: solo l'account che ha colpito il break.
-- **Vuoi**: ogni account deve avere la sua sessione ~5-10 min di scroll + browser scraping, per abbassare il sospetto e allungare la vita di tutti i profili.
-- **DECISIONE APERTA (da decidere insieme)**:
-  - (a) **tutti-per-pausa**: a ogni pausa, ogni account fa la sua sessione (sfalsati, non simultanei), oppure
-  - (b) **rotazione**: pausa 1 → account 1, pausa 2 → account 2, … (round-robin sulle pause).
-  - In entrambi i casi: **mai simultaneo** (sfalsare) per non creare una firma sincronizzata.
-- **DECISIONE APERTA**: avvio **non necessariamente all'inizio** della pausa — offset random dentro la finestra 30-45 min (ora parte subito al break). Richiede un piccolo restructure del defer (defer breve → wake → browser → defer resto).
+- **"Solo l'ultimo usato" (chiarimento)**: al break, il codice chiama `run_pause_browser_activity(campaign, db, account.id, ...)` dove `account` è la variabile che tiene l'ULTIMO account che ha fatto una `user_info_v1` prima che scattasse la pausa. Il loop bio ruota gli account round-robin (`ScrapingPool`), quindi `account` è semplicemente quello che ha fatto l'ultima lookup. La sessione scroll+batch gira su QUEL solo account; gli altri 3 non ricevono nulla. È questo il limite da togliere.
+- **DECISIONE PRESA (05/07)**: **tutti-per-pausa** (non rotazione). A ogni pausa, OGNI account della campagna fa la sua sessione ~5-10 min di scroll + browser scraping.
+- **Esecuzione**: in **parallelo** ma con **partenze scaglionate** — offset random **1-3 min tra un account e l'altro**, MAI tutti nello stesso istante (già partono insieme lo scraping API; vederli poi fermarsi e scrollare tutti nello stesso momento è una firma). Rispettare `max_concurrent_browsers` (semaphore, ora 3): con più account dei browser disponibili, si accodano.
+- **Offset random dentro la pausa: NON necessario** (conferma Tommaso). Possono partire a inizio pausa; la randomizzazione che conta è lo **stagger tra account**, non l'offset nella finestra. (Niente restructure del defer.)
 
-### 4. [VALUTARE] Comportamento app-like: fetch dei post del profilo
-- Aprendo un profilo, l'app vera carica anche la **griglia post** del profilo (`feed/user` / `full_detail_info`), non solo `user_info`. La nostra bio scrape fa solo `user_info` = apertura profilo "monca".
-- Valutare se aggiungere un fetch dei post (o passare a `full_detail_info` che impacchetta info+post+highlights come fa l'app all'apertura profilo) per mimare meglio l'apertura reale. Vale sia per il canale API sia per il browser.
+### 4. Comportamento app-like: `full_detail_info` invece di `user_info_v1` — DA FARE
+- **Verificato (05/07)**: l'app IG reale, all'apertura di un profilo, NON fa solo `user_info` — carica anche **griglia post + highlights + relazione** in un bundle. L'endpoint è `users/{pk}/full_detail_info/` (info + prima pagina post + highlights + reel in UNA call): è ciò che spara l'app quando apri un contatto. Un bare `user_info_v1` è la firma da bot che Tommaso vuole togliere.
+- **Fattibilità (verificato)**: instagrapi **2.3.0** NON ha un metodo `full_detail_info`, MA è chiamabile via `client.private_request("users/{pk}/full_detail_info/")`. **NON serve l'upgrade instagrapi** (punto 5).
+- **DA FARE**: nella Fase Bio (`fetch_and_store_bio`, scraper.py) sostituire `user_info_v1` con `full_detail_info`, estrarre `user_detail.user` per bio/contatti (stesso `extract_contacts`), scartare il resto del bundle (post/highlights servono solo a rendere la chiamata app-like, non li salviamo). Validare in locale la shape della risposta e che i campi contatto ci siano. Fallback a `user_info_v1` se l'endpoint desse errore.
 
-### 5. [RICERCA] Versione app IG emulata (2.3 → 2.18?)
-- Verificare la **app version** emulata (nel device settings instagrapi / user-agent della sessione). Tommaso indica che siamo su "2.3" e ipotizza una "2.18" più recente.
-- Valutare: (a) se la versione è vecchia/incoerente con l'app reale = firma; (b) se una versione più nuova include endpoint/comportamenti che rendono il traffico più app-like e meno detectabile. Verificare la versione instagrapi e la app_version che imposta.
+### 5. Upgrade instagrapi 2.3.0 → più recente — RIMANDATO / opzionale
+- **Verificato (05/07)**: installata **instagrapi 2.3.0**; emula app IG **364.0.0.35.86 / 385.0.0.47.74** (il "2.18" era la versione instagrapi ipotizzata, NON l'app IG). L'upgrade bumperebbe app_version + signing/header.
+- **Decisione**: **RIMANDATO**. Lungo/rischioso (conferma Tommaso). Il punto 4 dà il beneficio app-like senza questo upgrade. Fare solo se emerge che la app_version 364/385 è essa stessa flaggata.
 
 ### 6. [VALIDARE LIVE] Cattura `web_profile_info` nel browser
 - Confermare su IG reale: quale endpoint serve i dati profilo oggi (REST `web_profile_info` vs GraphQL doc_id) e a quanti profili/ora scatta il 429 in-browser. Test locale controllato con `bio_browser_batch_enabled=True`, guardando i log `[BioBrowser] batch di N profili`.
