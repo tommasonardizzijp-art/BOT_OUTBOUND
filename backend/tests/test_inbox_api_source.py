@@ -65,3 +65,33 @@ async def test_api_source_passes_cursor_and_detects_end():
     assert p2.exhausted is True
     # la 2a chiamata deve aver passato il cursore della 1a
     assert client.calls[1][1].get("cursor") == "C1"
+
+
+@pytest.mark.asyncio
+async def test_inbox_params_match_mobile_app_fingerprint():
+    """I parametri della richiesta devono replicare esattamente quelli dell'app
+    mobile (rif. instagrapi direct_threads_chunk). Ogni deviazione = fingerprint
+    anomalo verso l'API privata IG = rischio checkpoint."""
+    client = FakeClient([
+        {"threads": [_raw_thread((123, "mario"))], "oldest_cursor": "C1", "has_older": True},
+        {"threads": [_raw_thread((321, "anna"))], "oldest_cursor": None, "has_older": False},
+    ])
+    src = ApiInboxSource(client, OWN)
+    await src.next_page()   # prima pagina (no cursore)
+    await src.next_page()   # seconda pagina (con cursore)
+
+    first = client.calls[0][1]
+    assert first["visual_message_return_type"] == "unseen"
+    assert first["thread_message_limit"] == "10"   # app = 10, NON 1
+    assert first["persistentBadging"] == "true"
+    assert first["limit"] == "20"
+    assert first["is_prefetching"] == "false"
+    # prima pagina: nessun parametro di paginazione
+    assert "cursor" not in first
+    assert "direction" not in first
+    assert "fetch_reason" not in first
+
+    paged = client.calls[1][1]
+    assert paged["cursor"] == "C1"
+    assert paged["direction"] == "older"
+    assert paged["fetch_reason"] == "page_scroll"

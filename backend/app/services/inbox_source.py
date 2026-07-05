@@ -47,18 +47,25 @@ def _as_users(raw_thread) -> list:
 def fetch_inbox_page(client, cursor: str | None) -> tuple[list, str | None, bool]:
     """Una pagina dell'inbox via private API. Ritorna (threads, next_cursor, has_older).
 
-    Usa l'endpoint app direct_v2/inbox con thread_message_limit minimo: in Fase 1
-    servono solo i partecipanti, non i messaggi -> payload leggero, meno crash parse.
+    I parametri replicano ESATTAMENTE quelli che l'app mobile invia (verificati sul
+    sorgente instagrapi, mixins/direct.py::direct_threads_chunk, il riferimento di
+    reverse-engineering che genera il nostro traffico). Ogni deviazione rende la
+    richiesta distinguibile dal client reale = rischio checkpoint. In particolare
+    thread_message_limit=10 (non 1), is_prefetching e fetch_reason presenti.
+    Estraiamo solo i partecipanti dai thread grezzi: i messaggi non li leggiamo,
+    quindi il payload piu' grande non costa parse extra.
     """
     params = {
         "visual_message_return_type": "unseen",
-        "thread_message_limit": "1",
+        "thread_message_limit": "10",
         "persistentBadging": "true",
         "limit": "20",
+        "is_prefetching": "false",
     }
     if cursor:
         params["cursor"] = cursor
         params["direction"] = "older"
+        params["fetch_reason"] = "page_scroll"
     resp = client.private_request("direct_v2/inbox/", params=params)
     inbox = (resp or {}).get("inbox") or {}
     _threads = inbox.get("threads")
