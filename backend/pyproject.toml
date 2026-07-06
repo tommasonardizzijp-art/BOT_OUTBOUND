@@ -39,3 +39,12 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+
+[tool.pytest.ini_options]
+# L'engine async di app/database.py è un singleton module-level: il pool asyncpg
+# lega le connessioni all'event loop. Con loop function-scoped (default), un test
+# eredita una connessione di un loop già chiuso dal test precedente ->
+# "RuntimeError: Event loop is closed". Un loop condiviso per sessione mantiene il
+# pool valido per tutta la suite. Verificato: 376 passed. Marker @pytest.mark.asyncio
+# restano espliciti (asyncio_mode strict di default).
+asyncio_default_test_loop_scope = "session"
