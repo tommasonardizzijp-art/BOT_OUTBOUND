@@ -32,6 +32,7 @@ export default function NewCampaignPage() {
     approval_sample_size: '5',
   })
   const [inboxEngine, setInboxEngine] = useState<'browser' | 'api'>('browser')
+  const [bioEngine, setBioEngine] = useState<'api' | 'browser'>('api')
   const [messagingEnabled, setMessagingEnabled] = useState(true)
   const [advancedConfig, setAdvancedConfig] = useState({
     scrape_session_size: '250',
@@ -78,6 +79,7 @@ export default function NewCampaignPage() {
           : null,
         scrape_mode: form.scrape_mode,
         ...(form.scrape_mode === 'dm_threads' ? { inbox_engine: inboxEngine } : {}),
+        bio_engine: bioEngine,
         messaging_enabled: messagingEnabled,
         base_message_template: messagingEnabled ? form.base_message_template : null,
         message_template_b: messagingEnabled && showTemplateB && form.message_template_b ? form.message_template_b : null,
@@ -413,6 +415,38 @@ export default function NewCampaignPage() {
                     {errors.scrape_daily_limit
                       ? <p className="text-xs text-red-400">{errors.scrape_daily_limit}</p>
                       : <p className="text-xs text-gray-600">Opzionale. Numero massimo di profili risolti/giorno per ogni account scraping.</p>}
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-gray-400">Motore Fase Bio</label>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setBioEngine('api')}
+                        className={`flex-1 py-1.5 px-2 rounded border text-xs font-medium transition-colors ${
+                          bioEngine === 'api'
+                            ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                            : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+                        }`}
+                      >
+                        ⚡ API (veloce)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBioEngine('browser')}
+                        className={`flex-1 py-1.5 px-2 rounded border text-xs font-medium transition-colors ${
+                          bioEngine === 'browser'
+                            ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                            : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+                        }`}
+                      >
+                        🛡️ Browser (prudente)
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-600">
+                      {bioEngine === 'browser'
+                        ? 'Apre ogni profilo in un browser reale — più lento, nessun consumo del cap API.'
+                        : 'Usa l’API instagrapi — più veloce, consuma il cap di lookup/giorno.'}
+                    </p>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">

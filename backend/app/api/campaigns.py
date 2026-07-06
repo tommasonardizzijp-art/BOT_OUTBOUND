@@ -196,6 +196,7 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         approval_sample_size=data.approval_sample_size,
         scrape_mode=data.scrape_mode,
         inbox_engine=data.inbox_engine,
+        bio_engine=data.bio_engine,
         scrape_session_size=data.scrape_session_size,
         scrape_break_minutes_min=data.scrape_break_minutes_min,
         scrape_break_minutes_max=data.scrape_break_minutes_max,
@@ -241,6 +242,9 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         # exclude it from the outer name/template gate so an errored campaign can
         # switch engine to recover.
         "inbox_engine",
+        # bio_engine has its OWN status guard below (draft only — a scraping
+        # campaign already has bio workers/loops that assume one engine).
+        "bio_engine",
     }
     if "daily_limit" in data.model_fields_set:
         campaign.daily_limit = data.daily_limit
@@ -295,6 +299,13 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         if engine_switch_resets_cursor(campaign.inbox_engine, data.inbox_engine):
             campaign.scrape_cursor = None  # cursore vecchio non valido per il nuovo engine
         campaign.inbox_engine = data.inbox_engine
+    if data.bio_engine is not None:
+        if campaign.status != CampaignStatus.draft:
+            raise HTTPException(
+                status_code=400,
+                detail="Il motore Fase Bio si cambia solo a campagna non ancora avviata (draft).",
+            )
+        campaign.bio_engine = data.bio_engine
     if data.scrape_session_size is not None:
         campaign.scrape_session_size = data.scrape_session_size
     if data.scrape_break_minutes_min is not None:

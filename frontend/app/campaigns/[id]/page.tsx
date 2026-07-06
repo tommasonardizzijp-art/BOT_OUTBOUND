@@ -265,6 +265,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
 
   // Inbox engine switch (solo campagne dm_threads in stato fermo)
   const [switchingEngine, setSwitchingEngine] = useState(false)
+  const [switchingBioEngine, setSwitchingBioEngine] = useState(false)
 
   const openSettings = () => {
     if (!campaign) return
@@ -687,6 +688,22 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     }
   }
 
+  const handleBioEngineSwitch = async (newEngine: 'api' | 'browser') => {
+    if (!campaign) return
+    const current = campaign.bio_engine ?? 'api'
+    if (newEngine === current) return
+    setSwitchingBioEngine(true)
+    try {
+      await api.campaigns.update(id, { bio_engine: newEngine })
+      await mutateCampaign()
+      toast.success(`Motore Fase Bio cambiato a ${newEngine === 'browser' ? 'Browser' : 'API'}`)
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Errore aggiornamento motore Fase Bio')
+    } finally {
+      setSwitchingBioEngine(false)
+    }
+  }
+
   // BUG-NEW-11: distinguish error (backend down) from loading (first fetch)
   if (campaignError) return (
     <div className="flex items-center gap-2 text-red-400 p-8">
@@ -978,6 +995,52 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             </button>
           </div>
           {switchingEngine && (
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <Loader2 className="w-3 h-3 animate-spin" />Salvataggio...
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Bio engine switch — solo campagne non ancora avviate (draft): una volta in
+          corso il motore bio è fissato (fan-out browser / loop API assumono un engine solo) */}
+      {campaign.status === 'draft' && (
+        <div className="rounded-lg border border-gray-700/50 bg-gray-800/30 px-4 py-3 space-y-3">
+          <div>
+            <p className="text-sm text-gray-300 font-medium">Motore Fase Bio</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Seleziona il motore usato per recuperare bio/contatti dei profili
+            </p>
+          </div>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              disabled={switchingBioEngine}
+              onClick={() => handleBioEngineSwitch('api')}
+              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
+                (campaign.bio_engine ?? 'api') === 'api'
+                  ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              ⚡ API (veloce)
+              <span className="block text-xs font-normal mt-0.5 opacity-70">Consuma il cap lookup/giorno</span>
+            </button>
+            <button
+              type="button"
+              disabled={switchingBioEngine}
+              onClick={() => handleBioEngineSwitch('browser')}
+              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
+                campaign.bio_engine === 'browser'
+                  ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              🛡️ Browser (prudente)
+              <span className="block text-xs font-normal mt-0.5 opacity-70">Nessun consumo del cap API</span>
+            </button>
+          </div>
+          {switchingBioEngine && (
             <div className="flex items-center gap-2 text-xs text-gray-500">
               <Loader2 className="w-3 h-3 animate-spin" />Salvataggio...
             </div>
