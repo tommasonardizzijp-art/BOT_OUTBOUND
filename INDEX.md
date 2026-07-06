@@ -48,6 +48,7 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 | 7G | Qualifica lead: target salvabili, scoring deterministico, AI sugli ambigui, export dedicato; migration 015 applicata | 2026-06-08 |
 | 7G fix | Lead qualification hardening: paginazione worker ID-based, cancellazione run, fix _model_used, JSON parse guard | 2026-06-08 |
 | Hardening DM | Resilienza blip rete/DB (Retry defer), a-capo DM via Shift+Enter, switch AI Groq→Gemini 2.5-flash, fix freeze input-DM, typing 2.3x | 2026-06-22 |
+| 7H | Motore Fase Bio via browser (`bio_engine='browser'`, Patchright + `web_profile_info`, no consumo cap API); migration 022 applicata | 2026-07-06 |
 
 ### Da fare ☐
 
@@ -96,6 +97,7 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 | `backend/app/services/campaign_orchestrator.py` | Loop principale campagna, state machine, multi-worker |
 | `backend/app/services/scraper.py` | Scraping follower + session restore (login sicuro) |
 | `backend/app/services/scraping_pool.py` | Pool round-robin account scraping multi-account (Approccio C): pre-login, next(), build/release/save_sessions |
+| `backend/app/services/browser_bio.py` | Motore Fase Bio via browser (`bio_engine='browser'`): fan-out per-account, mini-sessioni Patchright, cattura `web_profile_info`, claim atomico pool disgiunti, terminazione campagna |
 | `backend/app/services/ai_personalizer.py` | Generazione messaggi via Ollama + batch + approval sampling |
 | `backend/app/services/reply_checker.py` | Cron: scansione inbox DM per risposte |
 | `backend/app/services/bot_state_service.py` | Kill-switch globale halt/resume |

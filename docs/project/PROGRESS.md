@@ -1103,6 +1103,32 @@ Sessione di fix operativi sul flusso DM/scraping (branch `feature/advanced-scrap
 
 ---
 
+## [2026-07-06] Fase 7H — Motore Fase Bio via browser (alternativa a instagrapi)
+
+Nuovo motore per la Fase Bio: `Campaign.bio_engine` (`'api'` default | `'browser'`), selezionabile per campagna. In modalità `browser`, ogni profilo viene aperto in un browser Patchright reale e si cattura `web_profile_info` dalla pagina (nessun DOM scraping) invece di chiamare `user_info_v1` di instagrapi — quindi **non consuma il cap API** (`SCRAPE_DAILY_LIMIT`). Anti-detection: IG vede solo navigazione, non estrazione via API privata (vedi memory `botoutbound-checkpoint-pattern-api`). Più lento dell'API (~10-18s/profilo) ma molto più tollerato.
+
+**Architettura**:
+- `Campaign.bio_engine` (migrazione Alembic **022**, applicata su Supabase).
+- Fork in `scrape_bios`: se `bio_engine='browser'` → `enqueue_browser_bio_workers` (`app/services/browser_bio.py`) fa fan-out di **1 task ARQ per account** (`browser_bio_account_task` in `task_queue.py`), con stagger via `_defer_by` e `_job_id` deterministico (dedup + resume che ripulisce `arq:job`/`arq:retry` ma non `arq:in-progress`).
+- Ogni task = una **mini-sessione** (`scrape_bios_browser_session`): apre 1 `BrowserSession`, scrapa fino a un cap piccolo (`bio_browser_session_cap` 20-40, per stare sotto `job_timeout=3600s`), poi pausa lunga anti-block via `Retry(defer)`. Job corti, stesso principio del micro-yield della Fase Bio API.
+- **Pool disgiunti** tra account via claim atomico `claim_next_pending` — riusa `Follower.locked_by_account_id`, stesso pattern del lock DM; rilasciato al passaggio a `bio_scraped`.
+- Timing umano: `human_profile_pause` + `maybe_micro_scroll` (~35% dei profili, 4-5s).
+- **Terminazione**: `_maybe_complete_browser_bio` porta la campagna `scraping→ready` in modo atomico (un solo evento emesso) al drain del pool globale o del target → handoff alla Fase DM.
+- **Resilienza**: soft_block/network → backoff `Retry(defer)` (niente sideline silenzioso); rilascio lock resiliente a una sessione DB avvelenata da un blip Supabase (`_resilient_release`: rollback + `UPDATE` by-id).
+- Config nuova in `config.py`: `bio_browser_headless` (default `False`), `bio_browser_scroll_ratio/min_s/max_s`, `bio_browser_daily_limit`, `bio_browser_stagger_min_s/max_s`, `bio_browser_session_cap_min/max`.
+- Frontend: dropdown "Motore Fase Bio" (API/Browser) nel form campagna; wiring create/update backend (update ammesso solo in `draft`).
+- Infra test: `pyproject.toml` → `asyncio_default_test_loop_scope=session` (fix flake pool asyncpg condiviso); `tests/conftest.py` spegne Telegram reale nei test.
+
+**Processo**: TDD subagent-driven, 9 task con review per-task + review whole-branch. La review whole-branch ha trovato e fixato: la Fase Bio via browser non terminava mai la campagna (restava bloccata in `scraping`); soft_block/network andavano in sideline silenzioso invece che in backoff. Un successivo giro di QA adversarial multi-agente ha trovato e fixato altri 2 bug: rilascio lock non resiliente a una sessione DB avvelenata da un blip Supabase; completamento campagna non allineato al drain esatto del cap di sessione.
+
+**Comportamento atteso**: creando/editando una campagna in `draft` si può scegliere il motore Bio; con `browser` la Fase Bio apre un browser per account assegnato invece di chiamare l'API instagrapi, non tocca `scrape_lookups_today`, e la campagna passa da sola a `ready` quando il pool è esaurito o il target è raggiunto.
+
+**File**: `backend/app/models/campaign.py`, `backend/alembic/versions/022_bio_engine.py`, `backend/app/schemas/campaign.py`, `backend/app/config.py`, `backend/app/services/browser_bio.py` (nuovo), `backend/app/workers/task_queue.py`, `backend/app/services/scrape_bios.py`, `backend/app/api/campaigns.py`, frontend form campagna + types, `pyproject.toml`, `tests/conftest.py`, + ~10 file di test nuovi (`test_bio_browser_*`, `test_browser_bio_*`, `test_scrape_bios_browser_*`). **Suite: 405 passed.**
+
+⚠️ Migration 022 applicata su Supabase; branch `feat/bio-scraping-browser-mode` non ancora mergiato. Resta da fare: test e2e reale con browser fisico (login IG + osservazione, a carico dell'operatore); eventuale cleanup dei record di test creati nel DB durante lo sviluppo.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |
