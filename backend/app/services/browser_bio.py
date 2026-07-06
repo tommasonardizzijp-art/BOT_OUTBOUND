@@ -229,6 +229,26 @@ async def human_profile_pause() -> None:
         await asyncio.sleep(extra)
 
 
+async def maybe_micro_scroll(session, *, rng=None) -> bool:
+    """Scroll leggero sul profilo aperto, ~bio_browser_scroll_ratio dei profili,
+    per 4-5s. Simula lo sguardo umano; non su tutti (la costanza è una firma).
+    Difensivo: non solleva. Ritorna True se ha scrollato."""
+    r = rng or random
+    if r.random() >= settings.bio_browser_scroll_ratio:
+        return False
+    try:
+        raw_page = await session.page._get_page()
+        dur = r.uniform(settings.bio_browser_scroll_min_s, settings.bio_browser_scroll_max_s)
+        steps = max(1, int(dur))
+        for _ in range(steps):
+            await raw_page.evaluate("window.scrollBy({top: 300, behavior: 'smooth'})")
+            await asyncio.sleep(1.0)
+        return True
+    except Exception as e:
+        logger.debug(f"[BioBrowser] micro-scroll saltato ({type(e).__name__}: {e})")
+        return False
+
+
 async def claim_next_pending(db, campaign_id: str, account_id: str):
     """Claima atomicamente un Follower pending non lockato per questo account.
     Rilascia prima gli stale lock della campagna (sessioni morte). Ritorna il
