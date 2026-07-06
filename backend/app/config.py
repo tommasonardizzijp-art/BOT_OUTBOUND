@@ -143,6 +143,19 @@ class Settings(BaseSettings):
     bio_browser_batch_min: int = 10               # min profili scrapati per pausa
     bio_browser_batch_max: int = 15               # max profili scrapati per pausa
 
+    # --- Motore Fase Bio via browser (bio_engine='browser') ---
+    bio_browser_headless: bool = False          # test: finestra visibile; prod: True
+    bio_browser_scroll_ratio: float = 0.35      # frazione profili con micro-scroll
+    bio_browser_scroll_min_s: float = 4.0
+    bio_browser_scroll_max_s: float = 5.0
+    bio_browser_daily_limit: int | None = None  # cap opzionale profili/account/giorno (None = off)
+    bio_browser_stagger_min_s: float = 60.0     # differita prima apertura per account
+    bio_browser_stagger_max_s: float = 180.0
+    # Cap profili per mini-sessione: PICCOLO (browser ~15s/profilo → deve stare
+    # sotto job_timeout=3600s). Distinto da bio_session_cap_min/max (path API).
+    bio_browser_session_cap_min: int = 20
+    bio_browser_session_cap_max: int = 40
+
     # ── App-like media fetch dopo user_info in Fase Bio (Ramo B) ──
     # DISATTIVO di default. Su sessione API "nuda" ogni user_medias_v1 e' una 2a
     # chiamata a gap zero dopo user_info, sull'endpoint /feed/user che IG rate-limita
