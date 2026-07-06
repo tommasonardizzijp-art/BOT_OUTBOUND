@@ -513,10 +513,32 @@ def browser_bio_job_id(campaign_id: str, account_id: str) -> str:
     return f"biobrowser:{campaign_id}:{account_id}"
 
 
+def browser_bio_redis_keys(campaign_id: str, account_id: str) -> tuple[str, str, str]:
+    """Mirror di `dm_worker_redis_keys` (work_enqueue.py) per i job Bio browser."""
+    job_id = browser_bio_job_id(campaign_id, account_id)
+    return (
+        f"arq:job:{job_id}",
+        f"arq:retry:{job_id}",
+        f"arq:in-progress:{job_id}",
+    )
+
+
 async def enqueue_browser_bio_workers(campaign_id: str) -> int:
     """Fan-out: un task ARQ per account scraping, con stagger crescente via
     _defer_by (partenze differite) e _job_id deterministico (dedup, come i DM).
-    Ritorna il numero di task accodati."""
+
+    Stessa disciplina di `_reenqueue_phase` in work_enqueue.py: un job
+    parcheggiato in `Retry(defer=...)` (pausa lunga anti-block) resta dedup-ato
+    da ARQ sul suo `_job_id` finche' le chiavi `arq:job`/`arq:retry` non
+    vengono cancellate. Senza questo, uno stop→resume durante la pausa lunga
+    sarebbe un no-op silenzioso (il job non si risveglia mai). Se il job e'
+    gia' 'in-progress' (worker vivo in questo momento) NON lo cancelliamo ne'
+    lo ri-accodiamo, per non far partire un secondo worker concorrente sullo
+    stesso account.
+
+    Ritorna il numero di account ORA schedulati: sia quelli appena accodati
+    sia quelli gia' in esecuzione (in-progress), cosi' l'evento "N account in
+    parallelo" del chiamante resta veritiero."""
     accounts = await _scraping_accounts_of_campaign(campaign_id)
     if not accounts:
         return 0
@@ -526,12 +548,19 @@ async def enqueue_browser_bio_workers(campaign_id: str) -> int:
     n = 0
     try:
         for idx, (account_id, _username) in enumerate(accounts):
+            job_id = browser_bio_job_id(campaign_id, account_id)
+            job_key, retry_key, in_progress_key = browser_bio_redis_keys(campaign_id, account_id)
+            if await redis.exists(in_progress_key):
+                logger.info(f"[BioBrowser] {job_id} gia' in esecuzione — skip enqueue duplicato")
+                n += 1
+                continue
+            await redis.delete(job_key, retry_key)
             defer = 0 if idx == 0 else int(random.uniform(lo, hi) * idx)
             await redis.enqueue_job(
                 "browser_bio_account_task",
                 campaign_id,
                 account_id,
-                _job_id=browser_bio_job_id(campaign_id, account_id),
+                _job_id=job_id,
                 _defer_by=defer,
                 _queue_name=ARQ_MAIN_QUEUE,
             )

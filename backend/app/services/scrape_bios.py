@@ -81,8 +81,17 @@ async def scrape_bios(campaign_id: str) -> int | None:
 
         if campaign.bio_engine == 'browser':
             from app.services.browser_bio import enqueue_browser_bio_workers
-            n = await enqueue_browser_bio_workers(campaign_id)
             from app.utils.events import emit as emit_event
+            try:
+                n = await enqueue_browser_bio_workers(campaign_id)
+            except Exception as e:
+                logger.error(f"[Bio] Avvio Fase Bio browser fallito: {e}")
+                emit_event(
+                    campaign_id, "scrape_stopped",
+                    "Avvio Fase Bio browser fallito (rete/redis?) — riprova",
+                    level="error",
+                )
+                raise
             if n == 0:
                 campaign.status = CampaignStatus.error
                 campaign.scrape_outcome = "scrape_no_account"
