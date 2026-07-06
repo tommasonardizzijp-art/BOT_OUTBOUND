@@ -524,17 +524,20 @@ async def enqueue_browser_bio_workers(campaign_id: str) -> int:
     lo = min(settings.bio_browser_stagger_min_s, settings.bio_browser_stagger_max_s)
     hi = max(settings.bio_browser_stagger_min_s, settings.bio_browser_stagger_max_s)
     n = 0
-    for idx, (account_id, _username) in enumerate(accounts):
-        defer = 0 if idx == 0 else int(random.uniform(lo, hi) * idx)
-        await redis.enqueue_job(
-            "browser_bio_account_task",
-            campaign_id,
-            account_id,
-            _job_id=browser_bio_job_id(campaign_id, account_id),
-            _defer_by=defer,
-            _queue_name=ARQ_MAIN_QUEUE,
-        )
-        n += 1
+    try:
+        for idx, (account_id, _username) in enumerate(accounts):
+            defer = 0 if idx == 0 else int(random.uniform(lo, hi) * idx)
+            await redis.enqueue_job(
+                "browser_bio_account_task",
+                campaign_id,
+                account_id,
+                _job_id=browser_bio_job_id(campaign_id, account_id),
+                _defer_by=defer,
+                _queue_name=ARQ_MAIN_QUEUE,
+            )
+            n += 1
+    finally:
+        await redis.aclose()  # non lasciare la connessione ARQ aperta (come le helper in work_enqueue)
     return n
 
 
