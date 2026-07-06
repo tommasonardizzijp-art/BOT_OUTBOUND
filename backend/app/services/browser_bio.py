@@ -39,6 +39,13 @@ from app.browser.context_manager import BrowserSession
 WEB_APP_ID = "936619743392459"
 _WEB_PROFILE_PATH = "/api/v1/users/web_profile_info/"
 
+# Backstop iterazioni per mini-sessione: `cap` conta solo gli outcome 'done'. Un pool
+# di pending prevalentemente private/not_found/error potrebbe non raggiungere mai
+# `cap` pur richiedendo moltissime iterazioni (ognuna con un human_profile_pause di
+# 5-10s+), rischiando di sforare job_timeout. Limite totale iterazioni (done+skip) =
+# cap * questo moltiplicatore.
+MAX_SESSION_ITERATIONS_MULTIPLIER = 5
+
 
 def _to_int(v):
     try:
@@ -326,14 +333,17 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
             return None
 
     cap = pick_session_cap(settings.bio_browser_session_cap_min, settings.bio_browser_session_cap_max)
-    processed = 0
+    max_iterations = cap * MAX_SESSION_ITERATIONS_MULTIPLIER
+    done_count = 0
+    iterations = 0
+    target_reached = False
     session = None
     try:
         session = BrowserSession(account_id, headless=settings.bio_browser_headless)
         await session.open()
         await session.page.ensure_logged_in(account_id)
 
-        while processed < cap:
+        while done_count < cap and iterations < max_iterations:
             async with AsyncSessionLocal() as db:
                 if await is_halted(db):
                     return None
@@ -344,6 +354,18 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     CampaignStatus.scraping, CampaignStatus.scraping_break
                 ):
                     return None
+
+                # Re-check del target globale ad ogni iterazione: con piu' sessioni
+                # per-account in parallelo il pre-check fatto prima del loop puo'
+                # essere superato nel frattempo (evita overshoot su bio_target).
+                bio_done_total = await db.scalar(
+                    select(func.count()).select_from(Follower).where(
+                        Follower.campaign_id == campaign_id,
+                        Follower.status == FollowerStatus.bio_scraped))
+                if not bio_should_continue(campaign.bio_target, bio_done_total or 0):
+                    target_reached = True
+                    break
+
                 follower = await claim_next_pending(db, campaign_id, account_id)
                 if follower is None:
                     return None  # pool globale esaurito
@@ -353,8 +375,9 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     logger.warning(f"[BioBrowser] @{follower.username} errore inatteso ({e}) — skip")
                     outcome, err = "error", e
 
+                iterations += 1
                 if outcome == "done":
-                    processed += 1
+                    done_count += 1
                     emit_event(campaign_id, "scrape_progress", f"@{follower.username} bio via browser")
                 elif outcome in ("not_found", "private", "error"):
                     follower.status = FollowerStatus.skipped
@@ -371,17 +394,42 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     logger.warning(f"[BioBrowser] stop sessione ({outcome}) su @{follower.username}: {err}")
                     emit_event(campaign_id, "scrape_stopped", f"Sessione browser fermata: {outcome}", level="warn")
                     return None
+                else:
+                    # Outcome inatteso (fetch_and_store_bio_browser cambiato senza
+                    # aggiornare qui): non stranare il follower (pending+locked per
+                    # sempre). Skip difensivo, libera il lock, conta come iterazione.
+                    follower.status = FollowerStatus.skipped
+                    follower.skip_reason = "browser_unknown"
+                    follower.locked_by_account_id = None
+                    follower.locked_at = None
+                    follower.updated_at = datetime.utcnow()
+                    await db.commit()
+                    logger.warning(f"[BioBrowser] @{follower.username} outcome inatteso '{outcome}' — skip difensivo")
 
             await maybe_micro_scroll(session)
             await human_profile_pause()
 
-        # cap raggiunto → pausa lunga anti-block via defer
-        minutes = random.uniform(
-            getattr(campaign, "scrape_break_minutes_min", 30) or 30,
-            getattr(campaign, "scrape_break_minutes_max", 45) or 45,
+        if target_reached:
+            return None
+
+        if done_count >= cap:
+            # cap raggiunto → pausa lunga anti-block via defer
+            minutes = random.uniform(
+                getattr(campaign, "scrape_break_minutes_min", 30) or 30,
+                getattr(campaign, "scrape_break_minutes_max", 45) or 45,
+            )
+            emit_event(campaign_id, "scrape_break", f"Pausa bio browser {int(minutes)} min")
+            return max(60, int(minutes * 60))
+
+        # Backstop iterazioni raggiunto senza completare il cap di bio reali: pool
+        # skip-heavy (private/not_found/error). Defer BREVE (non la pausa lunga
+        # anti-block) cosi' la prossima mini-sessione riprende subito a smaltire
+        # il pool invece di aspettare 30-45 min senza motivo.
+        logger.info(
+            f"[BioBrowser] backstop iterazioni ({iterations}/{max_iterations}) "
+            f"raggiunto con solo {done_count}/{cap} bio reali — pool skip-heavy, defer breve"
         )
-        emit_event(campaign_id, "scrape_break", f"Pausa bio browser {int(minutes)} min")
-        return max(60, int(minutes * 60))
+        return 60
     except Exception as e:
         logger.warning(f"[BioBrowser] mini-sessione @{account_id[:8]} fallita ({type(e).__name__}: {e})")
         # errore d'apertura/login: breve retry via defer, non perde i pending
