@@ -308,6 +308,29 @@ async def on_startup(ctx: dict) -> None:
         logger.error(f"[Startup] Cold-start guard failed: {e}")
 
 
+async def browser_bio_account_task(ctx: dict, campaign_id: str, account_id: str) -> None:
+    """ARQ task: mini-sessione bio via browser per UN account. Job corto; la
+    pausa lunga è un Retry(defer). Un errore di questo account non tocca gli altri."""
+    from arq.worker import Retry
+    from app.services.browser_bio import scrape_bios_browser_session
+    from app.utils.db_resilience import is_transient_db_error
+    from loguru import logger
+
+    logger.info(f"[ARQ] browser_bio_account_task start campaign={campaign_id} account={account_id}")
+    try:
+        defer = await scrape_bios_browser_session(campaign_id, account_id)
+        if defer:
+            logger.info(f"[ARQ] browser_bio_account_task pausa — defer {defer}s")
+            raise Retry(defer=defer)
+    except Retry:
+        raise
+    except Exception as e:
+        if is_transient_db_error(e):
+            raise Retry(defer=60)
+        logger.exception(f"[ARQ] browser_bio_account_task failed: {e}")
+        raise
+
+
 class WorkerSettings:
     functions = [
         scrape_followers_task,
@@ -322,6 +345,9 @@ class WorkerSettings:
         # esaurire il default (5) durante un'outage prolungata.
         func(resolve_imports_task, max_tries=10000),
         qualify_leads_task,
+        # defer ripetuti sono il funzionamento normale (pausa lunga anti-block),
+        # come scrape_bios_task.
+        func(browser_bio_account_task, max_tries=10000),
     ]
     cron_jobs = []
     queue_name = ARQ_MAIN_QUEUE

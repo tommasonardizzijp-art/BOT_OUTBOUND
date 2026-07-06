@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import arq
 from loguru import logger
 from sqlalchemy import update
 
@@ -33,6 +34,7 @@ from app.database import AsyncSessionLocal
 from app.models.follower import FollowerStatus
 from app.services.bot_state_service import is_halted
 from app.services.scrape_bios import bio_should_continue, pick_session_cap
+from app.services.work_enqueue import arq_redis_settings, ARQ_MAIN_QUEUE
 from app.browser.context_manager import BrowserSession
 
 # App-id pubblico del web di Instagram (usato dal suo stesso JS per web_profile_info).
@@ -505,6 +507,35 @@ async def _scraping_accounts_of_campaign(campaign_id: str):
             )
         )).all()
     return [(r[0], r[1]) for r in rows]
+
+
+def browser_bio_job_id(campaign_id: str, account_id: str) -> str:
+    return f"biobrowser:{campaign_id}:{account_id}"
+
+
+async def enqueue_browser_bio_workers(campaign_id: str) -> int:
+    """Fan-out: un task ARQ per account scraping, con stagger crescente via
+    _defer_by (partenze differite) e _job_id deterministico (dedup, come i DM).
+    Ritorna il numero di task accodati."""
+    accounts = await _scraping_accounts_of_campaign(campaign_id)
+    if not accounts:
+        return 0
+    redis = await arq.create_pool(arq_redis_settings())
+    lo = min(settings.bio_browser_stagger_min_s, settings.bio_browser_stagger_max_s)
+    hi = max(settings.bio_browser_stagger_min_s, settings.bio_browser_stagger_max_s)
+    n = 0
+    for idx, (account_id, _username) in enumerate(accounts):
+        defer = 0 if idx == 0 else int(random.uniform(lo, hi) * idx)
+        await redis.enqueue_job(
+            "browser_bio_account_task",
+            campaign_id,
+            account_id,
+            _job_id=browser_bio_job_id(campaign_id, account_id),
+            _defer_by=defer,
+            _queue_name=ARQ_MAIN_QUEUE,
+        )
+        n += 1
+    return n
 
 
 async def run_pause_browser_activity(campaign_id: str, account_id: str, username: str | None = None) -> int:
