@@ -70,6 +70,11 @@ class Campaign(Base):
     # rimosso (la lista DM web mostra solo il nome visualizzato, non username/pk)
     # — il backend usa sempre l'API. Valore accettato per retrocompat. Migration 020.
     inbox_engine: Mapped[str] = mapped_column(String(10), nullable=False, default='api', server_default='api')
+    # Motore Fase Bio. 'api' = instagrapi (user_info, veloce, consuma cap). Default.
+    # 'browser' = Patchright (web_profile_info, prudente, no cap API). Vedi migration 021.
+    bio_engine: Mapped[str] = mapped_column(
+        String(10), nullable=False, default='api', server_default='api'
+    )
     list_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bio_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 'completed' | 'partial' | 'rate_limited' — esito ultimo scraping

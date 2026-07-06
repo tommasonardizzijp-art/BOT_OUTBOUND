@@ -25,6 +25,9 @@ class CampaignCreate(BaseModel):
     # DOM e' stato rimosso (la lista DM web non espone username/pk) — il backend
     # usa sempre l'API. Il valore resta accettato per retrocompatibilita'.
     inbox_engine: str = Field(default='api', pattern='^(browser|api)$')
+    # Motore Fase Bio. 'api' = instagrapi (veloce, consuma cap). 'browser' = Patchright
+    # (prudente, no cap API). Vedi migration 022.
+    bio_engine: str = Field(default='api', pattern='^(api|browser)$')
     # Session break config
     scrape_session_size: int = Field(default=250, ge=10, le=5000)
     scrape_break_minutes_min: int = Field(default=30, ge=5, le=240)
@@ -58,6 +61,7 @@ class CampaignUpdate(BaseModel):
     approval_sample_size: int | None = Field(default=None, ge=1, le=50)
     scrape_mode: str | None = Field(default=None, pattern='^(followers|following|dm_threads)$')
     inbox_engine: str | None = Field(default=None, pattern='^(browser|api)$')
+    bio_engine: str | None = Field(default=None, pattern='^(api|browser)$')
     # Session break config
     scrape_session_size: int | None = Field(default=None, ge=10, le=5000)
     scrape_break_minutes_min: int | None = Field(default=None, ge=5, le=240)
@@ -91,6 +95,7 @@ class CampaignResponse(BaseModel):
     approval_sample_size: int
     scrape_mode: str
     inbox_engine: str = 'api'
+    bio_engine: str = 'api'
     scrape_completed_at: datetime | None
     started_at: datetime | None
     completed_at: datetime | None
