@@ -22,10 +22,11 @@ import asyncio
 import json as _json
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from loguru import logger
+from sqlalchemy import update
 
 from app.config import settings
 from app.models.follower import FollowerStatus
@@ -226,6 +227,50 @@ async def human_profile_pause() -> None:
         extra = random.uniform(15.0, 45.0)
         logger.debug(f"[BioBrowser] pausa breve {extra:.0f}s (distrazione)")
         await asyncio.sleep(extra)
+
+
+async def claim_next_pending(db, campaign_id: str, account_id: str):
+    """Claima atomicamente un Follower pending non lockato per questo account.
+    Rilascia prima gli stale lock della campagna (sessioni morte). Ritorna il
+    Follower claimato o None. Optimistic lock: safe con più account paralleli
+    (SQLite WAL / Postgres). Stesso schema del claim DM in campaign_orchestrator.
+    """
+    from sqlalchemy import select
+    from app.models.follower import Follower, FollowerStatus
+    from app.services.campaign_orchestrator import LOCK_TIMEOUT_MINUTES
+
+    stale_cutoff = datetime.utcnow() - timedelta(minutes=LOCK_TIMEOUT_MINUTES)
+    await db.execute(
+        update(Follower).where(
+            Follower.campaign_id == campaign_id,
+            Follower.status == FollowerStatus.pending,
+            Follower.locked_by_account_id.isnot(None),
+            Follower.locked_at < stale_cutoff,
+        ).values(locked_by_account_id=None, locked_at=None)
+    )
+    await db.commit()
+
+    for _ in range(25):  # ritenta se un altro account claima tra SELECT e UPDATE
+        follower = (await db.execute(
+            select(Follower).where(
+                Follower.campaign_id == campaign_id,
+                Follower.status == FollowerStatus.pending,
+                Follower.locked_by_account_id.is_(None),
+            ).limit(1)
+        )).scalar_one_or_none()
+        if follower is None:
+            return None
+        claim = await db.execute(
+            update(Follower).where(
+                Follower.id == follower.id,
+                Follower.locked_by_account_id.is_(None),
+            ).values(locked_by_account_id=account_id, locked_at=datetime.utcnow())
+        )
+        await db.commit()
+        if claim.rowcount == 1:
+            await db.refresh(follower)
+            return follower
+    return None
 
 
 async def _scrape_batch(campaign, db, browser_session, count: int) -> int:
