@@ -29,7 +29,11 @@ from loguru import logger
 from sqlalchemy import update
 
 from app.config import settings
+from app.database import AsyncSessionLocal
 from app.models.follower import FollowerStatus
+from app.services.bot_state_service import is_halted
+from app.services.scrape_bios import bio_should_continue, pick_session_cap
+from app.browser.context_manager import BrowserSession
 
 # App-id pubblico del web di Instagram (usato dal suo stesso JS per web_profile_info).
 WEB_APP_ID = "936619743392459"
@@ -291,6 +295,103 @@ async def claim_next_pending(db, campaign_id: str, account_id: str):
             await db.refresh(follower)
             return follower
     return None
+
+
+async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int | None:
+    """Una mini-sessione browser per UN account: apre, scrapa fino a un cap di
+    profili claimati (pool disgiunto via claim_next_pending), chiude. Ritorna i
+    secondi di defer per la pausa lunga anti-block, o None se non c'è più lavoro.
+    Job corto: mai oltre job_timeout. Difensiva sui singoli profili."""
+    from sqlalchemy import select, func
+    from app.models.campaign import Campaign, CampaignStatus
+    from app.models.follower import Follower, FollowerStatus
+    from app.utils.events import emit as emit_event
+
+    async with AsyncSessionLocal() as db:
+        campaign = (await db.execute(
+            select(Campaign).where(Campaign.id == campaign_id)
+        )).scalar_one_or_none()
+        if campaign is None or campaign.status not in (
+            CampaignStatus.scraping, CampaignStatus.scraping_break
+        ):
+            return None
+        if await is_halted(db):
+            return None
+
+        done = await db.scalar(
+            select(func.count()).select_from(Follower).where(
+                Follower.campaign_id == campaign_id,
+                Follower.status == FollowerStatus.bio_scraped))
+        if not bio_should_continue(campaign.bio_target, done or 0):
+            return None
+
+    cap = pick_session_cap(settings.bio_browser_session_cap_min, settings.bio_browser_session_cap_max)
+    processed = 0
+    session = None
+    try:
+        session = BrowserSession(account_id, headless=settings.bio_browser_headless)
+        await session.open()
+        await session.page.ensure_logged_in(account_id)
+
+        while processed < cap:
+            async with AsyncSessionLocal() as db:
+                if await is_halted(db):
+                    return None
+                campaign = (await db.execute(
+                    select(Campaign).where(Campaign.id == campaign_id)
+                )).scalar_one_or_none()
+                if campaign is None or campaign.status not in (
+                    CampaignStatus.scraping, CampaignStatus.scraping_break
+                ):
+                    return None
+                follower = await claim_next_pending(db, campaign_id, account_id)
+                if follower is None:
+                    return None  # pool globale esaurito
+                try:
+                    outcome, err = await fetch_and_store_bio_browser(follower, campaign, db, session)
+                except Exception as e:
+                    logger.warning(f"[BioBrowser] @{follower.username} errore inatteso ({e}) — skip")
+                    outcome, err = "error", e
+
+                if outcome == "done":
+                    processed += 1
+                    emit_event(campaign_id, "scrape_progress", f"@{follower.username} bio via browser")
+                elif outcome in ("not_found", "private", "error"):
+                    follower.status = FollowerStatus.skipped
+                    follower.skip_reason = f"browser_{outcome}"
+                    follower.locked_by_account_id = None
+                    follower.locked_at = None
+                    follower.updated_at = datetime.utcnow()
+                    await db.commit()
+                elif outcome in ("soft_block", "network"):
+                    # non bruciare i pending: rilascia il claim, ferma la sessione
+                    follower.locked_by_account_id = None
+                    follower.locked_at = None
+                    await db.commit()
+                    logger.warning(f"[BioBrowser] stop sessione ({outcome}) su @{follower.username}: {err}")
+                    emit_event(campaign_id, "scrape_stopped", f"Sessione browser fermata: {outcome}", level="warn")
+                    return None
+
+            await maybe_micro_scroll(session)
+            await human_profile_pause()
+
+        # cap raggiunto → pausa lunga anti-block via defer
+        minutes = random.uniform(
+            getattr(campaign, "scrape_break_minutes_min", 30) or 30,
+            getattr(campaign, "scrape_break_minutes_max", 45) or 45,
+        )
+        emit_event(campaign_id, "scrape_break", f"Pausa bio browser {int(minutes)} min")
+        return max(60, int(minutes * 60))
+    except Exception as e:
+        logger.warning(f"[BioBrowser] mini-sessione @{account_id[:8]} fallita ({type(e).__name__}: {e})")
+        # errore d'apertura/login: breve retry via defer, non perde i pending
+        return 300
+    finally:
+        if session is not None:
+            try:
+                await session.close()
+            except Exception:
+                pass
 
 
 async def _scrape_batch(campaign, db, browser_session, count: int) -> int:
