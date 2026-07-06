@@ -199,6 +199,8 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     follower.bio_links = _json.dumps(contacts.bio_links) if contacts.bio_links else None
     follower.contact_source = _json.dumps(contacts.sources) if contacts.sources else None
     follower.status = FollowerStatus.bio_scraped
+    follower.locked_by_account_id = None   # C2: libera il claim atomico (Task 4)
+    follower.locked_at = None
     await db.commit()
 
     await upsert_lead(
