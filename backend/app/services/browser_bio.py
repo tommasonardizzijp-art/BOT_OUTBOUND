@@ -366,6 +366,35 @@ async def _maybe_complete_browser_bio(campaign_id: str) -> bool:
         return False  # gia' transitata da un'altra race (o non era in scraping/*_break)
 
 
+async def _resilient_release(db, follower_id, *, status=None, skip_reason=None):
+    """Rilascia il lock (ed eventualmente marca lo status) resiliente a una sessione
+    avvelenata da un commit fallito a monte: rollback preventivo + UPDATE per id
+    (non dipende dallo stato dell'oggetto ORM, che dopo un flush fallito e' inservibile).
+
+    Perche' esiste: `fetch_and_store_bio_browser` fa il proprio `db.commit()` su una
+    riga gia' modificata (bio scritta). Se quel commit fallisce nel flush (errore
+    transitorio Postgres/Supabase: deadlock, statement timeout, connessione caduta),
+    la AsyncSession resta in stato PendingRollback: qualunque `db.commit()`
+    successivo sulla STESSA sessione fallisce a sua volta, propagando all'except
+    esterno (`return 300`) e lasciando il follower pending+LOCKED (il lock era gia'
+    stato committato dal claim) fino al cron di stale-lock (20 min). Un rollback
+    preventivo + UPDATE per id (non tocca l'oggetto ORM, expired dopo il rollback)
+    rende il rilascio del lock indipendente dall'esito del commit di `fetch`.
+    """
+    from app.models.follower import Follower
+    try:
+        await db.rollback()
+    except Exception:
+        pass
+    vals = {"locked_by_account_id": None, "locked_at": None, "updated_at": datetime.utcnow()}
+    if status is not None:
+        vals["status"] = status
+    if skip_reason is not None:
+        vals["skip_reason"] = skip_reason
+    await db.execute(update(Follower).where(Follower.id == follower_id).values(**vals))
+    await db.commit()
+
+
 async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int | None:
     """Una mini-sessione browser per UN account: apre, scrapa fino a un cap di
     profili claimati (pool disgiunto via claim_next_pending), chiude. Ritorna i
@@ -433,23 +462,31 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                 if follower is None:
                     await _maybe_complete_browser_bio(campaign_id)
                     return None  # pool globale esaurito
+
+                # Cattura username/id SUBITO dopo il claim (l'oggetto e' appena stato
+                # refresh-ato: accesso sicuro, zero query). Se il commit di
+                # `fetch_and_store_bio_browser` fallisce su un errore transitorio a
+                # monte, la sessione entra in stato PendingRollback e QUALSIASI accesso
+                # successivo agli attributi dell'oggetto `follower` (persino un
+                # attributo gia' caricato come `.id`) rilancia PendingRollbackError —
+                # non solo dopo un rollback esplicito, ma dal momento stesso del flush
+                # fallito. Usare da qui in poi solo le variabili locali `uname`/`fid`,
+                # mai piu' `follower.<attr>`, evita di ri-toccare l'oggetto avvelenato.
+                uname, fid = follower.username, follower.id
                 try:
                     outcome, err = await fetch_and_store_bio_browser(follower, campaign, db, session)
                 except Exception as e:
-                    logger.warning(f"[BioBrowser] @{follower.username} errore inatteso ({e}) — skip")
+                    logger.warning(f"[BioBrowser] @{uname} errore inatteso ({e}) — skip")
                     outcome, err = "error", e
 
                 iterations += 1
                 if outcome == "done":
                     done_count += 1
-                    emit_event(campaign_id, "scrape_progress", f"@{follower.username} bio via browser")
+                    emit_event(campaign_id, "scrape_progress", f"@{uname} bio via browser")
                 elif outcome in ("not_found", "private", "error"):
-                    follower.status = FollowerStatus.skipped
-                    follower.skip_reason = f"browser_{outcome}"
-                    follower.locked_by_account_id = None
-                    follower.locked_at = None
-                    follower.updated_at = datetime.utcnow()
-                    await db.commit()
+                    await _resilient_release(
+                        db, fid, status=FollowerStatus.skipped, skip_reason=f"browser_{outcome}"
+                    )
                 elif outcome == "soft_block":
                     # Non bruciare i pending: rilascia il claim e fai backoff invece di
                     # `return None` (che lasciava l'account silenziosamente sideline: il
@@ -461,34 +498,27 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     # Redis/DB oltre il lock per-follower gia' presente); l'operatore
                     # mantiene comunque la pausa manuale dal control plane, e ogni
                     # soft-block resta visibile via l'evento qui sotto.
-                    follower.locked_by_account_id = None
-                    follower.locked_at = None
-                    await db.commit()
-                    logger.warning(f"[BioBrowser] soft-block su @{follower.username}: {err} — backoff")
+                    await _resilient_release(db, fid)
+                    logger.warning(f"[BioBrowser] soft-block su @{uname}: {err} — backoff")
                     emit_event(
                         campaign_id, "scrape_progress",
-                        f"@{follower.username}: soft-block (429) — backoff", level="warn",
+                        f"@{uname}: soft-block (429) — backoff", level="warn",
                     )
                     return random.randint(900, 1800)  # 15-30 min
                 elif outcome == "network":
                     # Stessa logica del soft_block: rilascia il claim, retry breve
                     # invece di sideline silenzioso.
-                    follower.locked_by_account_id = None
-                    follower.locked_at = None
-                    await db.commit()
-                    logger.warning(f"[BioBrowser] errore rete su @{follower.username}: {err} — retry breve")
+                    await _resilient_release(db, fid)
+                    logger.warning(f"[BioBrowser] errore rete su @{uname}: {err} — retry breve")
                     return 180  # 3 min
                 else:
                     # Outcome inatteso (fetch_and_store_bio_browser cambiato senza
                     # aggiornare qui): non stranare il follower (pending+locked per
                     # sempre). Skip difensivo, libera il lock, conta come iterazione.
-                    follower.status = FollowerStatus.skipped
-                    follower.skip_reason = "browser_unknown"
-                    follower.locked_by_account_id = None
-                    follower.locked_at = None
-                    follower.updated_at = datetime.utcnow()
-                    await db.commit()
-                    logger.warning(f"[BioBrowser] @{follower.username} outcome inatteso '{outcome}' — skip difensivo")
+                    await _resilient_release(
+                        db, fid, status=FollowerStatus.skipped, skip_reason="browser_unknown"
+                    )
+                    logger.warning(f"[BioBrowser] @{uname} outcome inatteso '{outcome}' — skip difensivo")
 
             await maybe_micro_scroll(session)
             await human_profile_pause()
@@ -498,6 +528,13 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
             return None
 
         if done_count >= cap:
+            # Prima di pausare, prova a completare: se un solo account ha appena
+            # drenato l'ULTIMO pending esattamente al cap, il `while` esce da qui
+            # (non da `claim -> None`) e senza questo check la campagna resterebbe
+            # 'scraping' con pool vuoto per l'intera pausa anti-block (30-45 min) a
+            # vuoto, invece di andare subito 'ready'.
+            if await _maybe_complete_browser_bio(campaign_id):
+                return None  # pool drenato esattamente al cap -> completa subito, niente pausa inutile
             # cap raggiunto → pausa lunga anti-block via defer
             minutes = random.uniform(
                 getattr(campaign, "scrape_break_minutes_min", 30) or 30,
