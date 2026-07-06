@@ -12,10 +12,13 @@ def test_job_id_deterministic():
 @pytest.mark.asyncio
 async def test_enqueue_one_task_per_account(monkeypatch):
     calls = []
+    closed = {"n": 0}
 
     class _FakeRedis:
         async def enqueue_job(self, *args, **kwargs):
             calls.append((args, kwargs))
+        async def aclose(self):
+            closed["n"] += 1
 
     async def fake_pool(*a, **k):
         return _FakeRedis()
@@ -35,3 +38,4 @@ async def test_enqueue_one_task_per_account(monkeypatch):
     assert kwargs1["_job_id"] == "biobrowser:camp1:accB"
     assert kwargs0.get("_defer_by", 0) == 0
     assert kwargs1["_defer_by"] > 0
+    assert closed["n"] == 1  # il pool ARQ viene chiuso (no leak)
