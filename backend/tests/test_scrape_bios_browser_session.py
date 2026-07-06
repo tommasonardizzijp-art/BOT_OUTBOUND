@@ -113,7 +113,7 @@ async def test_skip_outcome_releases_lock_and_continues(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_soft_block_stops_and_releases_lock(monkeypatch):
+async def test_soft_block_backoff_defer_and_releases_lock(monkeypatch):
     base = 962000000000 + int(datetime.utcnow().timestamp()) % 100000
     async with AsyncSessionLocal() as db:
         camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
@@ -133,7 +133,9 @@ async def test_soft_block_stops_and_releases_lock(monkeypatch):
     monkeypatch.setattr(browser_bio, "maybe_micro_scroll", lambda *a, **k: _anoop_false())
 
     defer = await browser_bio.scrape_bios_browser_session(cid, "acc-A")
-    assert defer is None  # sessione fermata, nessun defer di pausa lunga
+    # non piu' None: backoff defer (15-30min) cosi' l'account NON resta sideline,
+    # il worker fa Retry(defer=...) e riprova piu' tardi invece di abbandonare la run.
+    assert isinstance(defer, int) and 900 <= defer <= 1800
 
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select
@@ -142,6 +144,93 @@ async def test_soft_block_stops_and_releases_lock(monkeypatch):
         )).scalar_one()
         assert f.status == FollowerStatus.pending  # non bruciato
         assert f.locked_by_account_id is None       # lock rilasciato
+
+        # la campagna resta scraping: il backoff non e' un completamento
+        c = (await db.execute(
+            select(Campaign).where(Campaign.id == cid)
+        )).scalar_one()
+        assert c.status == CampaignStatus.scraping
+
+
+@pytest.mark.asyncio
+async def test_network_returns_short_defer(monkeypatch):
+    base = 964000000000 + int(datetime.utcnow().timestamp()) % 100000
+    async with AsyncSessionLocal() as db:
+        camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
+        db.add(camp); await db.flush()
+        db.add(Follower(campaign_id=camp.id, ig_user_id=base,
+                        username=f"u{base}", status=FollowerStatus.pending))
+        await db.commit()
+        cid = camp.id
+
+    monkeypatch.setattr(browser_bio, "BrowserSession", _FakeSession)
+    monkeypatch.setattr(browser_bio, "pick_session_cap", lambda *a, **k: 5)
+
+    async def fake_fetch(follower, campaign, db, session):
+        return "network", Exception("net down")
+    monkeypatch.setattr(browser_bio, "fetch_and_store_bio_browser", fake_fetch)
+    monkeypatch.setattr(browser_bio, "human_profile_pause", lambda: _anoop())
+    monkeypatch.setattr(browser_bio, "maybe_micro_scroll", lambda *a, **k: _anoop_false())
+
+    defer = await browser_bio.scrape_bios_browser_session(cid, "acc-A")
+    assert defer == 180  # retry breve (3 min), non sideline silenzioso
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select
+        f = (await db.execute(
+            select(Follower).where(Follower.campaign_id == cid)
+        )).scalar_one()
+        assert f.status == FollowerStatus.pending  # non bruciato
+        assert f.locked_by_account_id is None       # lock rilasciato
+
+
+@pytest.mark.asyncio
+async def test_pool_drained_completes_campaign(monkeypatch):
+    """Pool piccolo, cap abbastanza grande da svuotarlo tutto: la campagna deve
+    passare a 'ready' e deve partire l'evento scrape_complete (finding 1)."""
+    base = 965000000000 + int(datetime.utcnow().timestamp()) % 100000
+    async with AsyncSessionLocal() as db:
+        camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
+        db.add(camp); await db.flush()
+        for i in range(3):
+            db.add(Follower(campaign_id=camp.id, ig_user_id=base + i,
+                            username=f"u{base+i}", status=FollowerStatus.pending))
+        await db.commit()
+        cid = camp.id
+
+    monkeypatch.setattr(browser_bio, "BrowserSession", _FakeSession)
+    monkeypatch.setattr(browser_bio, "pick_session_cap", lambda *a, **k: 10)  # >> pending
+
+    async def fake_fetch(follower, campaign, db, session):
+        follower.status = FollowerStatus.bio_scraped
+        follower.locked_by_account_id = None
+        follower.locked_at = None
+        await db.commit()
+        return "done", None
+    monkeypatch.setattr(browser_bio, "fetch_and_store_bio_browser", fake_fetch)
+    monkeypatch.setattr(browser_bio, "human_profile_pause", lambda: _anoop())
+    monkeypatch.setattr(browser_bio, "maybe_micro_scroll", lambda *a, **k: _anoop_false())
+
+    # emit e' importato dentro la funzione (`from app.utils.events import emit as
+    # emit_event`), quindi il monkeypatch va sul modulo sorgente `app.utils.events`,
+    # non su `browser_bio` (li' non esiste un attributo modulo-level da patchare).
+    from app.utils import events as events_module
+    emitted = []
+    monkeypatch.setattr(events_module, "emit", lambda *a, **k: emitted.append((a, k)))
+
+    defer = await browser_bio.scrape_bios_browser_session(cid, "acc-A")
+    assert defer is None  # pool esaurito, non e' una pausa-cap
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select
+        c = (await db.execute(
+            select(Campaign).where(Campaign.id == cid)
+        )).scalar_one()
+        assert c.status == CampaignStatus.ready  # handoff verso la Fase DM abilitato
+
+    assert any(call[0][1] == "scrape_complete" for call in emitted), (
+        "scrape_complete non emesso al drain del pool"
+    )
 
 
 @pytest.mark.asyncio
@@ -162,6 +251,17 @@ async def test_pool_exhausted_returns_none(monkeypatch):
 
     defer = await browser_bio.scrape_bios_browser_session(cid, "acc-A")
     assert defer is None
+
+    # Con 0 pending e nessun bio_target, _maybe_complete_browser_bio (finding 1) ORA
+    # porta la campagna a 'ready' invece di lasciarla bloccata su 'scraping' per
+    # sempre: e' il comportamento corretto (handoff verso la Fase DM), non piu' un
+    # side-effect da evitare.
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select
+        c = (await db.execute(
+            select(Campaign).where(Campaign.id == cid)
+        )).scalar_one()
+        assert c.status == CampaignStatus.ready
 
 
 @pytest.mark.asyncio

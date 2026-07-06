@@ -306,6 +306,66 @@ async def claim_next_pending(db, campaign_id: str, account_id: str):
     return None
 
 
+async def _maybe_complete_browser_bio(campaign_id: str) -> bool:
+    """Specchio del completamento lato API (`scrape_bios.py:326-329`): quando il pool
+    globale di pending e' esaurito OPPURE il target e' raggiunto, porta la campagna
+    a 'ready' ed emette 'scrape_complete'. Senza questo il path browser non ha MAI
+    un modo di uscire da 'scraping' (era il bug: la fase restava bloccata per sempre).
+
+    Conta i pending sull'INTERA campagna (non per-account): con piu' account paralleli
+    e' l'ultimo che svuota il pool globale (o fa scattare il target) a completare;
+    finche' un altro account tiene ancora righe pending (anche locked) la campagna
+    resta aperta, e completera' quando quell'account a sua volta esaurira' il pool.
+
+    L'UPDATE e' atomico e condizionato (`status IN (scraping, scraping_break)`) con
+    controllo su `rowcount`: se piu' account/task arrivano qui in corsa, SOLO uno
+    vince la transizione e quindi SOLO uno emette l'evento (no doppio scrape_complete).
+
+    Non tocca `scrape_completed_at`/`scrape_outcome` (di competenza della Fase Lista,
+    coerente col path API che a sua volta non li tocca in questo punto).
+    """
+    from sqlalchemy import select, func
+    from app.models.campaign import Campaign, CampaignStatus
+    from app.models.follower import Follower, FollowerStatus
+    from app.utils.events import emit as emit_event
+
+    async with AsyncSessionLocal() as db:
+        campaign = (await db.execute(
+            select(Campaign).where(Campaign.id == campaign_id)
+        )).scalar_one_or_none()
+        if campaign is None:
+            return False
+
+        pending_count = await db.scalar(
+            select(func.count()).select_from(Follower).where(
+                Follower.campaign_id == campaign_id,
+                Follower.status == FollowerStatus.pending,
+            )
+        ) or 0
+        bio_done = await db.scalar(
+            select(func.count()).select_from(Follower).where(
+                Follower.campaign_id == campaign_id,
+                Follower.status == FollowerStatus.bio_scraped,
+            )
+        ) or 0
+
+        target_reached = campaign.bio_target is not None and bio_done >= campaign.bio_target
+        if pending_count > 0 and not target_reached:
+            return False  # altro account sta ancora smaltendo il pool: non e' finita
+
+        result = await db.execute(
+            update(Campaign).where(
+                Campaign.id == campaign_id,
+                Campaign.status.in_([CampaignStatus.scraping, CampaignStatus.scraping_break]),
+            ).values(status=CampaignStatus.ready, updated_at=datetime.utcnow())
+        )
+        await db.commit()
+        if result.rowcount == 1:
+            emit_event(campaign_id, "scrape_complete", f"Fase Bio (browser) completata: {bio_done} bio")
+            return True
+        return False  # gia' transitata da un'altra race (o non era in scraping/*_break)
+
+
 async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int | None:
     """Una mini-sessione browser per UN account: apre, scrapa fino a un cap di
     profili claimati (pool disgiunto via claim_next_pending), chiude. Ritorna i
@@ -332,6 +392,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                 Follower.campaign_id == campaign_id,
                 Follower.status == FollowerStatus.bio_scraped))
         if not bio_should_continue(campaign.bio_target, done or 0):
+            await _maybe_complete_browser_bio(campaign_id)
             return None
 
     cap = pick_session_cap(settings.bio_browser_session_cap_min, settings.bio_browser_session_cap_max)
@@ -370,6 +431,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
 
                 follower = await claim_next_pending(db, campaign_id, account_id)
                 if follower is None:
+                    await _maybe_complete_browser_bio(campaign_id)
                     return None  # pool globale esaurito
                 try:
                     outcome, err = await fetch_and_store_bio_browser(follower, campaign, db, session)
@@ -388,14 +450,34 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     follower.locked_at = None
                     follower.updated_at = datetime.utcnow()
                     await db.commit()
-                elif outcome in ("soft_block", "network"):
-                    # non bruciare i pending: rilascia il claim, ferma la sessione
+                elif outcome == "soft_block":
+                    # Non bruciare i pending: rilascia il claim e fai backoff invece di
+                    # `return None` (che lasciava l'account silenziosamente sideline: il
+                    # task ARQ finiva senza Retry e non si ri-accodava piu' da solo per
+                    # questa run). Ritornando un defer il worker fa Retry(defer=...) e
+                    # l'account riprova piu' tardi, senza essere abbandonato.
+                    # NB: un guard globale "pausa campagna dopo N soft-block consecutivi
+                    # cross-account" e' rimandato (richiederebbe stato condiviso in
+                    # Redis/DB oltre il lock per-follower gia' presente); l'operatore
+                    # mantiene comunque la pausa manuale dal control plane, e ogni
+                    # soft-block resta visibile via l'evento qui sotto.
                     follower.locked_by_account_id = None
                     follower.locked_at = None
                     await db.commit()
-                    logger.warning(f"[BioBrowser] stop sessione ({outcome}) su @{follower.username}: {err}")
-                    emit_event(campaign_id, "scrape_stopped", f"Sessione browser fermata: {outcome}", level="warn")
-                    return None
+                    logger.warning(f"[BioBrowser] soft-block su @{follower.username}: {err} — backoff")
+                    emit_event(
+                        campaign_id, "scrape_progress",
+                        f"@{follower.username}: soft-block (429) — backoff", level="warn",
+                    )
+                    return random.randint(900, 1800)  # 15-30 min
+                elif outcome == "network":
+                    # Stessa logica del soft_block: rilascia il claim, retry breve
+                    # invece di sideline silenzioso.
+                    follower.locked_by_account_id = None
+                    follower.locked_at = None
+                    await db.commit()
+                    logger.warning(f"[BioBrowser] errore rete su @{follower.username}: {err} — retry breve")
+                    return 180  # 3 min
                 else:
                     # Outcome inatteso (fetch_and_store_bio_browser cambiato senza
                     # aggiornare qui): non stranare il follower (pending+locked per
@@ -412,6 +494,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
             await human_profile_pause()
 
         if target_reached:
+            await _maybe_complete_browser_bio(campaign_id)
             return None
 
         if done_count >= cap:
