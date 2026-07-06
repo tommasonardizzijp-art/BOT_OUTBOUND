@@ -79,6 +79,20 @@ async def scrape_bios(campaign_id: str) -> int | None:
             await db.commit()
             emit_event(campaign_id, "scrape_resume", "Pausa bio terminata, ripresa")
 
+        if campaign.bio_engine == 'browser':
+            from app.services.browser_bio import enqueue_browser_bio_workers
+            n = await enqueue_browser_bio_workers(campaign_id)
+            from app.utils.events import emit as emit_event
+            if n == 0:
+                campaign.status = CampaignStatus.error
+                campaign.scrape_outcome = "scrape_no_account"
+                campaign.updated_at = datetime.utcnow()
+                await db.commit()
+                emit_event(campaign_id, "scrape_stopped", "Nessun account scraping per il motore browser", level="error")
+            else:
+                emit_event(campaign_id, "scrape_start", f"Fase Bio via browser — {n} account in parallelo")
+            return None
+
         pool = None
         account = None
         # bio_target e' un TOTALE, non un per-run: seed done con le bio gia' estratte
@@ -274,11 +288,12 @@ async def scrape_bios(campaign_id: str) -> int | None:
                         # SCALATO dal defer, cosi' la pausa TOTALE resta ~minutes e il re-fire
                         # coincide con scrape_break_until (gia' fissato a now+seconds).
                         spent_seconds = 0
-                        try:
-                            from app.services.browser_bio import run_pause_browser_all_accounts
-                            spent_seconds = await run_pause_browser_all_accounts(campaign_id)
-                        except Exception as e:
-                            logger.warning(f"[Bio] attivita' browser in pausa fallita (ignoro): {e}")
+                        if campaign.bio_engine != 'browser':
+                            try:
+                                from app.services.browser_bio import run_pause_browser_all_accounts
+                                spent_seconds = await run_pause_browser_all_accounts(campaign_id)
+                            except Exception as e:
+                                logger.warning(f"[Bio] attivita' browser in pausa fallita (ignoro): {e}")
 
                         return max(60, seconds - int(spent_seconds or 0))
 
