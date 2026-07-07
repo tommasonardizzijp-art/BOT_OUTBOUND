@@ -402,3 +402,34 @@ async def test_reels_break_exception_does_not_break_session(monkeypatch):
                 Follower.campaign_id == cid,
                 Follower.status == FollowerStatus.bio_scraped))
         assert done == n_followers  # tutti i profili sono comunque stati processati
+
+
+@pytest.mark.asyncio
+async def test_no_reels_break_on_soft_block(monkeypatch):
+    """Su soft_block la sessione si ferma subito (backoff defer): NESSUNA pausa
+    reel deve scattare sul path di stop (cadenza pinnata a 1 per smascherarlo)."""
+    base = 955000000000 + int(datetime.utcnow().timestamp()) % 100000
+    async with AsyncSessionLocal() as db:
+        camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
+        db.add(camp); await db.flush()
+        for i in range(4):
+            db.add(Follower(campaign_id=camp.id, ig_user_id=base + i,
+                            username=f"u{base+i}", status=FollowerStatus.pending))
+        await db.commit()
+        cid = camp.id
+
+    fake_page = _FakeReelsPage()
+    monkeypatch.setattr(browser_bio, "BrowserSession", lambda *a, **k: _FakeSessionWithReels(fake_page))
+    monkeypatch.setattr(browser_bio, "pick_session_cap", lambda *a, **k: 4)
+    monkeypatch.setattr(browser_bio.settings, "bio_browser_reels_every_min", 1)
+    monkeypatch.setattr(browser_bio.settings, "bio_browser_reels_every_max", 1)
+    monkeypatch.setattr(browser_bio, "human_profile_pause", lambda: _anoop())
+    monkeypatch.setattr(browser_bio, "maybe_micro_scroll", lambda *a, **k: _anoop_false())
+
+    async def fake_fetch(follower, campaign, db, session):
+        return "soft_block", Exception("429")
+    monkeypatch.setattr(browser_bio, "fetch_and_store_bio_browser", fake_fetch)
+
+    defer = await browser_bio.scrape_bios_browser_session(cid, "acc-A")
+    assert isinstance(defer, int) and defer >= 900   # backoff, non pausa reel
+    assert fake_page.calls == 0                       # niente reel sul path di stop

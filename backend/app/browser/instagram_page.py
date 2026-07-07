@@ -1098,42 +1098,21 @@ class InstagramPage:
 
             end_time = asyncio.get_event_loop().time() + duration_seconds
             reels_viewed = 0
-            likes_done = 0
-            max_likes = 1 if random.random() < 0.03 else 0
 
             logger.info(f"[Ambient] Reels browse {duration_seconds:.0f}s")
 
             while asyncio.get_event_loop().time() < end_time:
                 # Reading/watching pause on the current reel before moving on.
                 await asyncio.sleep(random.uniform(2.0, 8.0))
-
-                if likes_done < max_likes:
-                    try:
-                        like_btn = page.locator(
-                            'svg[aria-label="Like"], svg[aria-label="Mi piace"]'
-                        ).first
-                        if await like_btn.count() > 0:
-                            box = await like_btn.bounding_box()
-                            if box:
-                                cx = box["x"] + box["width"] / 2
-                                cy = box["y"] + box["height"] / 2
-                                await page.mouse.move(cx, cy, steps=random.randint(5, 12))
-                                await asyncio.sleep(random.uniform(0.3, 0.8))
-                                await page.mouse.click(cx, cy)
-                                likes_done += 1
-                                logger.info(f"[Ambient] Liked a reel ({likes_done}/{max_likes})")
-                    except Exception as e:
-                        logger.debug(f"[Ambient] reel like skipped ({type(e).__name__})")
-
                 # One decisive vertical scroll = next reel (full-screen unit, not
-                # an incremental feed-style scroll).
+                # an incremental feed-style scroll). Nessun like: guardare i reel
+                # (scroll + pausa) e' gia' attivita' credibile e non lascia tracce.
                 await page.mouse.wheel(0, random.randint(400, 900))
                 reels_viewed += 1
                 await asyncio.sleep(random.uniform(0.2, 0.6))
 
             logger.info(
-                f"[Ambient] Reels browse done — viewed ~{reels_viewed} reels, "
-                f"liked {likes_done} ({duration_seconds:.0f}s)"
+                f"[Ambient] Reels browse done — viewed ~{reels_viewed} reels ({duration_seconds:.0f}s)"
             )
         except Exception as e:
             logger.warning(
