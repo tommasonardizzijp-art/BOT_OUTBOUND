@@ -155,6 +155,17 @@ class Settings(BaseSettings):
     # sotto job_timeout=3600s). Distinto da bio_session_cap_min/max (path API).
     bio_browser_session_cap_min: int = 20
     bio_browser_session_cap_max: int = 40
+    # ── Pausa attiva sui reel (rimpiazza il "fermarsi a guardare" stazionario) ──
+    # Ogni 2-3 profili, invece di restare fermi (vecchia distrazione 15-45s in
+    # human_profile_pause, rimossa), l'account scrolla i Reel per un po' — attivita'
+    # che un utente vero farebbe comunque. NON tocca mai storie/highlights: guardare
+    # una storia lascia una "visualizzazione" visibile al target, quindi restano
+    # fuori da qualunque attivita' ambient (browse_feed, browse_reels, micro-scroll).
+    bio_browser_reels_every_min: int = 2          # ogni quanti profili una pausa attiva sui reel
+    bio_browser_reels_every_max: int = 3
+    bio_browser_reels_seconds_min: float = 15.0   # durata mini-sessione reel
+    bio_browser_reels_seconds_max: float = 40.0
+    bio_browser_open_post_ratio: float = 0.25     # prob. di aprire 1 post su profilo pubblico
 
     # ── App-like media fetch dopo user_info in Fase Bio (Ramo B) ──
     # DISATTIVO di default. Su sessione API "nuda" ogni user_medias_v1 e' una 2a

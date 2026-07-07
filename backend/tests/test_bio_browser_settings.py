@@ -14,3 +14,11 @@ def test_bio_browser_session_cap_fits_job_timeout():
     # cap * ~15s/profilo deve stare ben sotto job_timeout=3600s
     assert settings.bio_browser_session_cap_min <= settings.bio_browser_session_cap_max
     assert settings.bio_browser_session_cap_max * 15 < 3600
+
+
+def test_bio_browser_reels_break_defaults():
+    assert settings.bio_browser_reels_every_min <= settings.bio_browser_reels_every_max
+    assert settings.bio_browser_reels_every_min >= 1
+    assert settings.bio_browser_reels_seconds_min <= settings.bio_browser_reels_seconds_max
+    assert settings.bio_browser_reels_seconds_min > 0
+    assert 0.0 <= settings.bio_browser_open_post_ratio <= 1.0

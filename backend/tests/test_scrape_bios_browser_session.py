@@ -295,3 +295,110 @@ async def test_skip_heavy_pool_hits_backstop_short_defer(monkeypatch):
     defer = await browser_bio.scrape_bios_browser_session(cid, "acc-A")
     assert defer == 60  # backstop -> defer breve, non la pausa lunga (30-45min)
     assert calls["n"] <= max_iterations
+
+
+class _FakeReelsPage:
+    """Page fake che conta le pause attive sui reel invece di aprirle davvero."""
+    def __init__(self, raise_on_call=False):
+        self.calls = 0
+        self.raise_on_call = raise_on_call
+
+    async def ensure_logged_in(self, account_id):
+        return None
+
+    async def browse_reels(self, duration_seconds):
+        self.calls += 1
+        if self.raise_on_call:
+            raise RuntimeError("reels browse boom")
+
+
+class _FakeSessionWithReels:
+    def __init__(self, page): self.opened = False; self.closed = False; self.page = page
+    async def open(self): self.opened = True
+    async def close(self): self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_reels_break_every_n_profiles(monkeypatch):
+    """Cadenza pinnata a 2: ogni 2 profili processati (non solo 'done'), invece
+    della pausa stazionaria, deve scattare una pausa ATTIVA sui reel."""
+    base = 966000000000 + int(datetime.utcnow().timestamp()) % 100000
+    n_followers = 6
+    async with AsyncSessionLocal() as db:
+        camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
+        db.add(camp); await db.flush()
+        for i in range(n_followers):
+            db.add(Follower(campaign_id=camp.id, ig_user_id=base + i,
+                            username=f"u{base+i}", status=FollowerStatus.pending))
+        await db.commit()
+        cid = camp.id
+
+    fake_page = _FakeReelsPage()
+
+    monkeypatch.setattr(browser_bio, "BrowserSession", lambda *a, **k: _FakeSessionWithReels(fake_page))
+    monkeypatch.setattr(browser_bio, "pick_session_cap", lambda *a, **k: n_followers)
+    monkeypatch.setattr(browser_bio.settings, "bio_browser_reels_every_min", 2)
+    monkeypatch.setattr(browser_bio.settings, "bio_browser_reels_every_max", 2)
+    monkeypatch.setattr(browser_bio, "human_profile_pause", lambda: _anoop())
+    monkeypatch.setattr(browser_bio, "maybe_micro_scroll", lambda *a, **k: _anoop_false())
+
+    async def fake_fetch(follower, campaign, db, session):
+        follower.status = FollowerStatus.bio_scraped
+        follower.locked_by_account_id = None
+        follower.locked_at = None
+        follower.is_private = False
+        await db.commit()
+        return "done", None
+    monkeypatch.setattr(browser_bio, "fetch_and_store_bio_browser", fake_fetch)
+
+    await browser_bio.scrape_bios_browser_session(cid, "acc-A")
+
+    # 6 profili, cadenza fissa a 2 -> pausa reel dopo il 2°, 4° e 6° profilo = 3 volte
+    assert fake_page.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_reels_break_exception_does_not_break_session(monkeypatch):
+    """Un'eccezione dentro browse_reels va ingoiata: la mini-sessione deve
+    continuare a processare i profili successivi normalmente."""
+    base = 967000000000 + int(datetime.utcnow().timestamp()) % 100000
+    n_followers = 4
+    async with AsyncSessionLocal() as db:
+        camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
+        db.add(camp); await db.flush()
+        for i in range(n_followers):
+            db.add(Follower(campaign_id=camp.id, ig_user_id=base + i,
+                            username=f"u{base+i}", status=FollowerStatus.pending))
+        await db.commit()
+        cid = camp.id
+
+    fake_page = _FakeReelsPage(raise_on_call=True)
+
+    monkeypatch.setattr(browser_bio, "BrowserSession", lambda *a, **k: _FakeSessionWithReels(fake_page))
+    monkeypatch.setattr(browser_bio, "pick_session_cap", lambda *a, **k: n_followers)
+    monkeypatch.setattr(browser_bio.settings, "bio_browser_reels_every_min", 2)
+    monkeypatch.setattr(browser_bio.settings, "bio_browser_reels_every_max", 2)
+    monkeypatch.setattr(browser_bio, "human_profile_pause", lambda: _anoop())
+    monkeypatch.setattr(browser_bio, "maybe_micro_scroll", lambda *a, **k: _anoop_false())
+
+    async def fake_fetch(follower, campaign, db, session):
+        follower.status = FollowerStatus.bio_scraped
+        follower.locked_by_account_id = None
+        follower.locked_at = None
+        follower.is_private = False
+        await db.commit()
+        return "done", None
+    monkeypatch.setattr(browser_bio, "fetch_and_store_bio_browser", fake_fetch)
+
+    # non deve sollevare, nonostante browse_reels fallisca sempre
+    await browser_bio.scrape_bios_browser_session(cid, "acc-A")
+
+    assert fake_page.calls == 2  # pausa reel provata dopo il 2° e il 4° profilo
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select, func
+        done = await db.scalar(
+            select(func.count()).select_from(Follower).where(
+                Follower.campaign_id == cid,
+                Follower.status == FollowerStatus.bio_scraped))
+        assert done == n_followers  # tutti i profili sono comunque stati processati

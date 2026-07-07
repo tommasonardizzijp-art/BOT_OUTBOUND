@@ -203,6 +203,7 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
         follower.full_name = shim.full_name
     follower.biography = shim.biography or None
     follower.is_verified = bool(shim.is_verified)
+    follower.is_private = bool(shim.is_private)
     follower.follower_count = shim.follower_count
     follower.following_count = shim.following_count
     ext = shim.external_url
@@ -233,29 +234,58 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
 
 
 async def human_profile_pause() -> None:
-    """Pausa tra un profilo e l'altro: 5-10s + pausa breve occasionale (l'utente
-    che si ferma a guardare). Ritmo credibile a detta dell'operatore."""
+    """Pausa tra un profilo e l'altro: 5-10s. La vecchia sosta stazionaria
+    occasionale (12% di probabilita', 15-45s "distrazione") e' stata rimossa:
+    stare fermi ripetutamente e' proprio il pattern da evitare. Al suo posto,
+    ogni 2-3 profili, `scrape_bios_browser_session` intercala una pausa ATTIVA
+    sui reel (`InstagramPage.browse_reels`) — qualcosa che un account vero
+    farebbe davvero, non uno stallo."""
     await asyncio.sleep(random.uniform(5.0, 10.0))
-    if random.random() < 0.12:
-        extra = random.uniform(15.0, 45.0)
-        logger.debug(f"[BioBrowser] pausa breve {extra:.0f}s (distrazione)")
-        await asyncio.sleep(extra)
 
 
-async def maybe_micro_scroll(session, *, rng=None) -> bool:
-    """Scroll leggero sul profilo aperto, ~bio_browser_scroll_ratio dei profili,
-    per 4-5s. Simula lo sguardo umano; non su tutti (la costanza è una firma).
+async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> bool:
+    """Scroll sul profilo aperto, ~bio_browser_scroll_ratio dei profili.
+
+    PRIVATO: scroll breve (~4-5s, solo l'header) — non c'e' una griglia di post
+    da guardare. PUBBLICO: scroll piu' lungo e deciso (~6-10s) e, con
+    probabilita' `bio_browser_open_post_ratio`, apre UN post (mai un reel o una
+    storia qui) e lo guarda un attimo prima di tornare indietro.
+
     Difensivo: non solleva. Ritorna True se ha scrollato."""
     r = rng or random
     if r.random() >= settings.bio_browser_scroll_ratio:
         return False
     try:
         raw_page = await session.page._get_page()
-        dur = r.uniform(settings.bio_browser_scroll_min_s, settings.bio_browser_scroll_max_s)
-        steps = max(1, int(dur))
+
+        if is_private:
+            dur = r.uniform(settings.bio_browser_scroll_min_s, settings.bio_browser_scroll_max_s)
+            steps = max(1, int(dur))
+            for _ in range(steps):
+                await raw_page.evaluate("window.scrollBy({top: 300, behavior: 'smooth'})")
+                await asyncio.sleep(1.0)
+            return True
+
+        # Pubblico: scroll piu' lungo/deciso (c'e' davvero una griglia di post).
+        dur = r.uniform(6.0, 10.0)
+        steps = max(1, int(dur / 1.5))
         for _ in range(steps):
-            await raw_page.evaluate("window.scrollBy({top: 300, behavior: 'smooth'})")
-            await asyncio.sleep(1.0)
+            await raw_page.evaluate("window.scrollBy({top: 400, behavior: 'smooth'})")
+            await asyncio.sleep(1.5)
+
+        if r.random() < settings.bio_browser_open_post_ratio:
+            try:
+                post_link = raw_page.locator('article a[href*="/p/"]').first
+                if await post_link.count() > 0:
+                    await post_link.click(timeout=3000)
+                    await asyncio.sleep(r.uniform(3.0, 9.0))
+                    try:
+                        await raw_page.go_back()
+                    except Exception:
+                        await raw_page.keyboard.press("Escape")
+            except Exception as e:
+                logger.debug(f"[BioBrowser] apertura post pubblico saltata ({type(e).__name__}: {e})")
+
         return True
     except Exception as e:
         logger.debug(f"[BioBrowser] micro-scroll saltato ({type(e).__name__}: {e})")
@@ -430,12 +460,20 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
     iterations = 0
     target_reached = False
     session = None
+    # Cadenza pausa attiva sui reel: ogni 2-3 profili (default), rimpiazza lo
+    # standing-still rimosso da `human_profile_pause`. Ripescata dopo ogni pausa
+    # reel cosi' la cadenza non e' sempre identica (2 vs 3) tra una pausa e l'altra.
+    reels_cadence_target = random.randint(
+        settings.bio_browser_reels_every_min, settings.bio_browser_reels_every_max
+    )
+    profiles_since_reels_break = 0
     try:
         session = BrowserSession(account_id, headless=settings.bio_browser_headless)
         await session.open()
         await session.page.ensure_logged_in(account_id)
 
         while done_count < cap and iterations < max_iterations:
+            follower_is_private = False
             async with AsyncSessionLocal() as db:
                 if await is_halted(db):
                     return None
@@ -482,6 +520,14 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                 iterations += 1
                 if outcome == "done":
                     done_count += 1
+                    # Sicuro leggere l'attributo qui (a differenza del resto di questo
+                    # blocco, che usa solo uname/fid): si arriva a outcome == 'done'
+                    # SOLO se il db.commit() dentro fetch_and_store_bio_browser e'
+                    # andato a buon fine (altrimenti l'eccezione sarebbe stata
+                    # catturata sopra come 'error') — quindi la sessione non e'
+                    # avvelenata e l'oggetto non e' expired (expire_on_commit=False).
+                    # Serve a decidere lo scroll pubblico/privato piu' sotto.
+                    follower_is_private = bool(follower.is_private)
                     emit_event(campaign_id, "scrape_progress", f"@{uname} bio via browser")
                 elif outcome in ("not_found", "private", "error"):
                     await _resilient_release(
@@ -520,8 +566,35 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     )
                     logger.warning(f"[BioBrowser] @{uname} outcome inatteso '{outcome}' — skip difensivo")
 
-            await maybe_micro_scroll(session)
-            await human_profile_pause()
+            # Nota: soft_block/network hanno gia' fatto `return` sopra — questo punto
+            # e' raggiunto solo dagli outcome che continuano la mini-sessione
+            # (done/not_found/private/error/unknown), quindi la pausa reel non gira
+            # mai su quei due path di stop.
+            await maybe_micro_scroll(session, is_private=follower_is_private)
+
+            profiles_since_reels_break += 1
+            if profiles_since_reels_break >= reels_cadence_target:
+                try:
+                    reels_seconds = random.uniform(
+                        settings.bio_browser_reels_seconds_min,
+                        settings.bio_browser_reels_seconds_max,
+                    )
+                    logger.info(
+                        f"[BioBrowser] pausa attiva sui reel ~{reels_seconds:.0f}s "
+                        f"(ogni {reels_cadence_target} profili)"
+                    )
+                    await session.page.browse_reels(reels_seconds)
+                except Exception as e:
+                    logger.warning(
+                        f"[BioBrowser] pausa attiva sui reel fallita "
+                        f"({type(e).__name__}: {e}) — ignorata"
+                    )
+                profiles_since_reels_break = 0
+                reels_cadence_target = random.randint(
+                    settings.bio_browser_reels_every_min, settings.bio_browser_reels_every_max
+                )
+            else:
+                await human_profile_pause()
 
         if target_reached:
             await _maybe_complete_browser_bio(campaign_id)

@@ -1051,3 +1051,92 @@ class InstagramPage:
             f"[Ambient] Feed browse done — opened {posts_opened} posts, "
             f"liked {likes_in_session} ({duration_seconds:.0f}s)"
         )
+
+    async def browse_reels(self, duration_seconds: float) -> None:
+        """
+        ACTIVE break on the Reels feed: used between bio-scraping profiles instead
+        of standing still (the old stationary "distraction" pause). Navigate to
+        /reels/, then alternate a reading pause with one decisive vertical scroll
+        (reels are full-screen — one big wheel = next reel), with a very rare
+        (~3%) like. Twin of `browse_feed`, different surface.
+
+        Deliberately NEVER touches stories/highlights: viewing a story leaves a
+        "seen" receipt visible to the target account, unlike feed/reels scrolling
+        or likes — so ambient browsing must stay off that surface entirely.
+
+        Fully defensive: any failure anywhere (navigation, DOM changed, closed
+        page...) is swallowed and falls back to a plain `asyncio.sleep`, so the
+        caller's per-profile cadence in the bio-scraping loop is never broken.
+        """
+        try:
+            page = await self._get_page()
+        except Exception as e:
+            logger.warning(f"browse_reels: cannot get page ({e}), falling back to sleep")
+            await asyncio.sleep(duration_seconds)
+            return
+
+        try:
+            # Navigate to Reels — prefer clicking the nav link (more human than
+            # typing a URL); fall back to a direct goto if the link isn't there.
+            clicked = False
+            try:
+                reels_nav = page.locator('a[href="/reels/"]').first
+                if await reels_nav.count() > 0:
+                    await reels_nav.click(timeout=2500)
+                    await asyncio.sleep(random.uniform(1.5, 3.0))
+                    clicked = True
+            except Exception:
+                pass
+            if not clicked:
+                await page.goto(self.BASE_URL + "/reels/", wait_until="domcontentloaded")
+                await asyncio.sleep(random.uniform(1.8, 3.2))
+
+            try:
+                await self._dismiss_ig_modals(page, "reels")
+            except Exception:
+                pass
+
+            end_time = asyncio.get_event_loop().time() + duration_seconds
+            reels_viewed = 0
+            likes_done = 0
+            max_likes = 1 if random.random() < 0.03 else 0
+
+            logger.info(f"[Ambient] Reels browse {duration_seconds:.0f}s")
+
+            while asyncio.get_event_loop().time() < end_time:
+                # Reading/watching pause on the current reel before moving on.
+                await asyncio.sleep(random.uniform(2.0, 8.0))
+
+                if likes_done < max_likes:
+                    try:
+                        like_btn = page.locator(
+                            'svg[aria-label="Like"], svg[aria-label="Mi piace"]'
+                        ).first
+                        if await like_btn.count() > 0:
+                            box = await like_btn.bounding_box()
+                            if box:
+                                cx = box["x"] + box["width"] / 2
+                                cy = box["y"] + box["height"] / 2
+                                await page.mouse.move(cx, cy, steps=random.randint(5, 12))
+                                await asyncio.sleep(random.uniform(0.3, 0.8))
+                                await page.mouse.click(cx, cy)
+                                likes_done += 1
+                                logger.info(f"[Ambient] Liked a reel ({likes_done}/{max_likes})")
+                    except Exception as e:
+                        logger.debug(f"[Ambient] reel like skipped ({type(e).__name__})")
+
+                # One decisive vertical scroll = next reel (full-screen unit, not
+                # an incremental feed-style scroll).
+                await page.mouse.wheel(0, random.randint(400, 900))
+                reels_viewed += 1
+                await asyncio.sleep(random.uniform(0.2, 0.6))
+
+            logger.info(
+                f"[Ambient] Reels browse done — viewed ~{reels_viewed} reels, "
+                f"liked {likes_done} ({duration_seconds:.0f}s)"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[Ambient] Reels browse failed ({type(e).__name__}: {e}) — falling back to sleep"
+            )
+            await asyncio.sleep(duration_seconds)
