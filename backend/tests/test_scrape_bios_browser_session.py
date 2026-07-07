@@ -306,7 +306,7 @@ class _FakeReelsPage:
     async def ensure_logged_in(self, account_id):
         return None
 
-    async def browse_reels(self, duration_seconds):
+    async def browse_reels(self, *args, **kwargs):
         self.calls += 1
         if self.raise_on_call:
             raise RuntimeError("reels browse boom")

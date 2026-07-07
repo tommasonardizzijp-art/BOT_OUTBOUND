@@ -1052,13 +1052,22 @@ class InstagramPage:
             f"liked {likes_in_session} ({duration_seconds:.0f}s)"
         )
 
-    async def browse_reels(self, duration_seconds: float) -> None:
+    async def browse_reels(
+        self, n_reels: int, dwell_min_s: float = 0.0, dwell_max_s: float = 10.0
+    ) -> None:
         """
         ACTIVE break on the Reels feed: used between bio-scraping profiles instead
         of standing still (the old stationary "distraction" pause). Navigate to
-        /reels/, then alternate a reading pause with one decisive vertical scroll
-        (reels are full-screen — one big wheel = next reel), with a very rare
-        (~3%) like. Twin of `browse_feed`, different surface.
+        /reels/, then WATCH `n_reels` reels one after another — dwell a random
+        `dwell_min_s..dwell_max_s` on each, then scroll DECISIVELY to the next.
+        Twin of `browse_feed`, different surface.
+
+        Advancing to the next reel (the fix): the reels feed is a full-screen
+        vertical scroll-snap container. A wheel event only advances it if the
+        pointer is OVER the reel — the previous version scrolled at the default
+        (0,0) position (the left nav rail), so it never left the first reel. Here
+        we center the pointer once, then advance with a full-viewport wheel, with
+        a keyboard ArrowDown as fallback.
 
         Deliberately NEVER touches stories/highlights: viewing a story leaves a
         "seen" receipt visible to the target account, unlike feed/reels scrolling
@@ -1068,11 +1077,16 @@ class InstagramPage:
         page...) is swallowed and falls back to a plain `asyncio.sleep`, so the
         caller's per-profile cadence in the bio-scraping loop is never broken.
         """
+        n_reels = max(0, int(n_reels))
+        # Fallback pause ≈ what the reel session would have lasted, so a navigation
+        # failure still burns comparable time instead of returning instantly.
+        fallback_s = min(120.0, max(1.0, n_reels) * random.uniform(dwell_min_s, dwell_max_s))
+
         try:
             page = await self._get_page()
         except Exception as e:
             logger.warning(f"browse_reels: cannot get page ({e}), falling back to sleep")
-            await asyncio.sleep(duration_seconds)
+            await asyncio.sleep(fallback_s)
             return
 
         try:
@@ -1096,26 +1110,43 @@ class InstagramPage:
             except Exception:
                 pass
 
-            end_time = asyncio.get_event_loop().time() + duration_seconds
+            # Center the pointer over the reel so wheel events target the feed
+            # (not the sidebar). Done once — the pointer stays put between scrolls.
+            try:
+                vp = page.viewport_size or {"width": 1280, "height": 900}
+            except Exception:
+                vp = {"width": 1280, "height": 900}
+            cx, cy = vp["width"] // 2, vp["height"] // 2
+            try:
+                await page.mouse.move(cx, cy, steps=random.randint(4, 10))
+            except Exception:
+                pass
+
+            logger.info(f"[Ambient] Reels browse: {n_reels} reel")
+
             reels_viewed = 0
-
-            logger.info(f"[Ambient] Reels browse {duration_seconds:.0f}s")
-
-            while asyncio.get_event_loop().time() < end_time:
-                # Reading/watching pause on the current reel before moving on.
-                await asyncio.sleep(random.uniform(2.0, 8.0))
-                # One decisive vertical scroll = next reel (full-screen unit, not
-                # an incremental feed-style scroll). Nessun like: guardare i reel
-                # (scroll + pausa) e' gia' attivita' credibile e non lascia tracce.
-                await page.mouse.wheel(0, random.randint(400, 900))
+            for _ in range(n_reels):
+                # Watch the current reel a random beat, THEN advance to the next.
+                await asyncio.sleep(random.uniform(dwell_min_s, dwell_max_s))
+                # Advance one reel: a full-viewport wheel at center = next snap unit.
+                # Nessun like: guardare i reel (scroll + sosta) e' gia' attivita'
+                # credibile e non lascia tracce.
+                try:
+                    await page.mouse.wheel(0, int(vp["height"] * random.uniform(0.9, 1.2)))
+                except Exception:
+                    # Fallback: IG reels web navigates with ArrowDown.
+                    try:
+                        await page.keyboard.press("ArrowDown")
+                    except Exception:
+                        pass
                 reels_viewed += 1
                 await asyncio.sleep(random.uniform(0.2, 0.6))
 
             logger.info(
-                f"[Ambient] Reels browse done — viewed ~{reels_viewed} reels ({duration_seconds:.0f}s)"
+                f"[Ambient] Reels browse done — viewed {reels_viewed} reels"
             )
         except Exception as e:
             logger.warning(
                 f"[Ambient] Reels browse failed ({type(e).__name__}: {e}) — falling back to sleep"
             )
-            await asyncio.sleep(duration_seconds)
+            await asyncio.sleep(fallback_s)

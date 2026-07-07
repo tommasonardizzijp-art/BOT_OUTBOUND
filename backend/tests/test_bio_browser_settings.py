@@ -17,8 +17,13 @@ def test_bio_browser_session_cap_fits_job_timeout():
 
 
 def test_bio_browser_reels_break_defaults():
+    # Cadenza: dopo un numero random di profili (0-10 di default).
     assert settings.bio_browser_reels_every_min <= settings.bio_browser_reels_every_max
-    assert settings.bio_browser_reels_every_min >= 1
-    assert settings.bio_browser_reels_seconds_min <= settings.bio_browser_reels_seconds_max
-    assert settings.bio_browser_reels_seconds_min > 0
+    assert settings.bio_browser_reels_every_min >= 0
+    # Quanti reel per pausa (0-10 di default).
+    assert settings.bio_browser_reels_count_min <= settings.bio_browser_reels_count_max
+    assert settings.bio_browser_reels_count_min >= 0
+    # Sosta su ciascun reel (0-10s di default).
+    assert settings.bio_browser_reels_dwell_min_s <= settings.bio_browser_reels_dwell_max_s
+    assert settings.bio_browser_reels_dwell_min_s >= 0.0
     assert 0.0 <= settings.bio_browser_open_post_ratio <= 1.0

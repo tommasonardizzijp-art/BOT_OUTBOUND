@@ -237,9 +237,9 @@ async def human_profile_pause() -> None:
     """Pausa tra un profilo e l'altro: 5-10s. La vecchia sosta stazionaria
     occasionale (12% di probabilita', 15-45s "distrazione") e' stata rimossa:
     stare fermi ripetutamente e' proprio il pattern da evitare. Al suo posto,
-    ogni 2-3 profili, `scrape_bios_browser_session` intercala una pausa ATTIVA
-    sui reel (`InstagramPage.browse_reels`) — qualcosa che un account vero
-    farebbe davvero, non uno stallo."""
+    dopo un numero random di profili (0-10), `scrape_bios_browser_session`
+    intercala una pausa ATTIVA sui reel (`InstagramPage.browse_reels`) — qualcosa
+    che un account vero farebbe davvero, non uno stallo."""
     await asyncio.sleep(random.uniform(5.0, 10.0))
 
 
@@ -460,9 +460,9 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
     iterations = 0
     target_reached = False
     session = None
-    # Cadenza pausa attiva sui reel: ogni 2-3 profili (default), rimpiazza lo
-    # standing-still rimosso da `human_profile_pause`. Ripescata dopo ogni pausa
-    # reel cosi' la cadenza non e' sempre identica (2 vs 3) tra una pausa e l'altra.
+    # Cadenza pausa attiva sui reel: dopo un numero random di profili (default 0-10),
+    # rimpiazza lo standing-still rimosso da `human_profile_pause`. Ripescata dopo
+    # ogni pausa reel cosi' la cadenza non e' sempre identica tra una pausa e l'altra.
     reels_cadence_target = random.randint(
         settings.bio_browser_reels_every_min, settings.bio_browser_reels_every_max
     )
@@ -575,15 +575,19 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
             profiles_since_reels_break += 1
             if profiles_since_reels_break >= reels_cadence_target:
                 try:
-                    reels_seconds = random.uniform(
-                        settings.bio_browser_reels_seconds_min,
-                        settings.bio_browser_reels_seconds_max,
+                    n_reels = random.randint(
+                        settings.bio_browser_reels_count_min,
+                        settings.bio_browser_reels_count_max,
                     )
                     logger.info(
-                        f"[BioBrowser] pausa attiva sui reel ~{reels_seconds:.0f}s "
-                        f"(ogni {reels_cadence_target} profili)"
+                        f"[BioBrowser] pausa attiva sui reel: {n_reels} reel "
+                        f"(dopo {reels_cadence_target} profili)"
                     )
-                    await session.page.browse_reels(reels_seconds)
+                    await session.page.browse_reels(
+                        n_reels,
+                        dwell_min_s=settings.bio_browser_reels_dwell_min_s,
+                        dwell_max_s=settings.bio_browser_reels_dwell_max_s,
+                    )
                 except Exception as e:
                     logger.warning(
                         f"[BioBrowser] pausa attiva sui reel fallita "
