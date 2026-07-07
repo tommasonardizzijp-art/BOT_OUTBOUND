@@ -503,11 +503,21 @@ async def _scrape_paginated(pool, campaign: Campaign, db, scrape_mode: str = 'fo
                 delay = random.uniform(_s.list_page_delay_min_seconds, _s.list_page_delay_max_seconds)
             await asyncio.sleep(delay)
 
-            # Fetch a batch of followers/following (batch_size re-randomized per page)
-            batch_size = random.randint(_scfg.list_page_size_min, _scfg.list_page_size_max)
+            # Fetch a batch of followers/following. batch_size FISSO (= tetto reale
+            # dell'endpoint, misurato ~25): un count variabile e' una firma anomala.
+            batch_size = _scfg.list_page_size
             followers_batch, max_id = await asyncio.to_thread(
                 _fetch_followers_chunk, list_client, campaign.target_user_id, batch_size, max_id, scrape_mode
             )
+
+            # Guardia: batch > batch_size => instagrapi ha ri-ciclato => IG ritorna
+            # meno utenti/risposta del count richiesto => tetto sceso sotto
+            # list_page_size (mini-burst senza delay). Log per accorgersene.
+            if len(followers_batch) > batch_size:
+                logger.warning(
+                    f"[Scraper] ⚠️ IG ha ritornato {len(followers_batch)} utenti per count={batch_size}: "
+                    f"tetto per-risposta sceso sotto list_page_size={_scfg.list_page_size}, rivedere il valore fisso."
+                )
 
             if not followers_batch:
                 logger.info(f"No more {mode_label} to scrape (total: {total})")

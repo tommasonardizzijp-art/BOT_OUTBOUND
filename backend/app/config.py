@@ -86,12 +86,20 @@ class Settings(BaseSettings):
     bio_session_cap_min: int = 150
     bio_session_cap_max: int = 300
 
-    # Fase Lista: dimensione pagina randomizzata passata come max_amount a
-    # user_followers_v1_chunk. Senza un valore piccolo, instagrapi drena l'intera
-    # lista in un burst count=200 senza delay -> challenge IG. Con 20-40 ogni
-    # chiamata ritorna pochi utenti e il delay sotto agisce (scroll umano).
-    list_page_size_min: int = 20
-    list_page_size_max: int = 40
+    # Fase Lista: page-size FISSO passato come max_amount (-> param `count`) alla
+    # richiesta friendships/{id}/followers/.
+    # MISURATO (probe 2026-07-07): l'endpoint ritorna SEMPRE ~25 utenti/risposta a
+    # prescindere dal count richiesto (50,75,100,150,200 -> 25; count=250 -> HTTP
+    # 400). Quindi 25 = tetto reale dell'endpoint per questo client.
+    # Perche' FISSO e non random (era 20-40): un count variabile e' una firma
+    # anomala per il classificatore IG (nessun client reale randomizza il count) +
+    # mismatch col fingerprint dello User-Agent. Vedi memory
+    # botoutbound-antidetect-protocollo-rigido.
+    # Perche' proprio 25: `max_amount=25` fa rompere il loop interno di instagrapi
+    # dopo UNA sola richiesta (25>=25) -> 1 richiesta per delay, niente burst. Un
+    # valore piu' grande (es. 30-40) faceva ciclare instagrapi 2 volte a vuoto
+    # (chiedeva 30, IG ne dava 25, 25<30 -> ri-richiesta senza delay).
+    list_page_size: int = 25
     # Delay tra pagine lista (lognormale, non uniforme).
     list_page_delay_min_seconds: int = 5
     list_page_delay_max_seconds: int = 10

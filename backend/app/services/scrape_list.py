@@ -22,8 +22,10 @@ from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, ScraperError
 
 
 def next_page_size() -> int:
-    """Dimensione pagina lista randomizzata nei bound di config."""
-    return random.randint(settings.list_page_size_min, settings.list_page_size_max)
+    """Dimensione pagina lista: FISSA (= count reale dell'endpoint, misurato ~25).
+    Non piu' randomizzata: un count variabile e' una firma anomala + mismatch col
+    fingerprint. Vedi settings.list_page_size."""
+    return settings.list_page_size
 
 
 def remaining_for_target(target: int | None, already: int, page: int) -> int:
@@ -105,6 +107,7 @@ async def list_followers(campaign_id: str) -> int | None:
             already = await db.scalar(select(func.count(Follower.id)).where(Follower.campaign_id == campaign_id)) or 0
             max_id = campaign.scrape_cursor or None
             since_break = 0
+            cap_warned = False   # warning "tetto IG sceso sotto list_page_size" emesso 1 volta/run
             ig_exhausted = False  # True solo se IG ha davvero finito la lista (batch/cursore vuoti)
             if max_id:
                 logger.info(f"[Lista] Ripresa da cursore — {already} follower già in DB")
@@ -139,6 +142,30 @@ async def list_followers(campaign_id: str) -> int | None:
                     _fetch_followers_chunk, client, campaign.target_user_id, page, max_id, scrape_mode
                 )
                 logger.info(f"[Lista] pagina via @{account.username}: {len(batch)} da IG (già in DB: {already})")
+
+                # Guardia anti-detection: chiediamo count=page (fisso, = tetto reale
+                # misurato ~25). instagrapi rompe il loop appena len>=max_amount, quindi
+                # in condizioni normali batch <= page in UNA richiesta. Se batch > page,
+                # instagrapi ha dovuto RI-ciclare -> IG sta ritornando MENO utenti per
+                # risposta di quanti ne chiediamo -> il tetto per-risposta e' SCESO sotto
+                # list_page_size e il loop interno ha ricreato un mini-burst senza delay.
+                # Va rivisto subito il valore fisso: avvisa (una volta per run).
+                if len(batch) > page and not cap_warned:
+                    cap_warned = True
+                    warn_msg = (
+                        f"Fase Lista: IG ha ritornato {len(batch)} utenti per un count={page} "
+                        f"(instagrapi ha ri-ciclato). Il tetto per-risposta e' sceso sotto "
+                        f"list_page_size={settings.list_page_size}: rivedere il valore fisso "
+                        f"(rischio mini-burst senza delay)."
+                    )
+                    logger.warning(f"[Lista] ⚠️ {warn_msg}")
+                    emit_event(campaign_id, "scrape_warning", warn_msg, level="warn")
+                    try:
+                        from app.services import notifier
+                        asyncio.create_task(notifier.send_telegram(f"[BOT OUTBOUND] {warn_msg}", level="warn"))
+                    except Exception as _tg_exc:
+                        logger.debug(f"[Lista] telegram cap-warning non inviato: {_tg_exc}")
+
                 if not batch:
                     logger.info(f"[Lista] Lista IG esaurita ({already})")
                     ig_exhausted = True

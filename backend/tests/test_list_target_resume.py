@@ -239,3 +239,63 @@ def test_chunk_success_passes_cursor():
     users, cursor = _fetch_followers_chunk(_OkClient(), 1, 3, "c0", "followers")
     assert len(users) == 3
     assert cursor == "next_cursor"
+
+
+# ─────────── 4) warning "tetto IG sceso sotto list_page_size" ───────────
+# Se IG ritorna MENO utenti/risposta del count richiesto, instagrapi ri-cicla
+# e batch > count => mini-burst senza delay. La Fase Lista deve avvisare (1 volta/run)
+# cosi' Tommaso se ne accorge per tempo.
+
+def _setup_with_recorders(monkeypatch, fetch_fn, **kw):
+    session_factory, campaign_id, cleanup = _setup(monkeypatch, fetch_fn, **kw)
+    events = []
+    monkeypatch.setattr("app.utils.events.emit", lambda *a, **k: events.append((a, k)))
+    sent = []
+
+    async def _fake_tg(msg, level="info"):
+        sent.append((msg, level))
+    monkeypatch.setattr("app.services.notifier.send_telegram", _fake_tg)
+    return session_factory, campaign_id, cleanup, events
+
+
+def test_cap_drop_emits_warning(monkeypatch):
+    """batch > count richiesto => scatta UN evento scrape_warning."""
+    calls = {"n": 0}
+
+    def fake_fetch(client, user_id, amount, max_id, scrape_mode):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # IG ha ritornato piu' del count => instagrapi ha ri-ciclato (tetto sceso).
+            return [_FakeUser(3000 + i) for i in range(amount + 15)], "c1"
+        return [], None  # fine lista
+
+    session_factory, campaign_id, cleanup, events = _setup_with_recorders(
+        monkeypatch, fake_fetch, list_target=None
+    )
+    try:
+        asyncio.run(asyncio.wait_for(scrape_list.list_followers(campaign_id), timeout=10))
+        warns = [e for e in events if len(e[0]) > 1 and e[0][1] == "scrape_warning"]
+        assert len(warns) == 1, f"atteso 1 scrape_warning, trovati {len(warns)}"
+    finally:
+        cleanup()
+
+
+def test_no_warning_when_batch_at_count(monkeypatch):
+    """batch == count richiesto (caso normale): NESSUN warning."""
+    calls = {"n": 0}
+
+    def fake_fetch(client, user_id, amount, max_id, scrape_mode):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return [_FakeUser(4000 + i) for i in range(amount)], "c1"  # esattamente amount
+        return [], None
+
+    session_factory, campaign_id, cleanup, events = _setup_with_recorders(
+        monkeypatch, fake_fetch, list_target=None
+    )
+    try:
+        asyncio.run(asyncio.wait_for(scrape_list.list_followers(campaign_id), timeout=10))
+        warns = [e for e in events if len(e[0]) > 1 and e[0][1] == "scrape_warning"]
+        assert warns == [], "nessun warning quando batch == count richiesto"
+    finally:
+        cleanup()
