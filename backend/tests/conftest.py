@@ -1,17 +1,47 @@
-"""Guardia globale: i test non devono MAI mandare messaggi Telegram reali.
+"""Guardie globali di test. DUE cose, entrambe per non toccare la produzione:
 
-Il .env di sviluppo contiene TELEGRAM_BOT_TOKEN/CHAT_ID veri: un test che
-esercita un path del notifier senza mock spamma l'operatore su Telegram
-(successo il 06/07/2026 — test_bio_error_no_infinite_loop non mockava
-send_scrape_warning_alert e ogni run pytest inviava alert "proxy instabile"
-con campagne finte). Qui _telegram_enabled viene spento per ogni test.
+1) DB → SQLite locale, MAI Supabase prod.
+   Bug (07/07/2026): molti test usano `AsyncSessionLocal` (agganciato a
+   settings.database_url = Supabase PROD nel .env) e creavano Campaign/Follower
+   VERI in produzione a OGNI run pytest — decine di campagne-fantasma 't'/'advqreg'
+   che il worker live poi tentava di processare (alert Telegram). Qui forziamo
+   DATABASE_URL a uno SQLite locale PRIMA di importare qualsiasi modulo `app.*`,
+   così engine/AsyncSessionLocal nascono già puntati al DB di test. Le tabelle
+   vengono create una volta per sessione.
 
-I test che verificano l'invio (es. test_notifier.py) continuano a funzionare:
-il loro monkeypatch.setattr nel corpo del test sovrascrive questo fixture.
+2) Telegram → spento.
+   Un test che esercita il notifier senza mock spammerebbe l'operatore.
 """
-import pytest
+import os
 
-from app.services import notifier
+# DEVE stare PRIMA di ogni import `app.*`: app.config.settings viene istanziato
+# al primo import e legge questa env (le env var vincono sul .env in pydantic).
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./data/test_bot.db"
+
+import asyncio  # noqa: E402
+
+import pytest  # noqa: E402
+
+from app.services import notifier  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _init_test_db():
+    """Crea lo schema sul DB di test una volta per sessione (engine usa e getta
+    nel proprio loop → nessun problema cross-loop con l'engine dell'app)."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from app.config import settings
+    from app.database import Base
+    from app.utils.db_dialect import to_async_database_url
+
+    async def _create():
+        eng = create_async_engine(to_async_database_url(settings.database_url))
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        await eng.dispose()
+
+    asyncio.run(_create())
+    yield
 
 
 @pytest.fixture(autouse=True)
