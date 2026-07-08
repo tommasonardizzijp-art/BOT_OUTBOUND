@@ -113,8 +113,8 @@ class Settings(BaseSettings):
     # browser e' stato rimosso (la lista DM web non espone username/pk).
     # Delay base tra pagine inbox: lognormale clampato a [min,max] (scroll attivo).
     # Mediana = (min+max)/2 = 6s; sigma alto in scrape_inbox per varianza ampia.
-    inbox_api_page_delay_min_seconds: int = 2
-    inbox_api_page_delay_max_seconds: int = 10
+    inbox_api_page_delay_min_seconds: int = 10
+    inbox_api_page_delay_max_seconds: int = 40
     # Pausa lunga occasionale tra pagine inbox ("si ferma a leggere/rispondere").
     inbox_long_pause_probability: float = 0.08
     inbox_long_pause_min_seconds: int = 20
