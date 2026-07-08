@@ -26,6 +26,15 @@ class AccountCooldownError(AccountError):
     """Account is in cooldown due to rate limiting."""
 
 
+class AccountSessionExpiredError(AccountError):
+    """La sessione browser dell'account non e' piu' valida (redirect a login).
+    Sollevata quando `allow_login=False`: lo scraping NON deve mai fare login
+    automatico (ban risk) — l'account va isolato e ri-loggato a mano dall'operatore."""
+    def __init__(self, account_id: str):
+        self.account_id = account_id
+        super().__init__(f"Account {account_id}: sessione scaduta, serve login manuale")
+
+
 class NoAvailableAccountError(BotOutboundError):
     """No account available to send messages (all in cooldown/banned/limit reached)."""
 

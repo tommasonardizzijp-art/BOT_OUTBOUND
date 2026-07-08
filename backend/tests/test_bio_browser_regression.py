@@ -42,7 +42,7 @@ class _FakeSession:
         self.closed = True
 
     class _P:
-        async def ensure_logged_in(self, account_id):
+        async def ensure_logged_in(self, account_id, allow_login=True):
             return None
 
     page = _P()

@@ -13,7 +13,7 @@ class _FakeSession:
     async def open(self): self.opened = True
     async def close(self): self.closed = True
     class _P:
-        async def ensure_logged_in(self, account_id): return None
+        async def ensure_logged_in(self, account_id, allow_login=True): return None
     page = _P()
 
 
@@ -303,7 +303,7 @@ class _FakeReelsPage:
         self.calls = 0
         self.raise_on_call = raise_on_call
 
-    async def ensure_logged_in(self, account_id):
+    async def ensure_logged_in(self, account_id, allow_login=True):
         return None
 
     async def browse_reels(self, *args, **kwargs):
@@ -433,3 +433,84 @@ async def test_no_reels_break_on_soft_block(monkeypatch):
     defer = await browser_bio.scrape_bios_browser_session(cid, "acc-A")
     assert isinstance(defer, int) and defer >= 900   # backoff, non pausa reel
     assert fake_page.calls == 0                       # niente reel sul path di stop
+
+
+async def _anoop2(*a, **k): return None
+async def _anoop2_false(*a, **k): return False
+
+
+@pytest.mark.asyncio
+async def test_soft_block_threshold_pauses_campaign(monkeypatch):
+    """Fix C: al N-esimo soft-block consecutivo (contatore pinnato al threshold),
+    la campagna va in PAUSA e il defer e' None (stop al 429->defer->429), non un retry."""
+    base = 970000000000 + int(datetime.utcnow().timestamp()) % 100000
+    async with AsyncSessionLocal() as db:
+        camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
+        db.add(camp); await db.flush()
+        for i in range(3):
+            db.add(Follower(campaign_id=camp.id, ig_user_id=base + i,
+                            username=f"u{base+i}", status=FollowerStatus.pending))
+        await db.commit()
+        cid = camp.id
+
+    monkeypatch.setattr(browser_bio, "BrowserSession", _FakeSession)
+    monkeypatch.setattr(browser_bio, "pick_session_cap", lambda *a, **k: 5)
+    monkeypatch.setattr(browser_bio, "human_profile_pause", _anoop2)
+    monkeypatch.setattr(browser_bio, "maybe_micro_scroll", _anoop2_false)
+
+    async def fake_fetch(follower, campaign, db, session):
+        return "soft_block", Exception("429")
+    monkeypatch.setattr(browser_bio, "fetch_and_store_bio_browser", fake_fetch)
+
+    thr = browser_bio.settings.bio_browser_soft_block_pause_threshold
+
+    async def fake_incr(campaign_id, account_id):
+        return thr  # simula il N-esimo soft-block consecutivo
+    monkeypatch.setattr(browser_bio, "_soft_block_incr", fake_incr)
+
+    defer = await browser_bio.scrape_bios_browser_session(cid, "acc-A")
+    assert defer is None  # pausa campagna, non altro retry
+    async with AsyncSessionLocal() as db:
+        c = await db.get(Campaign, cid)
+        assert c.status == CampaignStatus.paused
+
+
+@pytest.mark.asyncio
+async def test_session_expired_isolates_account_and_pauses(monkeypatch):
+    """Fix A: sessione scaduta (allow_login=False -> AccountSessionExpiredError) NON
+    ritenta all'infinito: isola l'account (challenge_required) e pausa la campagna, defer None."""
+    import uuid
+    from app.models.account import InstagramAccount, AccountStatus
+    from app.utils.exceptions import AccountSessionExpiredError
+    base = 971000000000 + int(datetime.utcnow().timestamp()) % 100000
+    acc_id = str(uuid.uuid4())
+    async with AsyncSessionLocal() as db:
+        db.add(InstagramAccount(id=acc_id, username=f"acc_exp_{base}",
+                                encrypted_password="x", status=AccountStatus.active,
+                                daily_message_limit=20))
+        camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
+        db.add(camp); await db.flush()
+        db.add(Follower(campaign_id=camp.id, ig_user_id=base,
+                        username=f"u{base}", status=FollowerStatus.pending))
+        await db.commit()
+        cid = camp.id
+
+    class _ExpiredSession:
+        def __init__(self, *a, **k): pass
+        async def open(self): return None
+        async def close(self): return None
+        class _P:
+            async def ensure_logged_in(self, account_id, allow_login=True):
+                raise AccountSessionExpiredError(account_id)
+        page = _P()
+
+    monkeypatch.setattr(browser_bio, "BrowserSession", _ExpiredSession)
+
+    defer = await browser_bio.scrape_bios_browser_session(cid, acc_id)
+    assert defer is None  # isolato, non retry
+    async with AsyncSessionLocal() as db:
+        from app.models.account import InstagramAccount as IA, AccountStatus as AS
+        c = await db.get(Campaign, cid)
+        a = await db.get(IA, acc_id)
+        assert c.status == CampaignStatus.paused
+        assert a.status == AS.challenge_required

@@ -185,6 +185,11 @@ class Settings(BaseSettings):
     # browser perde ~95% delle email. ON di default (e' lo scopo). Kill-switch se un giorno
     # /info/ dal browser venisse rate-limitato a volume.
     bio_browser_contact_info_enabled: bool = True
+    # Breaker soft-block sul canale browser (mirror del guard consecutivi del path API):
+    # dopo N mini-sessioni CONSECUTIVE di UN account chiuse in soft-block (429), invece
+    # di ritentare all'infinito ogni 15-30min, la campagna va in pausa e l'operatore
+    # viene avvisato. Il contatore si azzera appena l'account torna a scrapare (>=1 done).
+    bio_browser_soft_block_pause_threshold: int = 4
 
     # ── App-like media fetch dopo user_info in Fase Bio (Ramo B) ──
     # DISATTIVO di default. Su sessione API "nuda" ogni user_medias_v1 e' una 2a

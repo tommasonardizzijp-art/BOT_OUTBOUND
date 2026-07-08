@@ -18,7 +18,7 @@ from app.utils.timing import (
 from typing import Callable, Awaitable, Optional
 from app.utils.exceptions import (
     DMSendError, DMRestrictedError, AccountBannedError, AccountChallengeError,
-    DMAbortedBeforeSendError,
+    DMAbortedBeforeSendError, AccountSessionExpiredError,
 )
 
 
@@ -56,14 +56,22 @@ class InstagramPage:
             self._page = await self._context.new_page()
         return self._page
 
-    async def ensure_logged_in(self, account_id: str) -> None:
-        """Check if we're logged in; if not, perform login."""
+    async def ensure_logged_in(self, account_id: str, allow_login: bool = True) -> None:
+        """Check if we're logged in; if not, perform login.
+
+        allow_login=False (usato dallo SCRAPING): se la sessione e' scaduta NON
+        fa login automatico — solleva AccountSessionExpiredError. Il login
+        automatico via credenziali e' un rischio-ban (redirect a challenge il
+        giorno dopo) e va fatto solo a mano dall'operatore ('Login Browser').
+        """
         page = await self._get_page()
         await page.goto(self.BASE_URL, wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(1.5, 3.0))
 
         # Check if we're on the login page
         if "accounts/login" in page.url:
+            if not allow_login:
+                raise AccountSessionExpiredError(account_id)
             await self._do_login(account_id, page)
         elif await page.locator('[aria-label="Instagram"]').count() == 0:
             # Something unexpected — try navigating to home

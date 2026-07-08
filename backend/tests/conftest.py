@@ -37,6 +37,10 @@ def _init_test_db():
     async def _create():
         eng = create_async_engine(to_async_database_url(settings.database_url))
         async with eng.begin() as conn:
+            # drop+create: ogni run della suite parte da uno schema PULITO (il file
+            # sqlite persiste tra run; senza il drop i dati si accumulano e i test con
+            # valori unique fissi collidono / i conteggi driftano).
+            await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
         await eng.dispose()
 

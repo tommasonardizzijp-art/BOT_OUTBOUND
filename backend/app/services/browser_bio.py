@@ -36,6 +36,9 @@ from app.services.bot_state_service import is_halted
 from app.services.scrape_bios import bio_should_continue, pick_session_cap
 from app.services.work_enqueue import arq_redis_settings, ARQ_MAIN_QUEUE
 from app.browser.context_manager import BrowserSession
+from app.utils.exceptions import (
+    AccountChallengeError, AccountBannedError, AccountSessionExpiredError,
+)
 
 # App-id pubblico del web di Instagram (usato dal suo stesso JS per web_profile_info).
 WEB_APP_ID = "936619743392459"
@@ -175,7 +178,12 @@ async def _fetch_public_contact_inpage(raw_page, pk) -> dict | None:
     gia' fa con web_profile_info. Con app-id web risponde 200; senza da 400 "useragent mismatch"
     (IG valida la coerenza app-id/UA, e la nostra e' coerente). Kill-switch: bio_browser_contact_info_enabled.
 
-    Difensivo: non solleva mai. Ritorna un dict coi soli campi contatto, o None."""
+    Difensivo: non solleva mai. Ritorna:
+      - dict coi campi contatto in caso di successo;
+      - {"__rate_limited": status} se /info/ risponde 429/401/403 (il chiamante
+        lo tratta come soft_block: NON ingoiare il rate-limit di questo endpoint
+        mobile-shape, altrimenti si martella cieco a volume);
+      - None per qualsiasi altro miss benigno (no pk, no user, altri status, errore JS)."""
     if not pk:
         return None
     try:
@@ -202,7 +210,11 @@ async def _fetch_public_contact_inpage(raw_page, pk) -> dict | None:
         if isinstance(result, dict) and not result.get("__status") and not result.get("__err"):
             return result
         if isinstance(result, dict) and result.get("__status"):
-            logger.debug(f"[BioBrowser] /info/ HTTP {result['__status']} per pk={pk}")
+            st = result["__status"]
+            if st in (429, 401, 403):
+                logger.warning(f"[BioBrowser] /info/ HTTP {st} per pk={pk} — rate-limit, propago soft_block")
+                return {"__rate_limited": st}
+            logger.debug(f"[BioBrowser] /info/ HTTP {st} per pk={pk}")
         return None
     except Exception as e:
         logger.debug(f"[BioBrowser] /info/ in-page fallito pk={pk} ({type(e).__name__}: {e})")
@@ -251,6 +263,11 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     # motore browser perde ~95% delle email (verificato sul campo il 08/07).
     if settings.bio_browser_contact_info_enabled:
         info = await _fetch_public_contact_inpage(raw_page, shim.pk)
+        if isinstance(info, dict) and info.get("__rate_limited"):
+            # /info/ rate-limitato: NON ingoiare (era il bug INFO-1/PR-01). Propaga
+            # come soft_block cosi' il chiamante rilascia il claim e fa backoff/escalation.
+            st = info["__rate_limited"]
+            return "soft_block", Exception(f"/info/ HTTP {st}")
         if info:
             shim.public_email = info.get("public_email") or shim.public_email
             shim.public_phone_number = info.get("public_phone_number") or shim.public_phone_number
@@ -488,6 +505,113 @@ async def _resilient_release(db, follower_id, *, status=None, skip_reason=None):
     await db.commit()
 
 
+def _soft_block_redis_key(campaign_id: str, account_id: str) -> str:
+    return f"biobrowser:softblock:{campaign_id}:{account_id}"
+
+
+async def _soft_block_incr(campaign_id: str, account_id: str) -> int:
+    """Incrementa il contatore soft-block consecutivi per (campagna, account) in Redis
+    (TTL 2h: se l'account resta buono il conteggio decade). Difensivo: su Redis giu'
+    ritorna 1 (non falsa l'escalation ne' blocca)."""
+    try:
+        redis = await arq.create_pool(arq_redis_settings())
+        try:
+            key = _soft_block_redis_key(campaign_id, account_id)
+            n = await redis.incr(key)
+            await redis.expire(key, 7200)
+            return int(n)
+        finally:
+            await redis.aclose()
+    except Exception as e:
+        logger.debug(f"[BioBrowser] soft-block incr fallito ({type(e).__name__}) — assumo 1")
+        return 1
+
+
+async def _soft_block_reset(campaign_id: str, account_id: str) -> None:
+    """Azzera il contatore: l'account e' tornato a scrapare. Difensivo, non solleva."""
+    try:
+        redis = await arq.create_pool(arq_redis_settings())
+        try:
+            await redis.delete(_soft_block_redis_key(campaign_id, account_id))
+        finally:
+            await redis.aclose()
+    except Exception:
+        pass
+
+
+async def _pause_campaign_soft_block(campaign_id: str, account_id: str, n: int) -> None:
+    """Dopo N soft-block CONSECUTIVI di un account (mirror del guard del path API),
+    mette la campagna in pausa e avvisa: stop al `429 -> defer -> 429` infinito."""
+    from sqlalchemy import select
+    from app.models.campaign import Campaign, CampaignStatus
+    from app.models.activity_log import ActivityLog
+    from app.utils.events import emit as emit_event
+    async with AsyncSessionLocal() as db:
+        campaign = (await db.execute(
+            select(Campaign).where(Campaign.id == campaign_id)
+        )).scalar_one_or_none()
+        if campaign is not None and campaign.status in (
+            CampaignStatus.scraping, CampaignStatus.scraping_break
+        ):
+            campaign.status = CampaignStatus.paused
+            campaign.updated_at = datetime.utcnow()
+            db.add(ActivityLog(
+                campaign_id=campaign_id, action="bios_paused_soft_block",
+                details=_json.dumps({"account_id": account_id, "consecutive": n}),
+            ))
+            await db.commit()
+    msg = (f"Fase Bio browser in PAUSA: {n} soft-block (429) consecutivi sull'account "
+           f"{account_id[:8]} — serve riposo/verifica account.")
+    logger.error(f"[BioBrowser] {msg}")
+    emit_event(campaign_id, "scrape_stopped", msg, level="error")
+    try:
+        from app.services import notifier
+        asyncio.create_task(notifier.send_telegram(f"[BOT OUTBOUND] {msg}", level="error"))
+    except Exception:
+        pass
+
+
+async def _isolate_account_and_pause(campaign_id: str, account_id: str, exc: Exception) -> None:
+    """Isola l'account (challenge/ban/sessione scaduta) e mette la campagna in pausa —
+    mirror di isolate_challenged_account per il canale browser: un account fatale NON
+    deve restare 'active' (ogni retry ri-fallirebbe e martellerebbe IG)."""
+    from sqlalchemy import select
+    from app.models.campaign import Campaign, CampaignStatus
+    from app.models.account import InstagramAccount, AccountStatus
+    from app.models.activity_log import ActivityLog
+    from app.utils.events import emit as emit_event
+    exc_name = type(exc).__name__
+    async with AsyncSessionLocal() as db:
+        acc = (await db.execute(
+            select(InstagramAccount).where(InstagramAccount.id == account_id)
+        )).scalar_one_or_none()
+        label = acc.username if acc else account_id[:8]
+        if acc is not None:
+            acc.status = AccountStatus.challenge_required  # non-active: pulled out
+        campaign = (await db.execute(
+            select(Campaign).where(Campaign.id == campaign_id)
+        )).scalar_one_or_none()
+        if campaign is not None and campaign.status in (
+            CampaignStatus.scraping, CampaignStatus.scraping_break
+        ):
+            campaign.status = CampaignStatus.paused
+            campaign.updated_at = datetime.utcnow()
+        db.add(ActivityLog(
+            campaign_id=campaign_id, action="bios_account_isolated",
+            details=_json.dumps({"account": label, "exc": exc_name}),
+        ))
+        await db.commit()
+    msg = (f"Fase Bio browser: account @{label} isolato ({exc_name}) — campagna in pausa. "
+           f"Login manuale/verifica prima di riprendere.")
+    logger.error(f"[BioBrowser] {msg}")
+    emit_event(campaign_id, "scrape_stopped", msg, level="error")
+    try:
+        from app.services import notifier
+        asyncio.create_task(notifier.send_telegram(f"[BOT OUTBOUND] {msg}", level="error"))
+    except Exception:
+        pass
+
+
 async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int | None:
     """Una mini-sessione browser per UN account: apre, scrapa fino a un cap di
     profili claimati (pool disgiunto via claim_next_pending), chiude. Ritorna i
@@ -533,7 +657,9 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
     try:
         session = BrowserSession(account_id, headless=settings.bio_browser_headless)
         await session.open()
-        await session.page.ensure_logged_in(account_id)
+        # allow_login=False: lo scraping NON fa MAI login automatico (ban risk). Se la
+        # sessione e' scaduta -> AccountSessionExpiredError -> isolamento (except sotto).
+        await session.page.ensure_logged_in(account_id, allow_login=False)
 
         while done_count < cap and iterations < max_iterations:
             follower_is_private = False
@@ -583,6 +709,9 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                 iterations += 1
                 if outcome == "done":
                     done_count += 1
+                    if done_count == 1:
+                        # L'account scrapa: azzera la streak di soft-block consecutivi (Fix C).
+                        await _soft_block_reset(campaign_id, account_id)
                     # Sicuro leggere l'attributo qui (a differenza del resto di questo
                     # blocco, che usa solo uname/fid): si arriva a outcome == 'done'
                     # SOLO se il db.commit() dentro fetch_and_store_bio_browser e'
@@ -598,22 +727,22 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     )
                 elif outcome == "soft_block":
                     # Non bruciare i pending: rilascia il claim e fai backoff invece di
-                    # `return None` (che lasciava l'account silenziosamente sideline: il
-                    # task ARQ finiva senza Retry e non si ri-accodava piu' da solo per
-                    # questa run). Ritornando un defer il worker fa Retry(defer=...) e
-                    # l'account riprova piu' tardi, senza essere abbandonato.
-                    # NB: un guard globale "pausa campagna dopo N soft-block consecutivi
-                    # cross-account" e' rimandato (richiederebbe stato condiviso in
-                    # Redis/DB oltre il lock per-follower gia' presente); l'operatore
-                    # mantiene comunque la pausa manuale dal control plane, e ogni
-                    # soft-block resta visibile via l'evento qui sotto.
+                    # `return None`. Fix C: contatore soft-block CONSECUTIVI per account
+                    # (Redis, azzerato appena l'account torna a scrapare — vedi done sopra).
+                    # Backoff CRESCENTE con la streak; dopo N consecutivi -> pausa campagna
+                    # (mirror del guard del path API), stop al `429 -> defer -> 429` infinito.
                     await _resilient_release(db, fid)
                     logger.warning(f"[BioBrowser] soft-block su @{uname}: {err} — backoff")
                     emit_event(
                         campaign_id, "scrape_progress",
                         f"@{uname}: soft-block (429) — backoff", level="warn",
                     )
-                    return random.randint(900, 1800)  # 15-30 min
+                    n_sb = await _soft_block_incr(campaign_id, account_id)
+                    if n_sb >= settings.bio_browser_soft_block_pause_threshold:
+                        await _pause_campaign_soft_block(campaign_id, account_id, n_sb)
+                        return None  # campagna in pausa: stop, niente altro retry
+                    base = random.randint(900, 1800)          # 15-30 min alla 1a
+                    return min(3600, base * n_sb)             # cresce con la streak, cap 60 min
                 elif outcome == "network":
                     # Stessa logica del soft_block: rilascia il claim, retry breve
                     # invece di sideline silenzioso.
@@ -692,6 +821,13 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
             f"raggiunto con solo {done_count}/{cap} bio reali — pool skip-heavy, defer breve"
         )
         return 60
+    except (AccountChallengeError, AccountBannedError, AccountSessionExpiredError) as e:
+        # Fix A: challenge/ban/sessione scaduta = FATALE per l'account. NON ritentare
+        # (era `return 300` = retry ogni 5 min all'infinito): isola l'account e pausa
+        # la campagna. Il login manuale/verifica lo fa l'operatore.
+        logger.error(f"[BioBrowser] account fatale @{account_id[:8]}: {type(e).__name__} — isolo + pauso")
+        await _isolate_account_and_pause(campaign_id, account_id, e)
+        return None
     except Exception as e:
         logger.warning(f"[BioBrowser] mini-sessione @{account_id[:8]} fallita ({type(e).__name__}: {e})")
         # errore d'apertura/login: breve retry via defer, non perde i pending

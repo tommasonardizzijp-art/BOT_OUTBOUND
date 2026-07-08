@@ -36,8 +36,19 @@ async def test_fetch_contact_success_returns_fields():
 
 
 @pytest.mark.asyncio
-async def test_fetch_contact_http_status_returns_none():
-    page = _FakePage({"__status": 429})
+async def test_fetch_contact_rate_limited_returns_marker():
+    # 429/401/403 su /info/ NON va ingoiato: torna il marker rate-limited (Fix B),
+    # cosi' il chiamante lo propaga come soft_block invece di continuare cieco.
+    for st in (429, 401, 403):
+        page = _FakePage({"__status": st})
+        out = await _fetch_public_contact_inpage(page, "1")
+        assert out == {"__rate_limited": st}
+
+
+@pytest.mark.asyncio
+async def test_fetch_contact_other_status_returns_none():
+    # status non-rate-limit (es. 404) = miss benigno -> None (nessun soft_block)
+    page = _FakePage({"__status": 404})
     assert await _fetch_public_contact_inpage(page, "1") is None
 
 
