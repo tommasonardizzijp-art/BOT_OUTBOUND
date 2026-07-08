@@ -161,6 +161,54 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
             pass
 
 
+async def _fetch_public_contact_inpage(raw_page, pk) -> dict | None:
+    """Recupera i contatti pubblici (public_email/public_phone) via `/api/v1/users/{pk}/info/`
+    con un in-page fetch DENTRO la sessione browser (cookie web, Chrome reale, x-ig-app-id web).
+
+    Perche' serve: `web_profile_info` (quello che il JS di IG spara sul profilo) NON espone
+    l'email/telefono business — torna `business_email=null`. Il dato di contatto vive invece
+    su `/info/`, nei campi mobile-native `public_email`/`public_phone_number`/`contact_phone_number`
+    (verificato 2026-07-08: web_profile_info=null, /info/ con app-id web=200 con l'email giusta).
+
+    Anti-detection: NON e' il "pattern API nudo" mobile (device sintetico) che causa i checkpoint —
+    e' il browser reale (UA Chrome, TLS, cookie web) che chiama un endpoint web-autenticato, come
+    gia' fa con web_profile_info. Con app-id web risponde 200; senza da 400 "useragent mismatch"
+    (IG valida la coerenza app-id/UA, e la nostra e' coerente). Kill-switch: bio_browser_contact_info_enabled.
+
+    Difensivo: non solleva mai. Ritorna un dict coi soli campi contatto, o None."""
+    if not pk:
+        return None
+    try:
+        result = await raw_page.evaluate(
+            """async (args) => {
+                const [pk, appId] = args;
+                try {
+                    const r = await fetch(`/api/v1/users/${pk}/info/`,
+                        { headers: { 'x-ig-app-id': appId }, credentials: 'include' });
+                    if (!r.ok) return { __status: r.status };
+                    const b = await r.json();
+                    const u = b && b.user;
+                    if (!u) return null;
+                    return {
+                        public_email: u.public_email ?? null,
+                        public_phone_number: u.public_phone_number ?? null,
+                        contact_phone_number: u.contact_phone_number ?? null,
+                        public_phone_country_code: u.public_phone_country_code ?? null,
+                    };
+                } catch (e) { return { __err: String(e) }; }
+            }""",
+            [str(pk), WEB_APP_ID],
+        )
+        if isinstance(result, dict) and not result.get("__status") and not result.get("__err"):
+            return result
+        if isinstance(result, dict) and result.get("__status"):
+            logger.debug(f"[BioBrowser] /info/ HTTP {result['__status']} per pk={pk}")
+        return None
+    except Exception as e:
+        logger.debug(f"[BioBrowser] /info/ in-page fallito pk={pk} ({type(e).__name__}: {e})")
+        return None
+
+
 async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -> tuple[str, Exception | None]:
     """Come `fetch_and_store_bio` ma via browser. Scrive gli STESSI campi Follower +
     upsert_lead. NON consuma il cap API (nessun user_info_v1).
@@ -196,6 +244,21 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
         return "error", Exception(f"web_profile_info HTTP {st}")
 
     shim = web_user_to_shim(user)
+
+    # Arricchimento contatti: web_profile_info NON espone email/telefono business
+    # (business_email=null). Li prendiamo da /api/v1/users/{pk}/info/ (public_email/
+    # public_phone_number) con un in-page fetch web-autenticato. Senza questo, il
+    # motore browser perde ~95% delle email (verificato sul campo il 08/07).
+    if settings.bio_browser_contact_info_enabled:
+        info = await _fetch_public_contact_inpage(raw_page, shim.pk)
+        if info:
+            shim.public_email = info.get("public_email") or shim.public_email
+            shim.public_phone_number = info.get("public_phone_number") or shim.public_phone_number
+            shim.contact_phone_number = info.get("contact_phone_number") or shim.contact_phone_number
+            shim.public_phone_country_code = (
+                info.get("public_phone_country_code") or shim.public_phone_country_code
+            )
+
     contacts = extract_contacts(shim)
 
     # Aggiorna full_name se il web lo espone e in DB manca (la Fase Lista a volte no).

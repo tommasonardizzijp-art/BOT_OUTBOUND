@@ -179,6 +179,12 @@ class Settings(BaseSettings):
     bio_browser_reels_dwell_min_s: float = 0.0    # sosta su ciascun reel prima di scorrere
     bio_browser_reels_dwell_max_s: float = 10.0
     bio_browser_open_post_ratio: float = 0.25     # prob. di aprire 1 post su profilo pubblico
+    # Arricchimento contatti via /api/v1/users/{pk}/info/ (in-page fetch web-autenticato):
+    # web_profile_info NON espone email/telefono business (business_email=null); /info/ con
+    # app-id web li da' in public_email/public_phone_number (misurato 08/07). Senza, il motore
+    # browser perde ~95% delle email. ON di default (e' lo scopo). Kill-switch se un giorno
+    # /info/ dal browser venisse rate-limitato a volume.
+    bio_browser_contact_info_enabled: bool = True
 
     # ── App-like media fetch dopo user_info in Fase Bio (Ramo B) ──
     # DISATTIVO di default. Su sessione API "nuda" ogni user_medias_v1 e' una 2a
