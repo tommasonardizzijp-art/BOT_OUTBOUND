@@ -673,9 +673,6 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     if (!campaign) return
     const current = campaign.inbox_engine ?? 'browser'
     if (newEngine === current) return
-    if (newEngine === 'browser' && current === 'api') {
-      if (!confirm('Sconsigliato su inbox grandi: il browser deve riattraversare quanto già fatto.\n\nContinuare comunque?')) return
-    }
     setSwitchingEngine(true)
     try {
       await api.campaigns.update(id, { inbox_engine: newEngine })
@@ -963,23 +960,11 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <div>
             <p className="text-sm text-gray-300 font-medium">Engine estrazione inbox</p>
             <p className="text-xs text-gray-500 mt-0.5">
-              Seleziona il motore usato per leggere i thread DM già avviati
+              L&apos;inbox dei DM già avviati si legge via API. Il motore browser è stato rimosso
+              (la lista web dei DM non espone username/pk).
             </p>
           </div>
           <div className="flex gap-3">
-            <button
-              type="button"
-              disabled={switchingEngine}
-              onClick={() => handleInboxEngineSwitch('browser')}
-              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
-                (campaign.inbox_engine ?? 'browser') === 'browser'
-                  ? 'bg-purple-600/20 border-purple-500 text-purple-300'
-                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
-              }`}
-            >
-              🛡️ Browser (prudente, lento)
-              <span className="block text-xs font-normal mt-0.5 opacity-70">Consigliato per account principali</span>
-            </button>
             <button
               type="button"
               disabled={switchingEngine}
@@ -990,8 +975,17 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                   : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
               }`}
             >
-              ⚡ API (veloce, più rischio)
-              <span className="block text-xs font-normal mt-0.5 opacity-70">Solo account secondari</span>
+              ⚡ API
+              <span className="block text-xs font-normal mt-0.5 opacity-70">Unico motore supportato per l&apos;inbox</span>
+            </button>
+            <button
+              type="button"
+              disabled
+              title="L'estrazione dell'inbox usa sempre l'API: il motore browser è stato rimosso."
+              className="flex-1 py-2 px-3 rounded-lg border text-sm font-medium bg-gray-800 border-gray-700 text-gray-500 opacity-50 cursor-not-allowed"
+            >
+              🛡️ Browser (non disponibile)
+              <span className="block text-xs font-normal mt-0.5 opacity-70">Deprecato — l&apos;inbox usa sempre l&apos;API</span>
             </button>
           </div>
           {switchingEngine && (
@@ -1002,14 +996,15 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         </div>
       )}
 
-      {/* Bio engine switch — solo campagne non ancora avviate (draft): una volta in
-          corso il motore bio è fissato (fan-out browser / loop API assumono un engine solo) */}
-      {campaign.status === 'draft' && (
+      {/* Bio engine switch — campagne ferme (draft/ready/paused/error): si cambia solo a
+          campagna NON in corso (un fan-out browser e un loop API attivi si pesterebbero).
+          Vale sia per scrape (Fase Bio) sia per import (risoluzione lista). */}
+      {['draft', 'ready', 'paused', 'error'].includes(campaign.status) && (
         <div className="rounded-lg border border-gray-700/50 bg-gray-800/30 px-4 py-3 space-y-3">
           <div>
-            <p className="text-sm text-gray-300 font-medium">Motore Fase Bio</p>
+            <p className="text-sm text-gray-300 font-medium">Motore {campaign.source_type === 'import' ? 'risoluzione' : 'Fase Bio'}</p>
             <p className="text-xs text-gray-500 mt-0.5">
-              Seleziona il motore usato per recuperare bio/contatti dei profili
+              Motore per recuperare bio/contatti dei profili · API (veloce, consuma cap) o Browser (prudente, no cap)
             </p>
           </div>
           <div className="flex gap-3">

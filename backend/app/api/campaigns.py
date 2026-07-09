@@ -300,10 +300,12 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
             campaign.scrape_cursor = None  # cursore vecchio non valido per il nuovo engine
         campaign.inbox_engine = data.inbox_engine
     if data.bio_engine is not None:
-        if campaign.status != CampaignStatus.draft:
+        if campaign.status not in (
+            CampaignStatus.draft, CampaignStatus.ready, CampaignStatus.paused, CampaignStatus.error,
+        ):
             raise HTTPException(
                 status_code=400,
-                detail="Il motore Fase Bio si cambia solo a campagna non ancora avviata (draft).",
+                detail="Il motore Fase Bio si cambia solo a campagna ferma (draft/ready/paused/error), non mentre sta girando.",
             )
         campaign.bio_engine = data.bio_engine
     if data.scrape_session_size is not None:
@@ -412,7 +414,9 @@ async def import_status(campaign_id: str, db: AsyncSession = Depends(get_db)):
     total = sum(counts.values())
     return {
         "total": total,
-        "pending": counts.get("pending", 0),
+        # 'resolving' = righe in volo sul motore browser (claim atomico): mostrate come
+        # pending (in coda) cosi' la somma dei bucket resta = total.
+        "pending": counts.get("pending", 0) + counts.get("resolving", 0),
         "resolved": counts.get("resolved", 0),
         "not_found": counts.get("not_found", 0),
         "private": counts.get("private", 0),

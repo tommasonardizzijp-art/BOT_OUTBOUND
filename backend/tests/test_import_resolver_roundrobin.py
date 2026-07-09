@@ -116,9 +116,11 @@ class TestResolveImportsLoopRoundRobin:
         db.commit = AsyncMock()
         db.add = MagicMock()
         db.scalar = AsyncMock(return_value=4)
-        # ordine execute: Campaign, poi (pending-row, follower-dup) ×4, poi pending=None
+        # ordine execute: Campaign, reset 'resolving'->'pending' (path API), poi
+        # (pending-row, follower-dup) ×4, poi pending=None
         db.execute = AsyncMock(side_effect=[
             _result(campaign),
+            _result(None),  # UPDATE reset ImportedProfile 'resolving'->'pending' (ritorno ignorato)
             _result(rows[0]), _result(None),
             _result(rows[1]), _result(None),
             _result(rows[2]), _result(None),

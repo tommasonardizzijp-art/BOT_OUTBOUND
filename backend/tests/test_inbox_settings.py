@@ -8,9 +8,10 @@ def test_inbox_api_pacing_present():
 
 
 def test_inbox_api_delay_bounds_updated():
-    # Bound 2-10 con mediana (min+max)/2 = 6s (lognormale sigma 0.9 in scrape_inbox).
-    assert settings.inbox_api_page_delay_min_seconds == 2
-    assert settings.inbox_api_page_delay_max_seconds == 10
+    # Bound 10-40 (commit 156ee47: pacing inbox rallentato, era 2-10) con mediana
+    # (min+max)/2 = 25s (lognormale sigma 0.9 in scrape_inbox).
+    assert settings.inbox_api_page_delay_min_seconds == 10
+    assert settings.inbox_api_page_delay_max_seconds == 40
 
 
 def test_inbox_session_and_break_bounds():

@@ -168,25 +168,48 @@ def test_update_bio_engine_allowed_in_draft(client, _temp_db):
     assert resp.json()["bio_engine"] == "browser"
 
 
+@pytest.mark.parametrize("allowed_status", [
+    CampaignStatus.ready,
+    CampaignStatus.paused,
+    CampaignStatus.error,
+])
+def test_update_bio_engine_allowed_when_stopped(client, _temp_db, allowed_status):
+    """bio_engine change is allowed on a STOPPED campaign (draft/ready/paused/error),
+    mirroring inbox_engine — so the operator can switch API<->Browser on an existing
+    campaign (e.g. pause an API import, switch to Browser, resume). It's the running
+    states that are blocked (see below)."""
+    _, sf = _temp_db
+    camp = _make_campaign(
+        name=f"Allowed-{allowed_status.value}", status=allowed_status, bio_engine="api"
+    )
+    camp_id = camp.id
+
+    async def _seed(db):
+        db.add(camp)
+        await db.commit()
+
+    _run(sf, _seed)
+
+    resp = client.put(f"/api/campaigns/{camp_id}", json={"bio_engine": "browser"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["bio_engine"] == "browser"
+
+
 @pytest.mark.parametrize("blocked_status", [
     CampaignStatus.scraping,
     CampaignStatus.scraping_break,
-    CampaignStatus.ready,
-    CampaignStatus.paused,
     CampaignStatus.running,
     CampaignStatus.scraping_and_running,
     CampaignStatus.listing,
     CampaignStatus.completed,
-    CampaignStatus.error,
 ])
-def test_update_bio_engine_rejected_outside_draft(client, _temp_db, blocked_status):
+def test_update_bio_engine_rejected_while_running(client, _temp_db, blocked_status):
     """
-    bio_engine change must be rejected once a campaign has left 'draft' — a
-    scraping campaign already has bio workers/fan-out assuming one engine
-    (browser fan-out enqueues per-account tasks; switching under it mid-run
-    would leave orphaned/duplicated work). Guard is intentionally stricter
-    than inbox_engine's (draft/ready/paused/error) since there is no cursor
-    to reconcile, just "has this campaign started or not".
+    bio_engine change must be rejected while a campaign is IN CORSO — a scraping/
+    resolving campaign has bio workers/fan-out assuming one engine (browser fan-out
+    enqueues per-account tasks; switching under it mid-run would leave orphaned/
+    duplicated work). Allowed states are the stopped ones (draft/ready/paused/error),
+    mirroring inbox_engine.
     """
     _, sf = _temp_db
     camp = _make_campaign(
