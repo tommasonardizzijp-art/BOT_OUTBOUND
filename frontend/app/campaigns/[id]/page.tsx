@@ -970,19 +970,6 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             <button
               type="button"
               disabled={switchingEngine}
-              onClick={() => handleInboxEngineSwitch('browser')}
-              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
-                (campaign.inbox_engine ?? 'browser') === 'browser'
-                  ? 'bg-purple-600/20 border-purple-500 text-purple-300'
-                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
-              }`}
-            >
-              🛡️ Browser (prudente, lento)
-              <span className="block text-xs font-normal mt-0.5 opacity-70">Consigliato per account principali</span>
-            </button>
-            <button
-              type="button"
-              disabled={switchingEngine}
               onClick={() => handleInboxEngineSwitch('api')}
               className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
                 campaign.inbox_engine === 'api'
@@ -992,6 +979,19 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             >
               ⚡ API (veloce, più rischio)
               <span className="block text-xs font-normal mt-0.5 opacity-70">Solo account secondari</span>
+            </button>
+            <button
+              type="button"
+              disabled={switchingEngine}
+              onClick={() => handleInboxEngineSwitch('browser')}
+              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
+                (campaign.inbox_engine ?? 'browser') === 'browser'
+                  ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              🛡️ Browser (prudente, lento)
+              <span className="block text-xs font-normal mt-0.5 opacity-70">Consigliato per account principali</span>
             </button>
           </div>
           {switchingEngine && (
