@@ -366,12 +366,22 @@ async def enqueue_scrape(campaign_id: str) -> bool:
 
 
 async def _enqueue_resolve_with_redis(redis, campaign_id: str) -> bool:
+    """Enqueue del job di risoluzione import CON guardia di concorrenza (come
+    `_reenqueue_phase`).
+
+    ⚠️ NON cancella `arq:in-progress:{job_id}`: e' il lock con cui ARQ garantisce UN
+    solo job per job_id. Cancellarlo (come faceva la versione precedente) lasciava
+    partire un SECONDO resolve concorrente sullo stesso campaign su ogni resume/unhalt/
+    boot-recovery. Con `bio_engine=browser` questo significa due sessioni Patchright in
+    parallelo (potenzialmente sullo STESSO account) + race sulle ImportedProfile (che non
+    hanno row-lock: la correttezza del path browser dipende dall'essere job singolo).
+    Se il job e' gia' in esecuzione si esce no-op; si cancella solo la retry parcheggiata
+    da Retry(defer) cosi' un resume manuale riparte subito."""
     job_id = f"resolve:{campaign_id}"
-    await redis.delete(
-        f"arq:job:{job_id}",
-        f"arq:retry:{job_id}",
-        f"arq:in-progress:{job_id}",
-    )
+    if await redis.exists(f"arq:in-progress:{job_id}"):
+        logger.info(f"[Enqueue] {job_id} gia' in esecuzione — skip enqueue duplicato")
+        return False
+    await redis.delete(f"arq:job:{job_id}", f"arq:retry:{job_id}")
     await redis.enqueue_job(
         "resolve_imports_task",
         campaign_id,

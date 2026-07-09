@@ -113,8 +113,12 @@ async def _resolve_one(db, campaign, username, pool, current_account, current_cl
     return None, RuntimeError("resolve retry esaurito"), current_account
 
 
-async def resolve_imports(campaign_id: str) -> None:
-    """Resolve all pending ImportedProfile rows into bio_scraped Followers."""
+async def resolve_imports(campaign_id: str) -> int | None:
+    """Resolve all pending ImportedProfile rows into bio_scraped Followers.
+
+    Ritorna i secondi di defer se il motore browser ha colpito una pausa sessione
+    (il task solleva Retry(defer=...)); None altrimenti (path API, completamento,
+    interruzione)."""
     _RESOLVING = (CampaignStatus.scraping, CampaignStatus.scraping_and_running, CampaignStatus.scraping_break)
     async with AsyncSessionLocal() as db:
         campaign = (await db.execute(select(Campaign).where(Campaign.id == campaign_id))).scalar_one_or_none()
@@ -130,6 +134,16 @@ async def resolve_imports(campaign_id: str) -> None:
         if await is_halted(db):
             emit_event(campaign_id, "scrape_stopped", "Bot in pausa globale — risoluzione non avviata", level="warn")
             return
+
+        # Motore browser: risoluzione via Patchright (no API instagrapi, no cap). Stesso
+        # schema del dispatch runtime della Fase Bio (scrape_bios.py:82): branch sul campo
+        # bio_engine, delega al gemello browser e propaga il defer. resolve_imports_browser
+        # ri-carica campaign e ri-controlla status/halt con sessioni proprie. (La connessione
+        # esterna resta aperta durante la delega, come il path API la tiene durante le pause
+        # sessione 30-45 min piu' sotto: pattern accettato, non peggiorativo.)
+        if getattr(campaign, "bio_engine", "api") == "browser":
+            from app.services.browser_import import resolve_imports_browser
+            return await resolve_imports_browser(campaign_id)
 
         emit_event(campaign_id, "scrape_start", "Risoluzione profili importati avviata...")
         pool = None
