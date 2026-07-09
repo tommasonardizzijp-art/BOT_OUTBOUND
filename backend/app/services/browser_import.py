@@ -391,7 +391,7 @@ async def resolve_imports_browser_session(campaign_id: str, account_id: str) -> 
         campaign = (await db.execute(
             select(Campaign).where(Campaign.id == campaign_id)
         )).scalar_one_or_none()
-        if campaign is None or campaign.status not in _RESOLVING:
+        if campaign is None or campaign.status not in _RESOLVING or getattr(campaign, "bio_engine", "api") != "browser":
             return None
         if await is_halted(db):
             return None
@@ -424,13 +424,22 @@ async def resolve_imports_browser_session(campaign_id: str, account_id: str) -> 
                 campaign = (await db.execute(
                     select(Campaign).where(Campaign.id == campaign_id)
                 )).scalar_one_or_none()
-                if campaign is None or campaign.status not in _RESOLVING:
+                # Bail se lo status esce da _RESOLVING O se l'engine e' passato ad 'api':
+                # uno switch browser->api lascia parked i task browser, che NON devono girare
+                # in parallelo al loop API (footprint doppio + race sulle ImportedProfile).
+                if campaign is None or campaign.status not in _RESOLVING or getattr(campaign, "bio_engine", "api") != "browser":
                     return None
 
                 row = await claim_next_pending_import(db, campaign_id, account_id)
                 if row is None:
-                    await _complete_import_browser(campaign_id)
-                    return None  # pool globale esaurito
+                    if await _complete_import_browser(campaign_id):
+                        return None  # pool esaurito -> campagna completata
+                    # 'pending' vuoto ma restano righe 'resolving' (in volo su altri account,
+                    # o ORFANE da una sessione morta): resta vivo e ritenta dopo la finestra
+                    # stale (LOCK_TIMEOUT), cosi' il prossimo claim_next_pending_import le
+                    # recupera. Senza questo defer la campagna resterebbe bloccata per sempre.
+                    from app.services.campaign_orchestrator import LOCK_TIMEOUT_MINUTES
+                    return LOCK_TIMEOUT_MINUTES * 60 + 60
 
                 rid, uname = row.id, row.username
                 try:

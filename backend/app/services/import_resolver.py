@@ -157,6 +157,19 @@ async def resolve_imports(campaign_id: str) -> None:
                 emit_event(campaign_id, "scrape_start", f"Risoluzione via browser — {n} account in parallelo")
             return
 
+        # Recupero engine-agnostico: le righe 'resolving' (create SOLO dal motore browser
+        # come claim atomico) sono invisibili a questo loop API (SELECT status='pending').
+        # Se siamo sul path API significa che il browser NON e' l'engine attivo (switch
+        # browser->api, o sessione browser morta): riporto quelle righe a 'pending' cosi'
+        # vengono risolte, invece di restare orfane e far completare la campagna perdendo lead.
+        from sqlalchemy import update as _update
+        await db.execute(
+            _update(ImportedProfile)
+            .where(ImportedProfile.campaign_id == campaign_id, ImportedProfile.status == "resolving")
+            .values(status="pending", updated_at=datetime.utcnow())
+        )
+        await db.commit()
+
         emit_event(campaign_id, "scrape_start", "Risoluzione profili importati avviata...")
         pool = None
         try:

@@ -414,7 +414,9 @@ async def import_status(campaign_id: str, db: AsyncSession = Depends(get_db)):
     total = sum(counts.values())
     return {
         "total": total,
-        "pending": counts.get("pending", 0),
+        # 'resolving' = righe in volo sul motore browser (claim atomico): mostrate come
+        # pending (in coda) cosi' la somma dei bucket resta = total.
+        "pending": counts.get("pending", 0) + counts.get("resolving", 0),
         "resolved": counts.get("resolved", 0),
         "not_found": counts.get("not_found", 0),
         "private": counts.get("private", 0),

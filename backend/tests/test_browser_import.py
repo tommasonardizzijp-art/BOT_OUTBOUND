@@ -713,3 +713,87 @@ async def test_import_account_task_no_retry_when_none(monkeypatch):
     monkeypatch.setattr("app.services.browser_import.resolve_imports_browser_session", fake_session)
 
     await tq.browser_import_account_task({}, "cid", "acc")  # non solleva
+
+
+# --------------------------------------------------------------------------- #
+# Robustezza 'resolving' (fix dalla review concorrenza)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_session_bails_when_engine_switched_to_api(monkeypatch):
+    # Un task browser parcheggiato NON deve girare se l'engine e' passato ad 'api'
+    # (altrimenti gira in parallelo al loop API: footprint doppio + race).
+    cid = await _mk_import_campaign(engine="api", n_pending=2)
+
+    def _boom(*a, **k):
+        raise AssertionError("non deve aprire il browser se bio_engine=api")
+    monkeypatch.setattr(bi, "BrowserSession", _boom)
+
+    defer = await bi.resolve_imports_browser_session(cid, "acc-A")
+    assert defer is None
+    async with AsyncSessionLocal() as db:
+        pend = await db.scalar(select(func.count()).select_from(ImportedProfile).where(
+            ImportedProfile.campaign_id == cid, ImportedProfile.status == "pending"))
+        assert pend == 2  # righe intatte
+
+
+@pytest.mark.asyncio
+async def test_session_defers_when_open_rows_remain(monkeypatch):
+    # 0 pending ma 1 'resolving' (in volo/orfana): la sessione NON termina, fa defer per
+    # ripassare dopo la finestra stale e recuperarla (no campagna bloccata per sempre).
+    from app.services.campaign_orchestrator import LOCK_TIMEOUT_MINUTES
+    cid = await _mk_import_campaign(engine="browser", n_pending=0)
+    async with AsyncSessionLocal() as db:
+        db.add(ImportedProfile(campaign_id=cid, raw_input="x", username="x", status="resolving"))
+        await db.commit()
+
+    _use_fake_browser(monkeypatch, cap=5)
+
+    defer = await bi.resolve_imports_browser_session(cid, "acc-A")
+    assert defer == LOCK_TIMEOUT_MINUTES * 60 + 60
+    async with AsyncSessionLocal() as db:
+        c = await db.get(Campaign, cid)
+        assert c.status == CampaignStatus.scraping  # NON completata: 'resolving' ancora aperta
+
+
+@pytest.mark.asyncio
+async def test_api_path_resets_orphaned_resolving(monkeypatch):
+    # Sul path API le 'resolving' orfane (residuo di un motore browser) devono tornare
+    # 'pending', altrimenti la campagna completa perdendo quei lead.
+    from app.services import import_resolver as ir
+    from app.services.scraping_pool import ScrapingPoolEmpty
+    cid = await _mk_import_campaign(engine="api", n_pending=1)
+    async with AsyncSessionLocal() as db:
+        db.add(ImportedProfile(campaign_id=cid, raw_input="orph", username="orph", status="resolving"))
+        await db.commit()
+
+    async def fake_build(*a, **k):
+        raise ScrapingPoolEmpty("stop dopo il reset")
+    monkeypatch.setattr(ir.ScrapingPool, "build", staticmethod(fake_build))
+
+    await ir.resolve_imports(cid)  # reset -> poi pool build fallisce -> error
+
+    async with AsyncSessionLocal() as db:
+        resolving = await db.scalar(select(func.count()).select_from(ImportedProfile).where(
+            ImportedProfile.campaign_id == cid, ImportedProfile.status == "resolving"))
+        pend = await db.scalar(select(func.count()).select_from(ImportedProfile).where(
+            ImportedProfile.campaign_id == cid, ImportedProfile.status == "pending"))
+        assert resolving == 0        # recuperata
+        assert pend == 2             # originale pending + resolving recuperata
+
+
+@pytest.mark.asyncio
+async def test_import_status_folds_resolving_into_pending():
+    from app.api.campaigns import import_status
+    cid = await _mk_import_campaign(n_pending=2)
+    async with AsyncSessionLocal() as db:
+        db.add(ImportedProfile(campaign_id=cid, raw_input="r", username="r", status="resolving"))
+        await db.commit()
+
+    async with AsyncSessionLocal() as db:
+        res = await import_status(cid, db)
+
+    assert res["total"] == 3
+    assert res["pending"] == 3  # 2 pending + 1 resolving (in coda)
+    # i bucket sommano al totale (nessuna riga 'invisibile')
+    assert (res["pending"] + res["resolved"] + res["not_found"]
+            + res["private"] + res["error"]) == res["total"]
