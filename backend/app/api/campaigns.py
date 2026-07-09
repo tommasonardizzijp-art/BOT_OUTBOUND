@@ -355,20 +355,23 @@ async def delete_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
             detail="Metti in pausa la campagna prima di eliminarla (job attivi).",
         )
 
-    # BUG-NEW-21: kill any lingering ARQ worker/scrape/pregen keys for this campaign
-    # so they don't block re-use of the same job_ids in future campaigns.
+    # BUG-NEW-21: kill any lingering ARQ job for this campaign (per OGNI fase, non
+    # solo worker/scrape/pregen) cosi' non restano job zombie in defer che piu'
+    # tardi sparano a vuoto (`Campaign ... not found`) o riaprono un browser per
+    # una campagna morta, ne' bloccano il riuso dei job_id. Vedi
+    # campaign_cleanup_redis_keys.
     try:
         import arq
+        from app.services.work_enqueue import campaign_cleanup_redis_keys
+
         redis = await arq.create_pool(_arq_redis_settings())
         ca_result = await db.execute(
-            select(CampaignAccount).where(CampaignAccount.campaign_id == campaign_id)
+            select(CampaignAccount.account_id).where(CampaignAccount.campaign_id == campaign_id)
         )
-        for ca in ca_result.scalars().all():
-            job_id = f"worker:{campaign_id}:{ca.account_id}"
-            await redis.delete(f"arq:job:{job_id}", f"arq:retry:{job_id}")
-        # Also clean up scrape/pregen keys
-        for suffix in [f"scrape:{campaign_id}", f"resolve:{campaign_id}", f"pregen:{campaign_id}:preview", f"pregen:{campaign_id}:full"]:
-            await redis.delete(f"arq:job:{suffix}", f"arq:retry:{suffix}")
+        account_ids = list(ca_result.scalars().all())
+        keys = campaign_cleanup_redis_keys(campaign_id, account_ids)
+        if keys:
+            await redis.delete(*keys)
         await redis.aclose()
     except Exception as e:
         logger.warning(f"Could not clean ARQ keys for campaign {campaign_id}: {e}")

@@ -7,6 +7,7 @@ from app.models.campaign import Campaign, CampaignStatus
 from app.services.work_enqueue import (
     DM_STARTUP_STAGGER_MAX_SECONDS,
     DM_STARTUP_STAGGER_MIN_SECONDS,
+    campaign_cleanup_redis_keys,
     dm_startup_stagger_seconds,
     dm_worker_job_id,
     dm_worker_redis_keys,
@@ -76,3 +77,41 @@ def test_dm_worker_redis_keys_cover_deferred_and_running_jobs():
         "arq:retry:worker:camp:acct",
         "arq:in-progress:worker:camp:acct",
     )
+
+
+def test_campaign_cleanup_keys_cover_every_phase_jobid_scheme():
+    """Regressione: prima list:/bios:/biobrowser:/importbrowser: non venivano
+    purgati alla delete -> job zombie che sparavano `Campaign ... not found`."""
+    keys = set(campaign_cleanup_redis_keys("camp", ["a1", "a2"]))
+
+    # Fasi con fan-out per-account (incluse quelle che prima erano orfane).
+    for acct in ("a1", "a2"):
+        for prefix in ("worker", "biobrowser", "importbrowser"):
+            assert f"arq:job:{prefix}:camp:{acct}" in keys
+            assert f"arq:retry:{prefix}:camp:{acct}" in keys
+            assert f"arq:in-progress:{prefix}:camp:{acct}" in keys
+
+    # Fasi mono-job: list e bios erano quelle che perdevano job in defer.
+    for suffix in (
+        "list:camp",
+        "bios:camp",
+        "scrape:camp",
+        "resolve:camp",
+        "pregen:camp:preview",
+        "pregen:camp:full",
+    ):
+        assert f"arq:job:{suffix}" in keys
+        assert f"arq:retry:{suffix}" in keys
+        assert f"arq:in-progress:{suffix}" in keys
+
+
+def test_campaign_cleanup_keys_have_no_duplicates():
+    keys = campaign_cleanup_redis_keys("camp", ["a1"])
+    assert len(keys) == len(set(keys))
+
+
+def test_campaign_cleanup_keys_without_accounts_still_purge_phase_jobs():
+    """Campagna import senza CampaignAccount: le chiavi mono-job vanno purgate lo stesso."""
+    keys = campaign_cleanup_redis_keys("camp", [])
+    assert "arq:job:list:camp" in keys
+    assert "arq:job:bios:camp" in keys

@@ -44,6 +44,43 @@ def dm_worker_redis_keys(campaign_id: str, account_id: str) -> tuple[str, str, s
     )
 
 
+def campaign_cleanup_redis_keys(campaign_id: str, account_ids) -> list[str]:
+    """Tutte le chiavi ARQ (job/retry/in-progress) da purgare quando si ELIMINA
+    una campagna, per OGNI schema di job_id di fase.
+
+    Senza questo, un job di fase lasciato in defer sopravvive in Redis e piu'
+    tardi spara a vuoto -> `list_followers` logga `Campaign ... not found`, oppure
+    un job browser riapre una finestra/proxy per una campagna morta. La pulizia
+    precedente copriva solo `worker:`/`scrape:`/`resolve:`/`pregen:` e lasciava
+    orfani `list:`, `bios:` e i fan-out browser. Vedi `delete_campaign`.
+
+    I prefissi sono cablati come stringhe (non importati dai moduli che li
+    generano) apposta: cosi' `importbrowser:` si pulisce anche dove il modulo
+    import-browser non esiste ancora — cancellare una chiave inesistente e' un
+    no-op innocuo.
+    """
+    keys: list[str] = []
+    # Fasi con fan-out per-account: DM worker, bio-browser, import-browser.
+    for account_id in account_ids:
+        for job_id in (
+            f"worker:{campaign_id}:{account_id}",
+            f"biobrowser:{campaign_id}:{account_id}",
+            f"importbrowser:{campaign_id}:{account_id}",
+        ):
+            keys += [f"arq:job:{job_id}", f"arq:retry:{job_id}", f"arq:in-progress:{job_id}"]
+    # Fasi con un solo job per campagna.
+    for job_id in (
+        f"list:{campaign_id}",
+        f"bios:{campaign_id}",
+        f"scrape:{campaign_id}",
+        f"resolve:{campaign_id}",
+        f"pregen:{campaign_id}:preview",
+        f"pregen:{campaign_id}:full",
+    ):
+        keys += [f"arq:job:{job_id}", f"arq:retry:{job_id}", f"arq:in-progress:{job_id}"]
+    return keys
+
+
 def arq_redis_settings() -> RedisSettings:
     from app.config import settings
 
