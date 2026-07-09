@@ -11,13 +11,9 @@ async def resolve_imports_task(ctx: dict, campaign_id: str) -> None:
     """ARQ task: resolve imported profiles into bio_scraped Followers."""
     logger.info(f"[ARQ] resolve_imports_task started for campaign {campaign_id}")
     try:
-        # Il motore browser (bio_engine='browser') lavora a mini-sessioni e ritorna i
-        # secondi di defer per la pausa lunga anti-block: qui lo trasformiamo in
-        # Retry(defer), come browser_bio_account_task. Il path API ritorna None.
-        defer = await resolve_imports(campaign_id)
-        if defer:
-            logger.info(f"[ARQ] resolve_imports_task pausa browser — defer {defer}s")
-            raise Retry(defer=defer)
+        # Per bio_engine='browser' questo fa solo il fan-out (accoda i worker per-account)
+        # ed esce; le pause lunghe stanno nei browser_import_account_task. Path API: inline.
+        await resolve_imports(campaign_id)
         logger.info(f"[ARQ] resolve_imports_task completed for campaign {campaign_id}")
     except Retry:
         raise

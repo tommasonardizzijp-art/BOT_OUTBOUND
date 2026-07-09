@@ -235,9 +235,34 @@ async def test_ui_import_browser_e2e_zero_api(monkeypatch):
 
     _FakeSession.opens = 0
 
-    # --- Guida il worker ARQ sullo STESSO ingresso runtime (nessun Retry: drena in un colpo).
+    # --- Fan-out: intercetta l'enqueue dei worker per-account (niente Redis reale).
+    fanout_jobs: list = []
+
+    class _FanoutRedis:
+        async def exists(self, key):
+            return 0
+
+        async def delete(self, *keys):
+            return None
+
+        async def enqueue_job(self, task, *args, **kw):
+            fanout_jobs.append((task, args))
+
+        async def aclose(self):
+            return None
+
+    async def _fake_pool(*a, **k):
+        return _FanoutRedis()
+    monkeypatch.setattr(bi.arq, "create_pool", _fake_pool)
+
+    # 5) worker ARQ di dispatch: resolve_imports_task -> fan-out (accoda i per-account).
     from app.workers.import_worker import resolve_imports_task
     await resolve_imports_task({}, cid)
+    assert fanout_jobs and all(t == "browser_import_account_task" for t, _ in fanout_jobs)
+
+    # 6) esegui i worker per-account: la VERA risoluzione via browser (una finestra/account).
+    for _task, args in fanout_jobs:
+        await bi.resolve_imports_browser_session(args[0], args[1])
 
     # ===================== ASSERZIONI =====================
     # (0) ZERO chiamate API instagrapi e ZERO ScrapingPool.build sul path browser.
@@ -302,7 +327,7 @@ async def test_ui_import_api_dispatch_differs(monkeypatch):
     async def _browser_stub(campaign_id):
         browser_calls.append(campaign_id)
         raise AssertionError("il motore browser NON deve girare per bio_engine=api")
-    monkeypatch.setattr(bi, "resolve_imports_browser", _browser_stub)
+    monkeypatch.setattr(bi, "enqueue_browser_import_workers", _browser_stub)
 
     async def _build_stub(*a, **k):
         pool_builds.append(True)

@@ -31,7 +31,8 @@ export default function NewCampaignPage() {
     require_approval: false,
     approval_sample_size: '5',
   })
-  const [inboxEngine, setInboxEngine] = useState<'browser' | 'api'>('browser')
+  // Inbox: unico motore reale = API (il browser DOM-listing è stato rimosso, no-op lato BE).
+  const [inboxEngine, setInboxEngine] = useState<'browser' | 'api'>('api')
   const [bioEngine, setBioEngine] = useState<'api' | 'browser'>('api')
   const [messagingEnabled, setMessagingEnabled] = useState(true)
   const [advancedConfig, setAdvancedConfig] = useState({
@@ -218,18 +219,18 @@ export default function NewCampaignPage() {
             {form.scrape_mode === 'dm_threads' && (
             <div className="space-y-2 rounded-lg border border-gray-700/50 bg-gray-800/30 p-3">
               <label className="text-sm text-gray-300 font-medium block">Engine estrazione lista</label>
-              <label className="flex items-center gap-2 cursor-pointer">
+              <label className="flex items-center gap-2 opacity-50 cursor-not-allowed">
                 <input
                   type="radio"
                   name="inboxEngine"
                   value="browser"
-                  checked={inboxEngine === 'browser'}
-                  onChange={() => setInboxEngine('browser')}
+                  checked={false}
+                  disabled
                   className="accent-purple-500"
                 />
-                <span className="text-sm text-gray-300">
-                  🛡️ Browser (prudente, lento)
-                  <span className="ml-1 text-xs text-gray-500">— consigliato per account principali</span>
+                <span className="text-sm text-gray-400">
+                  🛡️ Browser (non disponibile)
+                  <span className="ml-1 text-xs text-gray-500">— deprecato: l&apos;inbox usa sempre l&apos;API</span>
                 </span>
               </label>
               <label className="flex items-center gap-2 cursor-pointer">
@@ -242,8 +243,8 @@ export default function NewCampaignPage() {
                   className="accent-purple-500"
                 />
                 <span className="text-sm text-gray-300">
-                  ⚡ API (veloce, più rischio)
-                  <span className="ml-1 text-xs text-gray-500">— solo account secondari</span>
+                  ⚡ API
+                  <span className="ml-1 text-xs text-gray-500">— unico motore supportato per l&apos;inbox</span>
                 </span>
               </label>
             </div>

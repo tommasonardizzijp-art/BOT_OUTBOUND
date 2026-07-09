@@ -300,10 +300,12 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
             campaign.scrape_cursor = None  # cursore vecchio non valido per il nuovo engine
         campaign.inbox_engine = data.inbox_engine
     if data.bio_engine is not None:
-        if campaign.status != CampaignStatus.draft:
+        if campaign.status not in (
+            CampaignStatus.draft, CampaignStatus.ready, CampaignStatus.paused, CampaignStatus.error,
+        ):
             raise HTTPException(
                 status_code=400,
-                detail="Il motore Fase Bio si cambia solo a campagna non ancora avviata (draft).",
+                detail="Il motore Fase Bio si cambia solo a campagna ferma (draft/ready/paused/error), non mentre sta girando.",
             )
         campaign.bio_engine = data.bio_engine
     if data.scrape_session_size is not None:
