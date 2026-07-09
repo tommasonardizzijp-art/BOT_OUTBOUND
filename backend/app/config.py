@@ -160,10 +160,11 @@ class Settings(BaseSettings):
     bio_browser_stagger_min_s: float = 60.0     # differita prima apertura per account
     bio_browser_stagger_max_s: float = 180.0
     # Cap profili per mini-sessione. Misurato in prod ~20-24s/profilo (nav +
-    # /info/ + micro-scroll + pausa reel amortizzata), non ~15s: 50-70 profili
-    # = sessione ~18-26 min (media ~22), ben sotto job_timeout=3600s anche nel
+    # /info/ + micro-scroll + pausa reel amortizzata), non ~15s: 40-70 profili
+    # = sessione ~13-28 min (range largo voluto: durate piu' variabili tra
+    # account = meno correlazione), ben sotto job_timeout=3600s anche nel
     # caso reel-heavy. Distinto da bio_session_cap_min/max (path API).
-    bio_browser_session_cap_min: int = 50
+    bio_browser_session_cap_min: int = 40
     bio_browser_session_cap_max: int = 70
     # ── Pausa attiva sui reel (rimpiazza il "fermarsi a guardare" stazionario) ──
     # Dopo un numero random di profili (in [every_min, every_max]), invece di restare
