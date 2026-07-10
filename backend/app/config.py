@@ -75,6 +75,11 @@ class Settings(BaseSettings):
     ai_gen_backoff_base_seconds: int = 30   # backoff iniziale, raddoppia a ogni fallimento
     ai_gen_backoff_cap_seconds: int = 300   # tetto del backoff
 
+    # Reply-check (rileva risposte leggendo l'inbox via API = pattern tracciabile).
+    # Girare RARO e mirato per ridurre il footprint API (rischio checkpoint):
+    # solo campagne attive e solo follower contattati negli ultimi N giorni.
+    reply_check_max_age_days: int = 7
+
     # Timing defaults
     min_delay_seconds: int = 120
     max_delay_seconds: int = 480
