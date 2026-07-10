@@ -8,7 +8,7 @@ from loguru import logger
 from sqlalchemy import func, select
 
 from app.database import AsyncSessionLocal
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, SCRAPING_ACTIVE_STATES, bio_done_status
 from app.models.follower import Follower, FollowerStatus
 from app.services.bot_state_service import is_halted
 from app.services.notifier import send_scrape_warning_alert
@@ -62,7 +62,7 @@ async def scrape_bios(campaign_id: str) -> int | None:
         campaign = (await db.execute(select(Campaign).where(Campaign.id == campaign_id))).scalar_one_or_none()
         if not campaign:
             return None
-        if campaign.status not in (CampaignStatus.scraping, CampaignStatus.scraping_break):
+        if campaign.status not in SCRAPING_ACTIVE_STATES:
             logger.info(f"[Bio] Stato '{campaign.status.value}' — skip stale retry")
             return None
         if await is_halted(db):
@@ -70,9 +70,17 @@ async def scrape_bios(campaign_id: str) -> int | None:
             emit_event(campaign_id, "scrape_stopped", "Bot in pausa globale — bio non avviata", level="warn")
             return None
         # Resume da pausa sessione: il job rientra in scraping_break dopo il defer.
+        # Ripristina lo stato PRE-pausa (scraping o scraping_and_running se il DM gira
+        # in parallelo), non forzare 'scraping' — altrimenti la pausa bio spegnerebbe
+        # la modalita' parallela.
         if campaign.status == CampaignStatus.scraping_break:
             from app.utils.events import emit as emit_event
-            campaign.status = CampaignStatus.scraping
+            prev = campaign.scrape_break_prev_status
+            campaign.status = (
+                CampaignStatus.scraping_and_running
+                if prev == CampaignStatus.scraping_and_running.value
+                else CampaignStatus.scraping
+            )
             campaign.scrape_break_until = None
             campaign.scrape_break_prev_status = None
             campaign.updated_at = datetime.utcnow()
@@ -142,7 +150,7 @@ async def scrape_bios(campaign_id: str) -> int | None:
                 if await is_halted(db):
                     raise BotHaltedError("kill-switch")
                 await db.refresh(campaign)
-                if campaign.status not in (CampaignStatus.scraping, CampaignStatus.scraping_break):
+                if campaign.status not in SCRAPING_ACTIVE_STATES:
                     logger.info(f"[Bio] Stato '{campaign.status.value}' — interrotto a {done}")
                     return
 
@@ -277,7 +285,9 @@ async def scrape_bios(campaign_id: str) -> int | None:
                             getattr(campaign, "scrape_break_minutes_max", 45),
                         )
                         seconds = int(minutes * 60)
-                        campaign.scrape_break_prev_status = CampaignStatus.scraping.value
+                        # Preserva lo stato pre-pausa (scraping o scraping_and_running)
+                        # per ripristinarlo al resume e non perdere il DM parallelo.
+                        campaign.scrape_break_prev_status = campaign.status.value
                         campaign.status = CampaignStatus.scraping_break
                         campaign.scrape_break_until = datetime.utcnow() + timedelta(seconds=seconds)
                         campaign.current_session_cap = None  # nuova mini-sessione -> nuovo cap random
@@ -323,7 +333,9 @@ async def scrape_bios(campaign_id: str) -> int | None:
                     )
                     return 2
 
-            campaign.status = CampaignStatus.ready
+            # A fine Bio: se il DM gira in parallelo resta 'running' (worker DM vivi),
+            # altrimenti 'ready' (attende avvio manuale).
+            campaign.status = bio_done_status(campaign.status)
             campaign.updated_at = datetime.utcnow()
             await db.commit()
             emit_event(campaign_id, "scrape_complete", f"Fase Bio completata: {done} bio estratte")
