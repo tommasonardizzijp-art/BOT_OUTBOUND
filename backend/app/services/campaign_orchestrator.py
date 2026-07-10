@@ -599,13 +599,17 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                     )
                     return
 
-                # Mark status as 'sending' BEFORE the browser action.
-                # If the process crashes after Enter but before the 'sent' commit,
-                # recovery_checker.py can detect the delivered DM and reconcile.
-                message.status = MessageStatus.sending
-                message.account_id = account_id
-                message.updated_at = datetime.utcnow()
-                await db.commit()
+                # 'sending' viene marcato SOLO dopo che l'Invio e' stato premuto,
+                # tramite la callback on_enter passata a send_dm (il "punto di non
+                # ritorno"). NON marcarlo prima: se send_dm fallisce PRIMA dell'Invio
+                # (es. textbox non trovato/non cliccabile), il messaggio resta in
+                # 'message_generated' -> il catch-all fa un retry pulito, il messaggio
+                # NON resta appeso in 'sending' e il recovery non deve leggere l'API.
+                async def _mark_sending() -> None:
+                    message.status = MessageStatus.sending
+                    message.account_id = account_id
+                    message.updated_at = datetime.utcnow()
+                    await db.commit()
 
                 # Pre-send callback: re-check follower status just before pressing Enter.
                 # Returns False if another worker already processed this lead while we
@@ -627,6 +631,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                     username=follower.username,
                     message=message.generated_text,
                     pre_send_callback=_pre_send_check,
+                    on_enter=_mark_sending,
                 )
 
                 # Mark as delivered IMMEDIATELY: persist follower.status=sent + message.sent
