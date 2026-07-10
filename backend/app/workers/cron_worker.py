@@ -19,7 +19,12 @@ class CronWorkerSettings:
     cron_jobs = [
         cron(daily_reset, hour=0, minute=5),
         cron(release_stale_locks, minute={0, 15, 30, 45}),
-        cron(check_replies, minute={0, 30}),
+        # Reply-check UNA volta al giorno (era ogni 30 min): la lettura inbox via
+        # API e' tracciabile come bot: girarla raramente riduce il footprint/rischio
+        # checkpoint. Le risposte vengono comunque rilevate (marcate 'replied' in
+        # modo permanente al primo passaggio). Ambito ristretto: solo campagne attive
+        # + invii recenti (vedi reply_checker + reply_check_max_age_days).
+        cron(check_replies, hour={13}, minute={0}),
         cron(recover_sending, minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55}),
         cron(telegram_commands, minute=set(range(60))),
     ]

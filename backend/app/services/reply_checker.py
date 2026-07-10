@@ -7,7 +7,7 @@ a reply is detected, which the Leads page picks up via the JOIN on ig_user_id.
 """
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from loguru import logger
 from sqlalchemy import select, func
 
@@ -28,14 +28,14 @@ async def check_all_replies() -> int:
     Called by the ARQ cron every 30 minutes.
     """
     async with AsyncSessionLocal() as db:
-        # Check campaigns that have sent at least some DMs
+        # SOLO campagne attive: le paused/completed NON vengono piu' pollate via API
+        # all'infinito (era il footprint principale — leggeva l'inbox ogni 30 min
+        # anche per campagne ferme, per sempre, finche' avevano follower 'sent').
         campaigns_result = await db.execute(
             select(Campaign).where(
                 Campaign.status.in_([
                     CampaignStatus.running,
                     CampaignStatus.scraping_and_running,
-                    CampaignStatus.paused,
-                    CampaignStatus.completed,
                 ])
             )
         )
@@ -59,7 +59,11 @@ async def _check_campaign(campaign_id: str, db) -> int:
     from app.models.message import Message
 
     # Followers with status=sent — candidates for reply detection.
-    # Keep last sent_at so old conversations do not inflate reply metrics.
+    # SOLO invii recenti (ultimi reply_check_max_age_days): i lead 'sent' vecchi
+    # che non hanno mai risposto smettono di essere pollati via API per sempre.
+    # Il tetto e' sull'invio PIU' RECENTE (max sent_at) del follower.
+    from app.config import settings
+    cutoff = datetime.utcnow() - timedelta(days=settings.reply_check_max_age_days)
     sent_result = await db.execute(
         select(Follower, func.max(Message.sent_at))
         .join(Message, Message.follower_id == Follower.id, isouter=True)
@@ -68,6 +72,7 @@ async def _check_campaign(campaign_id: str, db) -> int:
             Follower.status == FollowerStatus.sent,
         )
         .group_by(Follower.id)
+        .having(func.max(Message.sent_at) >= cutoff)
     )
     sent_followers = {}
     for follower, last_sent in sent_result.all():
