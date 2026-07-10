@@ -44,6 +44,7 @@ from app.services.anomaly_detector import report_anomaly
 from app.services.bot_state_service import is_halted
 from app.services.campaign_control import CampaignControlError, ensure_campaign_can_send_messages
 from app.config import settings
+from app.utils.dm_batch import DmBatchPacer
 from app.utils.exceptions import (
     AccountBannedError, AccountChallengeError,
     BotHaltedError, DMAbortedBeforeSendError, DMSendError, DMRestrictedError,
@@ -234,12 +235,11 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
         logger.info(f"[Worker] Startup jitter account={account_id[:8]}: {_stagger:.0f}s")
         await asyncio.sleep(_stagger)
 
-    # Batch invio DM: manda batch_target (1-4 random) DM CONSECUTIVI, poi il feed
+    # Batch invio DM: manda un batch di 1-4 (random) DM CONSECUTIVI, poi il feed
     # browse (che fa anche da riposo anti-ban). Riduce la frequenza dello scroll
     # ~1/batch senza aggiungere attese tra i DM del batch — il browse del profilo
-    # target dentro send_dm fa gia' da gap umano. Vedi step 9.
-    dms_since_browse = 0
-    batch_target = _random.randint(settings.dm_batch_min, settings.dm_batch_max)
+    # target dentro send_dm fa gia' da gap umano. Logica in DmBatchPacer (testata).
+    dm_pacer = DmBatchPacer(settings.dm_batch_min, settings.dm_batch_max, _random)
 
     try:
       async with AsyncSessionLocal() as db:
@@ -362,8 +362,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 session_profiles.clear()
                 session_failed = 0
                 session_skipped = 0
-                dms_since_browse = 0   # nuova sessione dopo il break = nuovo batch
-                batch_target = _random.randint(settings.dm_batch_min, settings.dm_batch_max)
+                dm_pacer.reset()   # nuova sessione dopo il break = nuovo batch
                 if not still_running:
                     emit_event(campaign_id, "worker_stopped", "Campagna fermata durante pausa sessione", level="warn")
                     return
@@ -460,7 +459,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
             # Riposo/scroll SOLO a fine batch (dopo batch_target DM consecutivi).
             # Dentro il batch si tira dritto (attesa 0): il browse del profilo target
             # in send_dm fa gia' da gap umano tra un invio e l'altro.
-            if browser_session is not None and dms_since_browse >= batch_target:
+            if browser_session is not None and dm_pacer.should_browse():
                 if should_take_distraction_pause():
                     pause = distraction_pause_seconds()
                     emit_event(
@@ -476,8 +475,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                     except Exception as e:
                         logger.warning(f"[Worker] Ambient browse failed, falling back to sleep: {e}")
                         await asyncio.sleep(ambient_dur)
-                dms_since_browse = 0
-                batch_target = _random.randint(settings.dm_batch_min, settings.dm_batch_max)
+                dm_pacer.record_browse()
 
             # Re-check status after sleep: campaign may have been paused/stopped
             # while we were waiting. Skip browser open if no longer running.
@@ -623,7 +621,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
 
                 session_mgr.record_message_sent()
                 dm_in_this_invocation += 1
-                dms_since_browse += 1   # DM riuscito conta nel batch corrente
+                dm_pacer.record_sent()   # DM riuscito conta nel batch corrente
                 session_profiles.append(follower.username)
                 await account_lease.heartbeat(account_id, lease_owner, db)
                 consecutive_failures = 0
