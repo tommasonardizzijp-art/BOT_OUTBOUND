@@ -143,6 +143,42 @@ class InstagramPage:
             except Exception:
                 pass
 
+    async def _dismiss_blocking_dialog(self, page, username: str) -> None:
+        """Chiude un dialog che copre il profilo PRIMA di cercare il bottone
+        Messaggio. Caso reale: il modale 'Link' (link-in-bio con piu' link), aperto
+        da un tap finito sul profilo — sta sopra tutto e fa fallire il click su
+        Messaggio. Preme Escape; se resta, clicca la X del dialog. No-op se siamo
+        gia' nel thread DM (li' un dialog e' legittimo e Escape lo chiuderebbe)."""
+        try:
+            if "/direct/" in page.url:
+                return
+            dialog = page.locator('div[role="dialog"]')
+            if await dialog.count() == 0:
+                return
+            logger.info(
+                f"@{username}: dialog aperto sul profilo (probabile modale 'Link') "
+                f"— chiudo prima del click su Messaggio"
+            )
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(random.uniform(0.6, 1.2))
+            if await page.locator('div[role="dialog"]').count() > 0:
+                for sel in (
+                    'div[role="dialog"] [aria-label="Close"]',
+                    'div[role="dialog"] [aria-label="Chiudi"]',
+                    'div[role="dialog"] svg[aria-label="Close"]',
+                    'div[role="dialog"] svg[aria-label="Chiudi"]',
+                ):
+                    try:
+                        x = page.locator(sel)
+                        if await x.count() > 0:
+                            await x.first.click()
+                            await asyncio.sleep(random.uniform(0.5, 1.0))
+                            break
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"@{username}: _dismiss_blocking_dialog error ({e})")
+
     async def _is_stories_viewer_open(self, page) -> bool:
         """Detect Instagram Stories viewer by URL or story-reply UI."""
         if "/stories/" in page.url:
@@ -353,6 +389,10 @@ class InstagramPage:
         # dismiss them now before attempting to find the Message button.
         await self._dismiss_stories_if_open(page, username)
 
+        # Chiudi un eventuale dialog che copre il profilo (es. modale 'Link' dei
+        # link-in-bio aperto da un tap accidentale) prima di cercare Messaggio.
+        await self._dismiss_blocking_dialog(page, username)
+
         # Click "Message" button (handles EN/IT locale and mutual-follow layout)
         await self._click_message_button(page, username)
 
@@ -542,6 +582,13 @@ class InstagramPage:
             end_time = asyncio.get_event_loop().time() + watch_time
             while asyncio.get_event_loop().time() < end_time:
                 await asyncio.sleep(random.uniform(2.0, 5.0))
+                # Se il viewer si e' chiuso (storie finite -> IG torna al profilo),
+                # FERMATI: un tap di avanzamento ora cadrebbe sul profilo, es. sul
+                # link-in-bio -> apre il modale 'Link' che poi copre il bottone
+                # Messaggio e fa fallire l'invio (bug reale osservato).
+                if not await self._is_stories_viewer_open(page):
+                    logger.debug(f"@{username}: storie chiuse/finite — stop tap di avanzamento")
+                    break
                 # 30% chance: tap right side to advance to next story
                 if random.random() < 0.30:
                     try:
