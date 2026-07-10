@@ -435,7 +435,7 @@ async def _maybe_complete_browser_bio(campaign_id: str) -> bool:
     coerente col path API che a sua volta non li tocca in questo punto).
     """
     from sqlalchemy import select, func
-    from app.models.campaign import Campaign, CampaignStatus
+    from app.models.campaign import Campaign, CampaignStatus, SCRAPING_ACTIVE_STATES, bio_done_status
     from app.models.follower import Follower, FollowerStatus
     from app.utils.events import emit as emit_event
 
@@ -463,17 +463,20 @@ async def _maybe_complete_browser_bio(campaign_id: str) -> bool:
         if pending_count > 0 and not target_reached:
             return False  # altro account sta ancora smaltendo il pool: non e' finita
 
+        # Se il DM gira in parallelo -> 'running' (tiene vivi i worker DM), altrimenti
+        # 'ready'. Target calcolato dallo stato appena letto in questa txn.
+        target_status = bio_done_status(campaign.status)
         result = await db.execute(
             update(Campaign).where(
                 Campaign.id == campaign_id,
-                Campaign.status.in_([CampaignStatus.scraping, CampaignStatus.scraping_break]),
-            ).values(status=CampaignStatus.ready, updated_at=datetime.utcnow())
+                Campaign.status.in_(SCRAPING_ACTIVE_STATES),
+            ).values(status=target_status, updated_at=datetime.utcnow())
         )
         await db.commit()
         if result.rowcount == 1:
             emit_event(campaign_id, "scrape_complete", f"Fase Bio (browser) completata: {bio_done} bio")
             return True
-        return False  # gia' transitata da un'altra race (o non era in scraping/*_break)
+        return False  # gia' transitata da un'altra race (o non era in uno stato scraping attivo)
 
 
 async def _resilient_release(db, follower_id, *, status=None, skip_reason=None):
@@ -543,16 +546,14 @@ async def _pause_campaign_soft_block(campaign_id: str, account_id: str, n: int) 
     """Dopo N soft-block CONSECUTIVI di un account (mirror del guard del path API),
     mette la campagna in pausa e avvisa: stop al `429 -> defer -> 429` infinito."""
     from sqlalchemy import select
-    from app.models.campaign import Campaign, CampaignStatus
+    from app.models.campaign import Campaign, CampaignStatus, SCRAPING_ACTIVE_STATES
     from app.models.activity_log import ActivityLog
     from app.utils.events import emit as emit_event
     async with AsyncSessionLocal() as db:
         campaign = (await db.execute(
             select(Campaign).where(Campaign.id == campaign_id)
         )).scalar_one_or_none()
-        if campaign is not None and campaign.status in (
-            CampaignStatus.scraping, CampaignStatus.scraping_break
-        ):
+        if campaign is not None and campaign.status in SCRAPING_ACTIVE_STATES:
             campaign.status = CampaignStatus.paused
             campaign.updated_at = datetime.utcnow()
             db.add(ActivityLog(
@@ -576,7 +577,7 @@ async def _isolate_account_and_pause(campaign_id: str, account_id: str, exc: Exc
     mirror di isolate_challenged_account per il canale browser: un account fatale NON
     deve restare 'active' (ogni retry ri-fallirebbe e martellerebbe IG)."""
     from sqlalchemy import select
-    from app.models.campaign import Campaign, CampaignStatus
+    from app.models.campaign import Campaign, CampaignStatus, SCRAPING_ACTIVE_STATES
     from app.models.account import InstagramAccount, AccountStatus
     from app.models.activity_log import ActivityLog
     from app.utils.events import emit as emit_event
@@ -591,9 +592,7 @@ async def _isolate_account_and_pause(campaign_id: str, account_id: str, exc: Exc
         campaign = (await db.execute(
             select(Campaign).where(Campaign.id == campaign_id)
         )).scalar_one_or_none()
-        if campaign is not None and campaign.status in (
-            CampaignStatus.scraping, CampaignStatus.scraping_break
-        ):
+        if campaign is not None and campaign.status in SCRAPING_ACTIVE_STATES:
             campaign.status = CampaignStatus.paused
             campaign.updated_at = datetime.utcnow()
         db.add(ActivityLog(
@@ -618,7 +617,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
     secondi di defer per la pausa lunga anti-block, o None se non c'è più lavoro.
     Job corto: mai oltre job_timeout. Difensiva sui singoli profili."""
     from sqlalchemy import select, func
-    from app.models.campaign import Campaign, CampaignStatus
+    from app.models.campaign import Campaign, CampaignStatus, SCRAPING_ACTIVE_STATES
     from app.models.follower import Follower, FollowerStatus
     from app.utils.events import emit as emit_event
 
@@ -626,9 +625,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
         campaign = (await db.execute(
             select(Campaign).where(Campaign.id == campaign_id)
         )).scalar_one_or_none()
-        if campaign is None or campaign.status not in (
-            CampaignStatus.scraping, CampaignStatus.scraping_break
-        ):
+        if campaign is None or campaign.status not in SCRAPING_ACTIVE_STATES:
             return None
         if await is_halted(db):
             return None
@@ -669,9 +666,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                 campaign = (await db.execute(
                     select(Campaign).where(Campaign.id == campaign_id)
                 )).scalar_one_or_none()
-                if campaign is None or campaign.status not in (
-                    CampaignStatus.scraping, CampaignStatus.scraping_break
-                ):
+                if campaign is None or campaign.status not in SCRAPING_ACTIVE_STATES:
                     return None
 
                 # Re-check del target globale ad ogni iterazione: con piu' sessioni

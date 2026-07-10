@@ -20,6 +20,28 @@ class CampaignStatus(str, enum.Enum):
     error = "error"
 
 
+# Stati in cui la Fase Bio e' ATTIVA. Include scraping_and_running (DM in parallelo):
+# i worker Bio DEVONO continuare a girare mentre i DM partono. Fonte unica per tutti
+# i gate di stato dei worker (scraper.py, scrape_bios.py, browser_bio.py) — evita il
+# drift che faceva uscire il worker Bio quando la campagna passava a scraping_and_running.
+SCRAPING_ACTIVE_STATES = (
+    CampaignStatus.scraping,
+    CampaignStatus.scraping_break,
+    CampaignStatus.scraping_and_running,
+)
+
+
+def bio_done_status(current: "CampaignStatus") -> "CampaignStatus":
+    """Stato di destinazione a Fase Bio completata: se il DM gira in parallelo
+    (scraping_and_running) resta 'running' cosi' i worker DM continuano; altrimenti
+    'ready' (attende l'avvio manuale dei DM)."""
+    return (
+        CampaignStatus.running
+        if current == CampaignStatus.scraping_and_running
+        else CampaignStatus.ready
+    )
+
+
 class Campaign(Base):
     __tablename__ = "campaigns"
 
