@@ -127,6 +127,11 @@ class Settings(BaseSettings):
     # oltre questo punto l'inbox e' gente gia' in lista (IG puo' tenere has_older
     # sempre True, quindi la lista girerebbe a vuoto all'infinito in silenzio).
     inbox_empty_page_stop: int = 8
+    # Batch invio DM: quanti DM consecutivi (random tra min e max) prima di fare
+    # il feed browse/riposo. Dentro il batch nessuna attesa aggiunta tra i DM (il
+    # browse del profilo target fa gia' da gap). Riduce la frequenza dello scroll.
+    dm_batch_min: int = 1
+    dm_batch_max: int = 4
 
     # Account defaults
     default_daily_limit: int = 20
