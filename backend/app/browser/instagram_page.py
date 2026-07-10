@@ -311,8 +311,14 @@ class InstagramPage:
         # Union visibile ma priorità mancata (race DOM): usa il primo dell'unione.
         return page.locator(union).first, union
 
-    async def send_dm(self, username: str, message: str, pre_send_callback: Optional[Callable[[], Awaitable[bool]]] = None) -> None:
-        """Navigate to a user's profile and send a DM."""
+    async def send_dm(self, username: str, message: str, pre_send_callback: Optional[Callable[[], Awaitable[bool]]] = None, on_enter: Optional[Callable[[], Awaitable[None]]] = None) -> None:
+        """Navigate to a user's profile and send a DM.
+
+        on_enter: callback awaitato SUBITO dopo aver premuto Invio (il punto di non
+        ritorno: il DM e' partito). Il chiamante lo usa per marcare 'sending' SOLO
+        da qui in poi — cosi' un fallimento PRIMA dell'Invio non lascia mai il
+        messaggio in 'sending' (niente reconciliation via API).
+        """
         page = await self._get_page()
 
         # Navigate to target's profile
@@ -476,8 +482,19 @@ class InstagramPage:
                     f"@{username}: pre-send check returned False - aborting before Enter"
                 )
 
-        # Send by pressing Enter
+        # Send by pressing Enter — PUNTO DI NON RITORNO: da qui il DM e' partito.
         await page.keyboard.press("Enter")
+
+        # Marca 'sending' ADESSO (non prima): qualunque fallimento sopra ha lasciato
+        # il messaggio in 'message_generated' -> retry pulito, mai 'sending'. La
+        # callback fa un commit DB; se fallisce non e' fatale (il DM e' gia' partito
+        # e il chiamante marchera' 'sent' al ritorno di send_dm).
+        if on_enter is not None:
+            try:
+                await on_enter()
+            except Exception as e:
+                logger.warning(f"@{username}: on_enter callback fallita (non-fatale): {e}")
+
         await asyncio.sleep(random.uniform(1, 2))
 
         logger.info(f"DM sent to @{username}")

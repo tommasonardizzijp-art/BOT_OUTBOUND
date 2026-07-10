@@ -254,76 +254,23 @@ class TestRecoveryAnomalyDedup:
 
 
 # ─────────────────────────────────────────────────────────
-# 4. _InstagrapiParseError sentinel in recovery_checker
+# 4. recovery_checker: nessuna lettura API (verifica di consegna rimossa)
 # ─────────────────────────────────────────────────────────
 
-class TestInstagrapiParseErrorHandling:
-    """_check_dm_delivered must raise _InstagrapiParseError on pydantic.ValidationError,
-    and _recover_one must leave the message as 'sending' (not 'error') when it fires."""
+class TestRecoveryNoApiRead:
+    """Il recovery NON deve piu' avere il path di lettura API (`_check_dm_delivered`,
+    `direct_threads`, `_InstagrapiParseError`): era il pattern-API-nudo che fa
+    scattare i checkpoint. Guardia di regressione."""
 
-    def test_parse_error_class_exists_and_is_exception(self):
-        from app.services.recovery_checker import _InstagrapiParseError
-        assert issubclass(_InstagrapiParseError, Exception)
+    def test_api_delivery_check_removed(self):
+        import app.services.recovery_checker as rc
+        assert not hasattr(rc, "_check_dm_delivered"), "la verifica di consegna via API deve essere rimossa"
+        assert not hasattr(rc, "_InstagrapiParseError")
 
-    @pytest.mark.asyncio
-    async def test_check_dm_delivered_raises_parse_error_on_validation_error(self):
-        """When direct_threads raises pydantic.ValidationError, must become _InstagrapiParseError."""
-        from app.services.recovery_checker import _check_dm_delivered, _InstagrapiParseError
-        from pydantic import ValidationError
-
-        # Build a real pydantic ValidationError via a bad model call
-        import instagrapi.types as t
-        try:
-            # Force a ValidationError we can reuse
-            class _Dummy(t.MediaXma):
-                pass
-            # Temporarily restore required video_url by direct validator call
-            from pydantic import TypeAdapter
-            ta = TypeAdapter(int)
-            pydantic_exc = ta.validate_python("not_an_int", strict=True)
-        except ValidationError as ve:
-            pydantic_exc = ve
-        except Exception:
-            # Build one synthetically
-            from pydantic import BaseModel, HttpUrl
-            class _Strict(BaseModel):
-                url: HttpUrl
-            try:
-                _Strict(url=None)
-            except ValidationError as ve:
-                pydantic_exc = ve
-
-        fake_account = MagicMock()
-        fake_db = AsyncMock()
-
-        with patch("app.services.recovery_checker._login") as mock_login, \
-             patch("asyncio.to_thread") as mock_to_thread:
-            mock_client = MagicMock()
-            mock_client.user_id = "123"
-            mock_login.return_value = mock_client
-            mock_to_thread.side_effect = pydantic_exc
-
-            with pytest.raises(_InstagrapiParseError):
-                await _check_dm_delivered(fake_account, "456789", "ciao test", fake_db)
-
-    @pytest.mark.asyncio
-    async def test_check_dm_delivered_propagates_non_parse_errors(self):
-        """Non-pydantic errors (network, auth) must propagate as-is."""
-        from app.services.recovery_checker import _check_dm_delivered, _InstagrapiParseError
-
-        fake_account = MagicMock()
-        fake_db = AsyncMock()
-        network_exc = ConnectionError("network down")
-
-        with patch("app.services.recovery_checker._login") as mock_login, \
-             patch("asyncio.to_thread") as mock_to_thread:
-            mock_client = MagicMock()
-            mock_client.user_id = "123"
-            mock_login.return_value = mock_client
-            mock_to_thread.side_effect = network_exc
-
-            with pytest.raises(ConnectionError):
-                await _check_dm_delivered(fake_account, "456789", "ciao test", fake_db)
+    def test_no_instagrapi_login_import(self):
+        import app.services.recovery_checker as rc
+        # _login (instagrapi) non deve piu' essere importato nel modulo
+        assert not hasattr(rc, "_login"), "recovery_checker non deve importare il login instagrapi"
 
 
 # ─────────────────────────────────────────────────────────

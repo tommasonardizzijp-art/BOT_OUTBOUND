@@ -20,11 +20,15 @@ class FakeDMBrowser:
     async def browse_feed(self, duration_seconds: float) -> None:
         return None
 
-    async def send_dm(self, username: str, message: str, pre_send_callback=None) -> None:
+    async def send_dm(self, username: str, message: str, pre_send_callback=None, on_enter=None) -> None:
         if pre_send_callback is not None:
             ok = await pre_send_callback()
             if not ok:
                 raise RuntimeError("pre-send rejected")
+        # Simula il punto di non ritorno: on_enter viene chiamato solo qui, dopo
+        # aver "premuto Invio" (cioe' dopo che il DM e' effettivamente partito).
+        if on_enter is not None:
+            await on_enter()
         self.sent.append((username, message))
 
     async def close(self) -> None:
