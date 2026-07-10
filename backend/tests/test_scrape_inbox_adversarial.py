@@ -450,3 +450,78 @@ def test_list_target_reached_stops_loop(monkeypatch):
         assert total == 3
     finally:
         cleanup()
+
+
+# ── Part B: drain-stop su pagine consecutive senza nuovi ─────────────
+
+class _CountingSource:
+    """Sorgente inbox controllata da una funzione page(n). Conta le chiamate.
+
+    Cruciale: genera pagine NON esaurite (exhausted=False, has_older sempre True)
+    all'infinito -> senza il drain-stop il loop girerebbe per sempre (il bug reale:
+    IG tiene has_older=True in coda). Il test lo prova: se il drain-stop non scatta,
+    _run_inbox_list va in timeout (wait_for=10s) e fallisce.
+    """
+
+    def __init__(self, page_fn):
+        self.calls = 0
+        self._fn = page_fn
+
+    async def next_page(self) -> InboxPage:
+        self.calls += 1
+        return self._fn(self.calls)
+
+
+def _inject_source(monkeypatch, src):
+    async def _fake_build(db, campaign):
+        async def _noop():
+            return None
+        return src, 999_999, None, _noop
+    from app.services import scrape_inbox
+    monkeypatch.setattr(scrape_inbox, "build_inbox_source", _fake_build)
+
+
+def test_drain_stop_ferma_loop_infinito_di_duplicati(monkeypatch):
+    """Pagine vuote/non-esaurite all'infinito: il loop si ferma dopo esattamente
+    inbox_empty_page_stop pagine (non gira a vuoto per sempre) e va in ready."""
+    from app.config import settings
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
+    try:
+        src = _CountingSource(lambda n: InboxPage(participants=[], cursor=f"c{n}", exhausted=False))
+        _inject_source(monkeypatch, src)
+        result = _run_inbox_list(session_factory, campaign_id)
+        cnt, status, total = _read_state(session_factory, campaign_id)
+        assert result is None
+        assert status == CampaignStatus.ready
+        assert cnt == 0
+        assert src.calls == settings.inbox_empty_page_stop, (
+            f"atteso stop dopo {settings.inbox_empty_page_stop} pagine, fermato a {src.calls}"
+        )
+    finally:
+        cleanup()
+
+
+def test_un_nuovo_contatto_resetta_lo_streak(monkeypatch):
+    """Uno streak di vuoti interrotto da 1 nuovo NON deve fermare: lo streak riparte
+    da zero, e il drain-stop scatta solo dopo inbox_empty_page_stop CONSECUTIVI."""
+    from app.config import settings
+
+    def page_fn(n):
+        # pagina 6 porta 1 nuovo, tutte le altre sono vuote
+        if n == 6:
+            return InboxPage(participants=[(100, "nuovo")], cursor=f"c{n}", exhausted=False)
+        return InboxPage(participants=[], cursor=f"c{n}", exhausted=False)
+
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
+    try:
+        src = _CountingSource(page_fn)
+        _inject_source(monkeypatch, src)
+        result = _run_inbox_list(session_factory, campaign_id)
+        cnt, status, total = _read_state(session_factory, campaign_id)
+        assert result is None
+        assert status == CampaignStatus.ready
+        assert cnt == 1  # l'unico nuovo e' stato salvato
+        # streak: pagine 1-5 vuote, 6 nuovo (reset), poi 8 vuote consecutive -> stop a 6+8
+        assert src.calls == 6 + settings.inbox_empty_page_stop, f"fermato a {src.calls}"
+    finally:
+        cleanup()

@@ -129,6 +129,8 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             select(Follower.ig_user_id).where(Follower.campaign_id == campaign_id)
         )).scalars().all())
         since_break = 0
+        empty_streak = 0   # pagine consecutive con 0 contatti nuovi -> inbox drenato
+        drained = False
 
         while True:
             if await is_halted(db):
@@ -158,6 +160,7 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             stored = len(fresh)
             already += stored
             since_break += stored
+            empty_streak = 0 if stored else empty_streak + 1
             # cursore intra-engine (api: oldest_cursor; browser: marker)
             campaign.scrape_cursor = page.cursor
             campaign.total_followers = already
@@ -170,6 +173,23 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             if page.exhausted:
                 logger.info(f"[InboxLista] Inbox esaurito ({already})")
                 campaign.scrape_cursor = None
+                break
+
+            # Drenaggio: N pagine consecutive con 0 contatti NUOVI = oltre questo
+            # punto l'inbox e' tutta gente gia' in lista. IG puo' tenere has_older
+            # sempre True, quindi 'exhausted' da solo non basta e la lista girerebbe
+            # a vuoto per sempre in silenzio (il bug segnalato). Ci si ferma e si
+            # AVVISA. Cursore azzerato: il prossimo giro riparte dal top e intercetta
+            # eventuali DM nuovi arrivati nel frattempo.
+            if empty_streak >= settings.inbox_empty_page_stop:
+                logger.info(
+                    f"[InboxLista] {empty_streak} pagine consecutive senza nuovi "
+                    f"— inbox gia' tutto raccolto ({already})"
+                )
+                campaign.scrape_cursor = None
+                campaign.updated_at = datetime.utcnow()
+                await db.commit()
+                drained = True
                 break
 
             # pacing umano tra pagine (lognormale + pausa lunga occasionale)
@@ -189,7 +209,15 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
         campaign.status = CampaignStatus.ready
         campaign.updated_at = datetime.utcnow()
         await db.commit()
-        emit_event(campaign_id, "scrape_complete", f"Fase Lista inbox completata: {already} contatti in lista")
+        if drained:
+            emit_event(
+                campaign_id, "scrape_complete",
+                f"Inbox gia' tutto raccolto: 0 nuovi contatti (rilette {empty_streak} pagine di duplicati). "
+                f"{already} in lista — per averne altri servono nuovi DM in entrata o una campagna scrape follower.",
+                level="warn",
+            )
+        else:
+            emit_event(campaign_id, "scrape_complete", f"Fase Lista inbox completata: {already} contatti in lista")
         return None
 
     except BotHaltedError:
