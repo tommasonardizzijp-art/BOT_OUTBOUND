@@ -250,7 +250,7 @@ async def pause_active_work_on_startup() -> dict[str, int]:
     enqueued. Keep recently touched campaigns alive; pause only active states
     inherited from a previous process/session.
     """
-    counts = {"campaigns_paused": 0, "locks_released": 0}
+    counts = {"campaigns_paused": 0, "locks_released": 0, "leases_released": 0}
     active_statuses = (
         CampaignStatus.running,
         CampaignStatus.scraping,
@@ -352,6 +352,22 @@ async def pause_active_work_on_startup() -> dict[str, int]:
             await db.commit()
             for alert in auto_pause_alerts:
                 await send_campaign_auto_pause_alert(**alert)
+
+        # Rilascia i lease account ORFANI. Indipendente dalle campagne in pausa: un
+        # lease resta appeso anche a campagna gia' in pausa (lease e status sono
+        # scollegati). A un cold-start nessun worker di QUESTO processo tiene un
+        # lease, quindi ogni lease presente e' di un processo morto (restart/kill)
+        # e bloccherebbe i nuovi worker fino alla scadenza TTL (15 min) col
+        # messaggio "already leased by another job" — il bug segnalato. Modello
+        # single-fleet come il resto della guardia (con piu' processi worker in
+        # parallelo questo andrebbe ristretto ai soli lease gia' scaduti).
+        leases_res = await db.execute(
+            update(InstagramAccount)
+            .where(InstagramAccount.lease_owner.is_not(None))
+            .values(lease_owner=None, lease_expires_at=None, updated_at=now)
+        )
+        counts["leases_released"] = leases_res.rowcount or 0
+        await db.commit()
 
     if counts["campaigns_paused"]:
         logger.warning(
