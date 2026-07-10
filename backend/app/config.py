@@ -123,6 +123,10 @@ class Settings(BaseSettings):
     inbox_session_size: int = 300
     inbox_break_min_minutes: int = 30
     inbox_break_max_minutes: int = 60
+    # Pagine inbox consecutive con 0 contatti NUOVI dopo cui fermarsi + avvisare:
+    # oltre questo punto l'inbox e' gente gia' in lista (IG puo' tenere has_older
+    # sempre True, quindi la lista girerebbe a vuoto all'infinito in silenzio).
+    inbox_empty_page_stop: int = 8
 
     # Account defaults
     default_daily_limit: int = 20
