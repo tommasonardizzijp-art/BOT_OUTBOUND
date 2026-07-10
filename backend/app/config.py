@@ -60,6 +60,21 @@ class Settings(BaseSettings):
     # Sampling temperature. Lower = more consistent. 0.35 recommended for business DMs.
     ai_temperature: float = 0.35
 
+    # Failover AI provider — se il primario fallisce (429/5xx/timeout/connessione)
+    # la generazione ripiega su questo. Vuoto = nessun failover (single provider).
+    # Es: AI_PROVIDER=gemini + AI_PROVIDER_FALLBACK=groq + AI_API_KEY_FALLBACK=gsk_...
+    ai_provider_fallback: str = ""
+    ai_api_key_fallback: str = ""
+    ai_model_fallback: str = ""      # vuoto = default del provider fallback
+    ai_base_url_fallback: str = ""   # per provider OpenAI-compatible (groq)
+
+    # Anti-tempesta: backoff del worker quando la generazione AI fallisce per
+    # rate-limit/timeout. Evita l'hot-loop che riclaimava gli stessi follower a
+    # delay zero amplificando il 429. Dopo N transient consecutivi rimanda il batch.
+    ai_gen_failure_threshold: int = 3       # transient consecutivi → defer batch
+    ai_gen_backoff_base_seconds: int = 30   # backoff iniziale, raddoppia a ogni fallimento
+    ai_gen_backoff_cap_seconds: int = 300   # tetto del backoff
+
     # Timing defaults
     min_delay_seconds: int = 120
     max_delay_seconds: int = 480
