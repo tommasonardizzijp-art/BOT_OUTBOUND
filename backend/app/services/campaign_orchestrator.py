@@ -46,7 +46,7 @@ from app.services.campaign_control import CampaignControlError, ensure_campaign_
 from app.config import settings
 from app.utils.dm_batch import DmBatchPacer
 from app.utils.exceptions import (
-    AccountBannedError, AccountChallengeError,
+    AccountBannedError, AccountChallengeError, AIGenerationTransientError,
     BotHaltedError, DMAbortedBeforeSendError, DMSendError, DMRestrictedError,
 )
 from app.utils.timing import (
@@ -60,6 +60,15 @@ from app.utils.timing import (
 # Must be longer than: max_delay_seconds + DM send time + safety margin.
 # Production max_delay = 480s (8 min) → 20 min gives plenty of buffer.
 LOCK_TIMEOUT_MINUTES = 20
+
+
+def _gen_backoff_seconds(attempt: int, base: int, cap: int) -> int:
+    """Backoff esponenziale per i fallimenti transient di generazione AI.
+    attempt 1 → base, 2 → base*2, 3 → base*4 ... con tetto `cap`. Rompe l'hot-loop
+    che riclaimava gli stessi follower a delay zero amplificando il 429."""
+    if attempt < 1:
+        attempt = 1
+    return int(min(base * (2 ** (attempt - 1)), cap))
 
 
 def _cancelled_attempt_is_safe_to_release(message: Message | None) -> bool:
@@ -112,6 +121,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
     session_mgr = SessionManager()
     consecutive_failures = 0
     consecutive_unexpected_errors = 0
+    consecutive_gen_failures = 0   # transient AI-gen consecutivi → backoff/defer (anti-tempesta 429)
     session_profiles: list[str] = []  # usernames of sent DMs this session
     session_failed: int = 0           # failed DM attempts this session
     session_skipped: int = 0          # skipped (global_contacts dedup) this session
@@ -440,15 +450,53 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
 
             # ── 8. Generate AI message ─────────────────────────────────────
             emit_event(campaign_id, "generating_message", f"Genero messaggio per @{follower.username}…")
-            message = await _get_or_create_message(follower, campaign, db)
+            try:
+                message = await _get_or_create_message(follower, campaign, db)
+            except AIGenerationTransientError as gen_err:
+                # Provider AI in rate-limit/timeout (429 ecc). Il follower e' gia'
+                # stato rimesso a bio_scraped + sbloccato dentro l'helper. NON fare
+                # hot-loop riclaimandolo a delay zero: era cio' che alimentava la
+                # tempesta 429. Rilascia la reservation e fai backoff crescente;
+                # dopo N transient consecutivi rimanda il batch (riparte piu' tardi).
+                await reservation.release(follower.ig_user_id, db)
+                await db.commit()
+                consecutive_gen_failures += 1
+                if consecutive_gen_failures >= settings.ai_gen_failure_threshold:
+                    emit_event(
+                        campaign_id, "generation_backoff",
+                        f"AI sovraccarico dopo {consecutive_gen_failures} tentativi — rimando il batch",
+                        level="warn",
+                    )
+                    logger.warning(
+                        f"[Worker] AI transient gen failure #{consecutive_gen_failures} "
+                        f"(@{follower.username}): {gen_err} — defer batch"
+                    )
+                    await _defer_next_batch("AI rate limit")
+                    return
+                backoff = _gen_backoff_seconds(
+                    consecutive_gen_failures,
+                    settings.ai_gen_backoff_base_seconds,
+                    settings.ai_gen_backoff_cap_seconds,
+                )
+                emit_event(
+                    campaign_id, "generation_backoff",
+                    f"AI sovraccarico — pausa {backoff}s prima di riprovare", level="warn",
+                )
+                logger.warning(
+                    f"[Worker] AI transient gen failure #{consecutive_gen_failures} "
+                    f"(@{follower.username}): {gen_err} — backoff {backoff}s"
+                )
+                await asyncio.sleep(backoff)
+                continue
             if not message:
-                # Generation failed: follower already marked failed inside helper.
-                # Release the global contact reservation so other campaigns can try.
+                # Generation failed permanently: follower already marked failed inside
+                # helper. Release the global contact reservation so other campaigns can try.
                 await reservation.release(follower.ig_user_id, db)
                 follower.locked_by_account_id = None
                 follower.locked_at = None
                 await db.commit()
                 continue
+            consecutive_gen_failures = 0
             active_message = message
 
             # ── 9. Human-like delay before sending ─────────────────────────
@@ -1297,6 +1345,8 @@ async def _get_or_create_message(
         await db.commit()
         await db.refresh(message)
         return message
+    except AIGenerationTransientError:
+        raise
     except Exception as e:
         msg = str(e).lower()
         transient = any(k in msg for k in ("429", "rate", "timeout", "timed out", "connect", "temporarily"))
@@ -1306,9 +1356,13 @@ async def _get_or_create_message(
                 "follower lasciato in bio_scraped per retry"
             )
             follower.status = FollowerStatus.bio_scraped
-        else:
-            logger.error(f"Failed to generate message for @{follower.username}: {e}")
-            follower.status = FollowerStatus.failed
+            follower.locked_by_account_id = None
+            follower.locked_at = None
+            await db.commit()
+            # Segnala al worker: backoff, NON riprovare a raffica (hot-loop 429).
+            raise AIGenerationTransientError(str(e)[:200])
+        logger.error(f"Failed to generate message for @{follower.username}: {e}")
+        follower.status = FollowerStatus.failed
         follower.locked_by_account_id = None
         follower.locked_at = None
         await db.commit()

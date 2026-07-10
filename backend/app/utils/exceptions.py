@@ -78,5 +78,11 @@ class OllamaError(BotOutboundError):
     """Error communicating with Ollama."""
 
 
+class AIGenerationTransientError(BotOutboundError):
+    """Generazione messaggio AI fallita per causa TRANSITORIA (rate-limit/429,
+    timeout, connessione). Il follower resta rigenerabile (bio_scraped): il
+    worker deve fare backoff, NON riprovare a raffica (era l'hot-loop 429)."""
+
+
 class CampaignError(BotOutboundError):
     """Campaign lifecycle errors."""

@@ -27,14 +27,54 @@ _GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 _GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"  # 2.0-flash dismesso/quota free 0
 
 
+def _provider_chain() -> list[tuple[str, str, str, str]]:
+    """Catena di provider da provare in ordine: (provider, api_key, model_override, base_url).
+    Primario da ai_provider; se ai_provider_fallback e' settato (e diverso), lo
+    aggiunge come secondo tentativo. Vuoto = single provider (nessun failover)."""
+    primary = (
+        settings.ai_provider.lower(),
+        settings.ai_api_key,
+        settings.ai_model,
+        settings.ai_base_url,
+    )
+    chain = [primary]
+    fb = settings.ai_provider_fallback.strip().lower()
+    if fb and fb != settings.ai_provider.strip().lower():
+        chain.append((fb, settings.ai_api_key_fallback, settings.ai_model_fallback, settings.ai_base_url_fallback))
+    return chain
+
+
+async def _dispatch(provider: str, api_key: str, model_override: str, base_url: str,
+                    system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+    p = provider.lower()
+    model = _resolve_model(p, model_override)
+    if p == "gemini":
+        return await _generate_gemini(system_prompt, user_prompt, max_tokens, api_key, model)
+    if p in ("groq", "openai"):
+        return await _generate_openai_compatible(system_prompt, user_prompt, max_tokens, api_key, model, base_url)
+    return await _generate_ollama(system_prompt, user_prompt, max_tokens, model)
+
+
 class ConfiguredAIClient:
     async def generate(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
-        provider = settings.ai_provider.lower()
-        if provider == "gemini":
-            return await _generate_gemini(system_prompt, user_prompt, max_tokens)
-        if provider in ("groq", "openai"):
-            return await _generate_openai_compatible(system_prompt, user_prompt, max_tokens)
-        return await _generate_ollama(system_prompt, user_prompt, max_tokens)
+        chain = _provider_chain()
+        last_err: Exception | None = None
+        for i, (provider, api_key, model_override, base_url) in enumerate(chain):
+            try:
+                return await _dispatch(provider, api_key, model_override, base_url,
+                                       system_prompt, user_prompt, max_tokens)
+            except (OllamaError, httpx.HTTPError) as e:
+                last_err = e
+                if i + 1 < len(chain):
+                    nxt = chain[i + 1][0]
+                    logger.warning(
+                        f"AI provider '{provider}' fallito ({str(e)[:120]}) — "
+                        f"ripiego sul fallback '{nxt}'"
+                    )
+                    continue
+                raise
+        # Difensivo: chain non vuota, il loop torna o solleva prima di qui.
+        raise last_err if last_err else OllamaError("Nessun provider AI configurato")
 
 
 def get_ai_client() -> AIClient:
@@ -64,12 +104,14 @@ def _get_system_prompt() -> str:
     return settings.ai_system_prompt.strip() if settings.ai_system_prompt.strip() else DEFAULT_SYSTEM_PROMPT
 
 
-def _get_model() -> str:
-    if settings.ai_model.strip():
-        return settings.ai_model.strip()
-    if settings.ai_provider == "groq":
+def _resolve_model(provider: str, model_override: str) -> str:
+    """Modello effettivo per un provider: override esplicito, altrimenti default del provider."""
+    if model_override and model_override.strip():
+        return model_override.strip()
+    p = provider.lower()
+    if p == "groq":
         return _GROQ_DEFAULT_MODEL
-    if settings.ai_provider == "gemini":
+    if p == "gemini":
         return _GEMINI_DEFAULT_MODEL
     return settings.ollama_model
 
@@ -125,9 +167,10 @@ def _build_user_prompt(
 Scrivi il messaggio DM personalizzato:"""
 
 
-async def _generate_ollama(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+async def _generate_ollama(system_prompt: str, user_prompt: str, max_tokens: int,
+                           model: str | None = None) -> str:
     payload = {
-        "model": settings.ollama_model,
+        "model": model or settings.ollama_model,
         "prompt": user_prompt,
         "system": system_prompt,
         "stream": False,
@@ -148,11 +191,10 @@ async def _generate_ollama(system_prompt: str, user_prompt: str, max_tokens: int
     return response.json().get("response", "").strip()
 
 
-async def _generate_openai_compatible(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+async def _generate_openai_compatible(system_prompt: str, user_prompt: str, max_tokens: int,
+                                      api_key: str, model: str, base_url_override: str = "") -> str:
     """Groq and any other OpenAI-compatible provider."""
-    base_url = settings.ai_base_url.strip() or _GROQ_BASE_URL
-    model = _get_model()
-    api_key = settings.ai_api_key
+    base_url = (base_url_override or "").strip() or _GROQ_BASE_URL
 
     payload = {
         "model": model,
@@ -173,15 +215,15 @@ async def _generate_openai_compatible(system_prompt: str, user_prompt: str, max_
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise OllamaError(f"API error ({settings.ai_provider}): {e.response.status_code} {e.response.text}")
+            raise OllamaError(f"API error (openai-compatible {model}): {e.response.status_code} {e.response.text}")
         except httpx.ConnectError:
-            raise OllamaError(f"Cannot connect to {settings.ai_provider} API at {base_url}")
+            raise OllamaError(f"Cannot connect to OpenAI-compatible API at {base_url}")
     data = response.json()
     return data["choices"][0]["message"]["content"].strip()
 
 
-async def _generate_gemini(system_prompt: str, user_prompt: str, max_tokens: int) -> str:
-    model = _get_model()
+async def _generate_gemini(system_prompt: str, user_prompt: str, max_tokens: int,
+                           api_key: str, model: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -198,7 +240,7 @@ async def _generate_gemini(system_prompt: str, user_prompt: str, max_tokens: int
     }
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            response = await client.post(url, params={"key": settings.ai_api_key}, json=payload)
+            response = await client.post(url, params={"key": api_key}, json=payload)
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise OllamaError(f"Gemini API error: {e.response.status_code} {e.response.text}")
