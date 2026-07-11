@@ -182,6 +182,20 @@ def test_update_message_fields_while_running(client, _temp_db):
     assert body["message_template_c"].startswith("Template C")
 
 
+def test_update_message_template_c_removed_with_explicit_none_while_running(client, _temp_db):
+    """'None esplicito = rimuovi' (semantica Task 1, gia' usata da message_template_b)
+    deve funzionare end-to-end anche per message_template_c attraverso l'endpoint,
+    non solo a livello schema — e anche questo mentre la campagna e' running."""
+    _, sf = _temp_db
+    camp = _make_campaign(name="run-remove-c", status=CampaignStatus.running)
+    camp.message_template_c = "Template C da rimuovere abbastanza lungo"
+    _seed(sf, camp)
+
+    resp = client.put(f"/api/campaigns/{camp.id}", json={"message_template_c": None})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["message_template_c"] is None
+
+
 def test_update_template_b_and_prompt_context_while_running(client, _temp_db):
     """message_template_b e ai_prompt_context erano gia' setter esistenti (Task 1) ma
     passavano dal gate esterno: verifica che ora siano davvero raggiungibili a running,
