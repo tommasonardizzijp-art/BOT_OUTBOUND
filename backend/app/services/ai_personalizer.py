@@ -549,7 +549,8 @@ async def compose_message(campaign, follower) -> tuple[str, str]:
     ai_enabled=True -> generate_message col system prompt per-campagna.
     Ritorna (testo, variante). Propaga le eccezioni di generate_message
     (i call-site mantengono la loro gestione transient/retry) e
-    TemplateRenderError per placeholder sconosciuti.
+    TemplateRenderError sia per placeholder sconosciuti sia per template
+    vuoto dopo il rendering.
     """
     from app.services.template_renderer import (
         pick_template, render_template, resolve_spintax,
@@ -557,7 +558,9 @@ async def compose_message(campaign, follower) -> tuple[str, str]:
 
     template, variant = pick_template(campaign)
 
-    if not getattr(campaign, "ai_enabled", True):
+    # Default False: un chiamante duck-typed senza l'attributo deve cadere
+    # nel rendering locale (economico), mai silenziosamente in spesa AI.
+    if not getattr(campaign, "ai_enabled", False):
         text = render_template(
             template,
             full_name=follower.full_name,
