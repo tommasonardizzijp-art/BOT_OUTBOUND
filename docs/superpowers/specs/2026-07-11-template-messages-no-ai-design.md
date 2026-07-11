@@ -39,7 +39,7 @@ Oggi ogni DM passa dall'AI (Gemini/Groq/Ollama) che personalizza il template sul
 
 - `campaign.ai_enabled == False` → `text = render_template(...)`, `status = message_generated`, **nessuna chiamata AI**, nessun consumo quota.
 - `campaign.ai_enabled == True` → flusso attuale; il system prompt diventa `campaign.ai_system_prompt or settings.ai_system_prompt or DEFAULT_SYSTEM_PROMPT`.
-- Gestione residui: i placeholder nome hanno sempre un valore (fallback `@username`), quindi non restano mai vuoti. Uno spintax malformato (graffa mai chiusa) resta testo letterale nel DM: il backend logga un warning al rendering, il frontend segnala il problema alla validazione del form. Nessun blocco hard in pipeline.
+- Gestione residui: i placeholder nome hanno sempre un valore (fallback `@username`). Un placeholder sconosciuto residuo (es. `{azienda}`, senza `|`) fa fallire il rendering di QUEL messaggio (`TemplateRenderError` → follower `failed`) — stessa semantica dell'attuale `_fallback_message`, che rifiuta di mandare placeholder letterali. Uno spintax malformato (graffa mai chiusa) resta testo letterale + warning nel log. Il frontend segnala entrambi alla validazione del form.
 
 ### API (`schemas/campaign.py`, `api/campaigns.py`)
 
