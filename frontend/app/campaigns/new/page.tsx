@@ -102,7 +102,7 @@ export default function NewCampaignPage() {
         bio_engine: bioEngine,
         messaging_enabled: messagingEnabled,
         base_message_template: messagingEnabled ? form.base_message_template : null,
-        message_template_b: messagingEnabled && showTemplateB && form.message_template_b ? form.message_template_b : null,
+        message_template_b: messagingEnabled && showTemplateB && form.message_template_b.trim() ? form.message_template_b : null,
         message_template_c: messagingEnabled && showTemplateC && form.message_template_c.trim() ? form.message_template_c : null,
         ai_prompt_context: messagingEnabled && form.ai_prompt_context ? form.ai_prompt_context : undefined,
         ai_enabled: messagingEnabled ? form.ai_enabled : false,
@@ -361,7 +361,7 @@ export default function NewCampaignPage() {
                   {errors.message_template_b
                     ? <p className="text-xs text-red-400">{errors.message_template_b}</p>
                     : <p className="text-xs text-gray-500">
-                        50% dei follower riceveranno il messaggio A, 50% il messaggio B.
+                        Se compilato, il bot sceglie a caso tra i template attivi per ogni DM.
                         I risultati sono visibili nel dettaglio campagna.
                       </p>
                   }
