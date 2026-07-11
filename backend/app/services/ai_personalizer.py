@@ -450,9 +450,9 @@ async def generate_preview_batch(campaign_id: str, count: int = 5) -> int:
 
 async def generate_messages_batch(campaign_id: str, batch_size: int = 50) -> int:
     """
-    Pre-generate AI messages for all followers in bio_scraped state.
-    Supports A/B testing: if campaign.message_template_b is set, randomly assigns
-    each follower to variant 'a' or 'b' (50/50 split).
+    Pre-generate messages for all followers in bio_scraped state.
+    Template chosen at random with equal weights among the compiled A/B/C
+    templates (pick_template); AI is used only if campaign.ai_enabled is True.
     Returns count of messages generated.
     """
     from app.database import AsyncSessionLocal

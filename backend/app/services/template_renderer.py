@@ -6,6 +6,8 @@ Nessuna dipendenza da ai_personalizer (è ai_personalizer che importa da qui).
 import random
 import re
 
+from loguru import logger
+
 # Gruppo spintax = graffe con almeno un '|' dentro: {Ciao|Hey|Salve}.
 # {nome} non ha pipe -> non matcha -> resta per il fill del nome.
 SPINTAX_RE = re.compile(r"\{([^{}|]*(?:\|[^{}|]*)+)\}")
@@ -61,6 +63,12 @@ def render_template(
         raise TemplateRenderError(
             f"Placeholder sconosciuto nel template: {residual.group(0)!r}"
         )
+    if "{" in out or "[" in out:
+        # Parentesi orfana/non chiusa che RESIDUAL_PLACEHOLDER_RE non ha
+        # intercettato (es. spintax con gruppo mai chiuso): resta letterale nel
+        # messaggio per scelta di design (vedi docstring) — solo un warning per
+        # non spedire DM rotti in silenzio.
+        logger.warning(f"Template con parentesi non chiuse/spintax malformato: {out[:80]!r}")
     if not out.strip():
         raise TemplateRenderError("Template vuoto dopo il rendering")
     return _normalize(out)

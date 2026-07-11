@@ -39,6 +39,7 @@ from app.services import account_manager
 from app.services import account_lease, reservation
 from app.services.account_manager import get_warmup_limit
 from app.services.ai_personalizer import compose_message
+from app.services.template_renderer import TemplateRenderError
 from app.services.human_behavior import SessionManager
 from app.services.anomaly_detector import report_anomaly
 from app.services.bot_state_service import is_halted
@@ -1305,8 +1306,9 @@ async def _maybe_complete_campaign(campaign_id: str, db: AsyncSession) -> None:
 async def _get_or_create_message(
     follower: Follower, campaign: Campaign, db: AsyncSession
 ) -> Message | None:
-    """Get existing pending/retry message or generate a new one via Ollama.
-    M10: if campaign has message_template_b, randomly assigns variant 'a' or 'b' (50/50).
+    """Get existing pending/retry message or generate a new one via compose_message.
+    Template (A/B/C) is chosen at random with equal weights among the compiled
+    templates (see pick_template); AI is used only if campaign.ai_enabled is True.
     """
     result = await db.execute(
         select(Message).where(
@@ -1336,6 +1338,18 @@ async def _get_or_create_message(
         return message
     except AIGenerationTransientError:
         raise
+    except TemplateRenderError as e:
+        # Errore di rendering locale (placeholder sconosciuto/template vuoto): il
+        # messaggio d'errore incorpora il testo del template e puo' contenere
+        # substring come "rate" che l'except generico sotto scambierebbe per un
+        # 429 AI transiente (retry infinito). E' sempre permanente: il template
+        # e' rotto a prescindere da quante volte lo si riprova.
+        logger.error(f"Failed to generate message for @{follower.username}: {e}")
+        follower.status = FollowerStatus.failed
+        follower.locked_by_account_id = None
+        follower.locked_at = None
+        await db.commit()
+        return None
     except Exception as e:
         msg = str(e).lower()
         transient = any(k in msg for k in ("429", "rate", "timeout", "timed out", "connect", "temporarily"))

@@ -15,8 +15,18 @@ export function renderPreview(template: string, sampleName = 'Marco'): string {
 }
 
 /** Placeholder sconosciuti rimasti dopo spintax+nome (es. {azienda}): il backend
- *  li rifiuta al rendering — segnalali nel form. */
+ *  li rifiuta al rendering — segnalali nel form. Copre anche graffe/quadre
+ *  spaiate (es. spintax con un gruppo mai chiuso: "{Ciao|Hey Marco"): quelle
+ *  non matchano ne' SPINTAX_RE ne' il pattern "ben formato" sotto e prima
+ *  passavano la validazione a zero segnali, finendo letterali nel DM. */
 export function findUnknownPlaceholders(template: string): string[] {
   const cleaned = template.replace(SPINTAX_RE, 'x').replace(NAME_RE, 'x')
-  return cleaned.match(/[{[][^{}[\]]{0,40}[}\]]/g) ?? []
+  const found = cleaned.match(/[{[][^{}[\]]{0,40}[}\]]/g) ?? []
+  if (found.length > 0) return found
+
+  const orphan = cleaned.match(/[{}[\]]/)
+  if (orphan && orphan.index !== undefined) {
+    return [cleaned.slice(orphan.index, orphan.index + 20)]
+  }
+  return found
 }
