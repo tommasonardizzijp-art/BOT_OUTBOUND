@@ -340,9 +340,25 @@ class InstagramPage:
         # Close Stories viewer if Instagram auto-opened it instead of profile
         await self._dismiss_stories_if_open(page, username)
 
-        # Check if profile exists / account is private / page not available
-        if await page.locator('text=Sorry, this page isn').count() > 0:
+        # Check if profile exists / account is private / page not available.
+        # IG serve la pagina "non disponibile" nella lingua della UI: il match
+        # deve essere multilingua (il vecchio check solo-EN lasciava proseguire
+        # il bot alla cieca con UI italiana — caso reale rubina.cartomanzia).
+        page_gone: bool = await page.evaluate(
+            "() => /sorry, this page isn|page isn't available|"
+            "spiacenti, questa pagina non|pagina non .{0,3}disponibile|"
+            "cette page n'est pas disponible|seite ist leider nicht verf/i"
+            ".test(document.body.innerText)"
+        )
+        if page_gone:
             raise DMRestrictedError(f"Profile @{username} not found or unavailable")
+        # Profili morti a volte vengono REDIRETTI (es. al feed home) invece di
+        # mostrare l'errore: se l'URL non contiene più lo username non siamo
+        # sul profilo — fermarsi qui, non cercare bottoni sul feed.
+        if username.lower() not in page.url.lower():
+            raise DMRestrictedError(
+                f"Profile @{username} unavailable — IG redirected to {page.url}"
+            )
 
         # Browse profile briefly (human-like) — duration scaled by per-account timing multiplier.
         # Private profiles get a short browse: a human sees the lock icon and acts immediately.
@@ -421,9 +437,22 @@ class InstagramPage:
         # impilati per locale: vedi _locate_dm_input).
         msg_input, found_selector = await self._locate_dm_input(page)
 
-        if msg_input is None and await self._is_stories_viewer_open(page):
-            logger.info(f"@{username}: DM input search landed in Stories - returning to profile and retrying once")
+        if msg_input is None:
+            # Recovery incondizionato (una volta): qualunque cosa abbia ingoiato
+            # il flusso — viewer storie/highlights col reply-box non riconosciuto,
+            # modale 'Link', overlay nuovi — tornare al profilo con goto e
+            # ripartire è più robusto che riconoscere ogni singolo overlay.
+            # (Caso reale: highlights viewer aperto da un click impreciso, il
+            # retry condizionato alle sole storie non scattava.)
+            logger.info(
+                f"@{username}: DM input non trovato (URL: {page.url}) — "
+                f"torno al profilo e riprovo una volta"
+            )
             await self._dismiss_stories_if_open(page, username)
+            await page.goto(profile_url, wait_until="domcontentloaded")
+            await asyncio.sleep(random.uniform(1.5, 2.5))
+            await self._dismiss_ig_modals(page, username)
+            await self._dismiss_blocking_dialog(page, username)
             await self._click_message_button(page, username)
             try:
                 await page.wait_for_url(lambda url: '/direct/' in url, timeout=8000)
@@ -696,18 +725,27 @@ class InstagramPage:
         # ── Strategy 2: Three dots (⋯) → "Send message" ──
         logger.info(f"@{username}: falling back to three dots menu")
 
-        # 2a. Find and click the three dots button
+        # 2a. Find and click the three dots button.
+        # IMPORTANTE: scoped a `main header` (i "..." del profilo, accanto allo
+        # username) — i selettori nudi matchavano anche i "..." dei POST del
+        # feed: su un redirect al feed il bot apriva il menu Segnala/Non mi
+        # interessa di un post a caso (caso reale osservato via screenshot).
         three_dots = (
-            page.locator('[aria-label="Options"]')
-            .or_(page.locator('[aria-label="More options"]'))
-            .or_(page.locator('[aria-label="Opzioni"]'))
-            .or_(page.locator('[aria-label="Altre opzioni"]'))
-            .or_(page.locator('[aria-label="Altro"]'))
-            .or_(page.locator('[aria-label="More"]'))
-            .or_(page.locator('div[role="button"]:has(svg[aria-label="Options"])'))
-            .or_(page.locator('div[role="button"]:has(svg[aria-label="Altre opzioni"])'))
-            .or_(page.locator('button:has(svg[aria-label="Options"])'))
-            .or_(page.locator('button:has(svg[aria-label="Altre opzioni"])'))
+            page.locator('main header [aria-label="Options"]')
+            .or_(page.locator('main header [aria-label="More options"]'))
+            .or_(page.locator('main header [aria-label="Opzioni"]'))
+            .or_(page.locator('main header [aria-label="Altre opzioni"]'))
+            .or_(page.locator('main header [aria-label="Altro"]'))
+            .or_(page.locator('main header [aria-label="More"]'))
+            .or_(page.locator('main header div[role="button"]:has(svg[aria-label="Options"])'))
+            .or_(page.locator('main header div[role="button"]:has(svg[aria-label="Altre opzioni"])'))
+            .or_(page.locator('main header button:has(svg[aria-label="Options"])'))
+            .or_(page.locator('main header button:has(svg[aria-label="Altre opzioni"])'))
+            # Fallback se IG togliesse <header> dal profilo (come per il bottone
+            # Messaggio): section del profilo, mai dentro un <article> (post).
+            .or_(page.locator('main section:not(:has(article)) [aria-label="Options"]'))
+            .or_(page.locator('main section:not(:has(article)) [aria-label="Opzioni"]'))
+            .or_(page.locator('main section:not(:has(article)) [aria-label="Altre opzioni"]'))
         )
 
         try:
