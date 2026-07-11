@@ -71,8 +71,11 @@ class _Follower:
 class _Campaign:
     id = "c1"
     message_template_b = None
+    message_template_c = None
     base_message_template = "Ciao"
     ai_prompt_context = None
+    ai_enabled = False
+    ai_system_prompt = None
 
 
 def test_transient_429_solleva_e_lascia_bio_scraped(monkeypatch):
@@ -97,6 +100,26 @@ def test_permanent_error_torna_none_e_marca_failed(monkeypatch):
 
     follower = _Follower()
     out = asyncio.run(_get_or_create_message(follower, _Campaign(), _FakeDB()))
+
+    assert out is None
+    assert follower.status == FollowerStatus.failed
+    assert follower.locked_by_account_id is None
+
+
+def test_template_render_error_non_e_scambiato_per_transiente():
+    """Fix 2 (regressione): un placeholder sconosciuto tipo '{rate}' fa sollevare
+    TemplateRenderError con 'rate' nel messaggio ("Placeholder sconosciuto nel
+    template: '{rate}'"). L'except Exception generico sniffa substring come
+    "rate"/"timeout"/"connect" per riconoscere errori AI transienti: prima del
+    fix questo faceva scambiare un errore di template (permanente) per un 429
+    (transiente) -> follower rimesso in bio_scraped e ritentato all'infinito,
+    mai marcato failed. Qui NON mockiamo compose_message: usiamo il rendering
+    reale (ai_enabled=False) per riprodurre l'errore organicamente."""
+    follower = _Follower()
+    campaign = _Campaign()
+    campaign.base_message_template = "Ciao {rate}, ti scrivo"
+
+    out = asyncio.run(_get_or_create_message(follower, campaign, _FakeDB()))
 
     assert out is None
     assert follower.status == FollowerStatus.failed

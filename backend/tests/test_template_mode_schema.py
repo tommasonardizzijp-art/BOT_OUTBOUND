@@ -1,5 +1,4 @@
 """Colonne ai_enabled / message_template_c / ai_system_prompt su Campaign + schemi."""
-import pytest
 from app.models.campaign import Campaign
 from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignResponse
 

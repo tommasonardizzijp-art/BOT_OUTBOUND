@@ -80,6 +80,13 @@ def test_render_blank_template_raises():
     with pytest.raises(TemplateRenderError):
         render_template("   ", full_name="X", username="x")
 
+def test_render_unclosed_brace_with_pipe_stays_literal_no_exception():
+    # Fix 1b: graffa spintax mai chiusa ({a|b amico) non matcha SPINTAX_RE ne'
+    # RESIDUAL_PLACEHOLDER_RE (nessuna graffa di chiusura) -> resta letterale,
+    # nessuna eccezione (solo un warning loggato, comportamento invariato).
+    out = render_template("Ciao {a|b amico", full_name="X", username="x")
+    assert out == "Ciao {a|b amico"
+
 
 # ── pick_template ──────────────────────────────────────────────────
 
