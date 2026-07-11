@@ -51,8 +51,9 @@ def render_template(
     rng: random.Random | None = None,
 ) -> str:
     """Spintax -> nome -> normalizzazione. Solleva TemplateRenderError se
-    restano placeholder sconosciuti (es. {azienda}): meglio fallire UN
-    messaggio che mandare un DM col placeholder letterale."""
+    restano placeholder sconosciuti (es. {azienda}) o se il risultato è
+    vuoto: meglio fallire UN messaggio che mandare un DM col placeholder
+    letterale (o un DM vuoto)."""
     out = resolve_spintax(template, rng=rng)
     out = _fill_name(out, full_name, username)
     residual = RESIDUAL_PLACEHOLDER_RE.search(out)
@@ -60,6 +61,8 @@ def render_template(
         raise TemplateRenderError(
             f"Placeholder sconosciuto nel template: {residual.group(0)!r}"
         )
+    if not out.strip():
+        raise TemplateRenderError("Template vuoto dopo il rendering")
     return _normalize(out)
 
 
@@ -71,6 +74,6 @@ def pick_template(campaign, rng: random.Random | None = None) -> tuple[str, str]
     candidates: list[tuple[str, str]] = [(campaign.base_message_template or "", "a")]
     if (campaign.message_template_b or "").strip():
         candidates.append((campaign.message_template_b, "b"))
-    if (getattr(campaign, "message_template_c", None) or "").strip():
+    if (campaign.message_template_c or "").strip():
         candidates.append((campaign.message_template_c, "c"))
     return r.choice(candidates)

@@ -40,6 +40,10 @@ def test_spintax_malformed_brace_stays_literal():
     # graffa mai chiusa: testo letterale, nessuna eccezione
     assert resolve_spintax("Ciao {nome, come va") == "Ciao {nome, come va"
 
+def test_spintax_malformed_with_pipe_stays_literal():
+    # graffa aperta con pipe ma mai chiusa: letterale, nessuna eccezione
+    assert resolve_spintax("Ciao {nome|amico") == "Ciao {nome|amico"
+
 
 # ── render_template ────────────────────────────────────────────────
 
@@ -71,6 +75,10 @@ def test_render_unknown_square_placeholder_raises():
 def test_render_normalizes_newlines():
     out = render_template("Riga1\r\nRiga2\n\n\n\nRiga3", full_name="X", username="x")
     assert out == "Riga1\nRiga2\n\nRiga3"
+
+def test_render_blank_template_raises():
+    with pytest.raises(TemplateRenderError):
+        render_template("   ", full_name="X", username="x")
 
 
 # ── pick_template ──────────────────────────────────────────────────
