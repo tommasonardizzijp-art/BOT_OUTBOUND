@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import useSWR from 'swr'
 import Link from 'next/link'
 import { api } from '@/lib/api'
+import { renderPreview, findUnknownPlaceholders } from '@/lib/spintax'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -240,9 +241,13 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   const [editTemplateOpen, setEditTemplateOpen] = useState(false)
   const [editTemplateValue, setEditTemplateValue] = useState('')
   const [editTemplateBValue, setEditTemplateBValue] = useState('')
+  const [editTemplateCValue, setEditTemplateCValue] = useState('')
   const [editContextValue, setEditContextValue] = useState('')
+  const [editAiEnabled, setEditAiEnabled] = useState(false)
+  const [editAiSystemPrompt, setEditAiSystemPrompt] = useState('')
   const [editMessagingEnabled, setEditMessagingEnabled] = useState(true)
   const [savingTemplate, setSavingTemplate] = useState(false)
+  const [editPreviews, setEditPreviews] = useState<string[]>([])
 
   // Campaign settings modal
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -544,6 +549,23 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
       toast.error('Inserisci un template di almeno 10 caratteri')
       return
     }
+    if (editMessagingEnabled) {
+      const unknownA = findUnknownPlaceholders(editTemplateValue)
+      if (unknownA.length > 0) {
+        toast.error(`Template A: placeholder sconosciuto ${unknownA[0]} — usa solo {nome} o gruppi {a|b}`)
+        return
+      }
+      const unknownB = findUnknownPlaceholders(editTemplateBValue)
+      if (unknownB.length > 0) {
+        toast.error(`Template B: placeholder sconosciuto ${unknownB[0]} — usa solo {nome} o gruppi {a|b}`)
+        return
+      }
+      const unknownC = findUnknownPlaceholders(editTemplateCValue)
+      if (unknownC.length > 0) {
+        toast.error(`Template C: placeholder sconosciuto ${unknownC[0]} — usa solo {nome} o gruppi {a|b}`)
+        return
+      }
+    }
     setSavingTemplate(true)
     try {
       await api.campaigns.update(id, {
@@ -551,6 +573,9 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         base_message_template: editMessagingEnabled ? editTemplateValue : null,
         ai_prompt_context: editMessagingEnabled ? (editContextValue || undefined) : undefined,
         message_template_b: editMessagingEnabled ? (editTemplateBValue.trim() || null) : null,
+        message_template_c: editMessagingEnabled ? (editTemplateCValue.trim() || null) : null,
+        ai_enabled: editMessagingEnabled ? editAiEnabled : false,
+        ai_system_prompt: editMessagingEnabled && editAiEnabled ? (editAiSystemPrompt.trim() || null) : null,
       })
       toast.success(editMessagingEnabled ? 'Messaggistica aggiornata' : 'Messaggistica disattivata')
       setEditTemplateOpen(false)
@@ -1355,6 +1380,9 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <div className="flex items-center justify-between">
             <CardTitle className="text-base text-gray-300">
               Template messaggio
+              <span className={`ml-2 text-xs px-2 py-0.5 rounded ${campaign.ai_enabled ? 'bg-purple-900 text-purple-300' : 'bg-gray-800 text-gray-400'}`}>
+                {campaign.ai_enabled ? '🤖 AI attiva' : '📋 Template'}
+              </span>
               {campaign.message_template_b && (
                 <Badge variant="outline" className="ml-2 text-xs border-purple-700 text-purple-400">A/B</Badge>
               )}
@@ -1365,8 +1393,12 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 onClick={() => {
                   setEditTemplateValue(campaign.base_message_template ?? '')
                   setEditTemplateBValue(campaign.message_template_b ?? '')
+                  setEditTemplateCValue(campaign.message_template_c ?? '')
                   setEditContextValue(campaign.ai_prompt_context ?? '')
+                  setEditAiEnabled(campaign.ai_enabled)
+                  setEditAiSystemPrompt(campaign.ai_system_prompt ?? '')
                   setEditMessagingEnabled(campaign.messaging_enabled)
+                  setEditPreviews([])
                   setEditTemplateOpen(true)
                 }}
               >
@@ -2115,6 +2147,20 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-purple-500"
                 placeholder="Template messaggio..."
               />
+              <p className="text-xs text-gray-600">
+                {'{nome}'} = nome del destinatario · {'{Ciao|Hey|Salve}'} = il bot sceglie una variante a caso per ogni DM
+              </p>
+              <button type="button" className="text-xs text-blue-400 hover:text-blue-300"
+                onClick={() => setEditPreviews([1, 2, 3].map(() => renderPreview(editTemplateValue)))}>
+                ⚡ Anteprima varianti
+              </button>
+              {editPreviews.length > 0 && (
+                <div className="space-y-1">
+                  {editPreviews.map((p, i) => (
+                    <p key={i} className="text-xs text-gray-400 bg-gray-800 rounded p-2 whitespace-pre-wrap">{p}</p>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="space-y-1.5">
               <label className="text-sm text-gray-300 font-medium">
@@ -2128,18 +2174,63 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-purple-500"
                 placeholder="Lascia vuoto per disattivare A/B testing..."
               />
-              <p className="text-xs text-gray-600">50% dei follower riceveranno B, 50% A. Lascia vuoto per disattivare.</p>
+              <p className="text-xs text-gray-600">Se compilato, il bot sceglie a caso tra i template attivi per ogni DM.</p>
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm text-gray-300 font-medium">Contesto AI</label>
+              <label className="text-sm text-gray-300 font-medium">
+                Template C
+                <span className="ml-1 text-gray-600 font-normal">(opzionale)</span>
+              </label>
               <textarea
-                value={editContextValue}
-                onChange={e => setEditContextValue(e.target.value)}
-                rows={3}
+                value={editTemplateCValue}
+                onChange={e => setEditTemplateCValue(e.target.value)}
+                rows={4}
                 className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-purple-500"
-                placeholder="Contesto opzionale per l'AI..."
+                placeholder="Lascia vuoto per disattivare la terza variante..."
               />
+              <p className="text-xs text-gray-600">I follower riceveranno a caso uno dei template attivi (A/B/C).</p>
             </div>
+
+            <div className="flex items-center justify-between rounded-md border border-gray-700 bg-gray-800/40 px-3 py-2">
+              <div>
+                <p className="text-sm text-gray-300 font-medium">Personalizza con AI</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  OFF (default): il template parte così com&apos;è, con le varianti {'{a|b}'} — zero quota AI.
+                  ON: l&apos;AI riscrive il messaggio sulla bio del destinatario.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditAiEnabled(v => !v)}
+                className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full transition-colors ${editAiEnabled ? 'bg-purple-600' : 'bg-gray-600'}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${editAiEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+            {editAiEnabled && (
+              <>
+                <div className="space-y-1.5">
+                  <label className="text-sm text-gray-300 font-medium">Contesto AI</label>
+                  <textarea
+                    value={editContextValue}
+                    onChange={e => setEditContextValue(e.target.value)}
+                    rows={3}
+                    className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-purple-500"
+                    placeholder="Contesto opzionale per l'AI..."
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-sm text-gray-300 font-medium">Istruzioni AI</label>
+                  <textarea
+                    value={editAiSystemPrompt}
+                    onChange={e => setEditAiSystemPrompt(e.target.value)}
+                    rows={3}
+                    className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-purple-500"
+                    placeholder="Sovrascrive le istruzioni globali solo per questa campagna. Es: tono informale, max 3 frasi, niente emoji."
+                  />
+                </div>
+              </>
+            )}
             </>)}
           </div>
 
