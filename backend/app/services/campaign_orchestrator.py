@@ -38,7 +38,7 @@ from app.models.global_contact import GlobalContact
 from app.services import account_manager
 from app.services import account_lease, reservation
 from app.services.account_manager import get_warmup_limit
-from app.services.ai_personalizer import generate_message
+from app.services.ai_personalizer import compose_message
 from app.services.human_behavior import SessionManager
 from app.services.anomaly_detector import report_anomaly
 from app.services.bot_state_service import is_halted
@@ -1308,8 +1308,6 @@ async def _get_or_create_message(
     """Get existing pending/retry message or generate a new one via Ollama.
     M10: if campaign has message_template_b, randomly assigns variant 'a' or 'b' (50/50).
     """
-    import random
-
     result = await db.execute(
         select(Message).where(
             Message.follower_id == follower.id,
@@ -1321,21 +1319,7 @@ async def _get_or_create_message(
         return message
 
     try:
-        # M10: A/B split — pick template randomly if template_b is set
-        if campaign.message_template_b and random.random() < 0.5:
-            template = campaign.message_template_b
-            variant = 'b'
-        else:
-            template = campaign.base_message_template
-            variant = 'a'
-
-        text = await generate_message(
-            base_template=template,
-            follower_username=follower.username,
-            follower_full_name=follower.full_name,
-            follower_bio=follower.biography,
-            ai_context=campaign.ai_prompt_context,
-        )
+        text, variant = await compose_message(follower=follower, campaign=campaign)
         message = Message(
             campaign_id=campaign.id,
             follower_id=follower.id,

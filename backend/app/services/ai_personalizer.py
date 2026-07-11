@@ -395,7 +395,6 @@ def _fallback_message(base_template: str, name: str) -> str:
 
 async def generate_preview_batch(campaign_id: str, count: int = 5) -> int:
     """Generate first N bio_scraped followers as approval preview sample."""
-    import random
     from app.database import AsyncSessionLocal
     from app.models.follower import Follower, FollowerStatus
     from app.models.campaign import Campaign
@@ -426,20 +425,7 @@ async def generate_preview_batch(campaign_id: str, count: int = 5) -> int:
         generated = 0
         for follower in followers:
             try:
-                if campaign.message_template_b and generated % 2 == 1:
-                    template = campaign.message_template_b
-                    variant = 'b'
-                else:
-                    template = campaign.base_message_template
-                    variant = 'a'
-
-                text = await generate_message(
-                    base_template=template,
-                    follower_username=follower.username,
-                    follower_full_name=follower.full_name,
-                    follower_bio=follower.biography,
-                    ai_context=campaign.ai_prompt_context,
-                )
+                text, variant = await compose_message(campaign, follower)
 
                 await db.execute(delete(Message).where(Message.follower_id == follower.id))
                 message = Message(
@@ -469,7 +455,6 @@ async def generate_messages_batch(campaign_id: str, batch_size: int = 50) -> int
     each follower to variant 'a' or 'b' (50/50 split).
     Returns count of messages generated.
     """
-    import random
     from app.database import AsyncSessionLocal
     from app.models.follower import Follower, FollowerStatus
     from app.models.campaign import Campaign
@@ -501,20 +486,7 @@ async def generate_messages_batch(campaign_id: str, batch_size: int = 50) -> int
 
             for follower in followers:
                 try:
-                    if campaign.message_template_b and random.random() < 0.5:
-                        template = campaign.message_template_b
-                        variant = 'b'
-                    else:
-                        template = campaign.base_message_template
-                        variant = 'a'
-
-                    text = await generate_message(
-                        base_template=template,
-                        follower_username=follower.username,
-                        follower_full_name=follower.full_name,
-                        follower_bio=follower.biography,
-                        ai_context=campaign.ai_prompt_context,
-                    )
+                    text, variant = await compose_message(campaign, follower)
 
                     await db.execute(delete(Message).where(Message.follower_id == follower.id))
                     message = Message(

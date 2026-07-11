@@ -78,7 +78,7 @@ class _Campaign:
 def test_transient_429_solleva_e_lascia_bio_scraped(monkeypatch):
     async def _boom(*a, **k):
         raise OllamaError("Gemini API error: 429 too many requests")
-    monkeypatch.setattr(orch, "generate_message", _boom)
+    monkeypatch.setattr(orch, "compose_message", _boom)
 
     follower = _Follower()
     with pytest.raises(AIGenerationTransientError):
@@ -93,7 +93,7 @@ def test_transient_429_solleva_e_lascia_bio_scraped(monkeypatch):
 def test_permanent_error_torna_none_e_marca_failed(monkeypatch):
     async def _boom(*a, **k):
         raise ValueError("template rotto")  # nessuna keyword transient
-    monkeypatch.setattr(orch, "generate_message", _boom)
+    monkeypatch.setattr(orch, "compose_message", _boom)
 
     follower = _Follower()
     out = asyncio.run(_get_or_create_message(follower, _Campaign(), _FakeDB()))
