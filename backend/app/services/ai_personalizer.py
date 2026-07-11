@@ -100,7 +100,9 @@ REGOLE — rispetta in ordine di priorità:
 Il risultato finale deve sembrare scritto da un professionista reale: diretto, naturale e credibile."""
 
 
-def _get_system_prompt() -> str:
+def _get_system_prompt(override: str | None = None) -> str:
+    if override and override.strip():
+        return override.strip()
     return settings.ai_system_prompt.strip() if settings.ai_system_prompt.strip() else DEFAULT_SYSTEM_PROMPT
 
 
@@ -260,6 +262,7 @@ async def generate_message(
     follower_full_name: str | None,
     follower_bio: str | None,
     ai_context: str | None = None,
+    system_prompt_override: str | None = None,
 ) -> str:
     """
     Generate a personalized DM for a follower.
@@ -267,7 +270,7 @@ async def generate_message(
     Returns the generated message text.
     Raises OllamaError if generation fails after retries.
     """
-    system_prompt = _get_system_prompt()
+    system_prompt = _get_system_prompt(system_prompt_override)
     user_prompt = _build_user_prompt(
         base_template, follower_username, follower_full_name, follower_bio, ai_context
     )
@@ -536,3 +539,38 @@ async def generate_messages_batch(campaign_id: str, batch_size: int = 50) -> int
             emit_event(campaign_id, "pregen_progress", f"Generati {generated} messaggi finora...")
 
     return generated
+
+
+async def compose_message(campaign, follower) -> tuple[str, str]:
+    """UNICA entry per comporre il testo DM di un follower.
+
+    Sceglie il template (A/B/C, pesi uguali), risolve SEMPRE lo spintax,
+    poi: ai_enabled=False -> rendering locale (zero AI, zero token);
+    ai_enabled=True -> generate_message col system prompt per-campagna.
+    Ritorna (testo, variante). Propaga le eccezioni di generate_message
+    (i call-site mantengono la loro gestione transient/retry) e
+    TemplateRenderError per placeholder sconosciuti.
+    """
+    from app.services.template_renderer import (
+        pick_template, render_template, resolve_spintax,
+    )
+
+    template, variant = pick_template(campaign)
+
+    if not getattr(campaign, "ai_enabled", True):
+        text = render_template(
+            template,
+            full_name=follower.full_name,
+            username=follower.username,
+        )
+        return text, variant
+
+    text = await generate_message(
+        base_template=resolve_spintax(template),
+        follower_username=follower.username,
+        follower_full_name=follower.full_name,
+        follower_bio=follower.biography,
+        ai_context=campaign.ai_prompt_context,
+        system_prompt_override=getattr(campaign, "ai_system_prompt", None),
+    )
+    return text, variant
