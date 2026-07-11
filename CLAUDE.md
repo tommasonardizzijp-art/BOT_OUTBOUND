@@ -187,6 +187,9 @@ Una campagna = una sorgente di profili + un template messaggio.
 - `total_followers` / `messages_sent/failed/pending`: contatori denormalizzati per performance UI
 - `base_message_template`: template principale (ora **nullable** — NULL consentito quando `messaging_enabled=False`; non può essere vuoto/NULL se `messaging_enabled=True`)
 - `message_template_b`: template B opzionale per A/B testing (M10)
+- `message_template_c`: template C opzionale, terza variante per il rendering locale A/B/C (Template mode, migrazione 023) — `pick_template()` sceglie a pesi uguali tra i template compilati
+- `ai_enabled`: bool — default **False** per le nuove campagne (rendering locale, no AI); la migrazione 023 ha impostato **True** sulle campagne preesistenti per non cambiarne il comportamento. Vedi sezione "Architettura AI" per il flusso completo
+- `ai_system_prompt`: override per-campagna del system prompt AI (vuoto/null = usa `AI_SYSTEM_PROMPT`/default globale); ha effetto solo se `ai_enabled=True`
 - `daily_limit`: limite DM/giorno per l'intera campagna
 - `require_approval` + `approval_sample_size`: approvazione messaggi a campione (M15)
 - `scrape_mode`: `'followers'` (default) | `'following'` — controlla se lo scraper raccoglie i follower della pagina target o i profili che essa segue
@@ -347,7 +350,20 @@ Non modificare il comportamento di timing o simulazione umana senza considerare 
 
 ## Architettura AI (ai_personalizer.py)
 
-Il layer AI supporta tre provider configurabili via `.env`:
+### Modalità messaggi: rendering locale (default) vs AI (opt-in per-campagna) — Template mode
+
+Il testo del DM **di default NON passa dall'AI**: `compose_message(campaign, follower)` (`ai_personalizer.py`) è l'**unica entry point** usata dai 4 call-site che generano testo (`generate_preview_batch`, `generate_messages_batch`, `campaign_orchestrator._get_or_create_message`, `followers.regenerate_message`) e decide così:
+1. `pick_template()` (`template_renderer.py`) sceglie a caso, pesi uguali, tra i template compilati della campagna (A = `base_message_template`, B = `message_template_b`, C = `message_template_c` — B/C opzionali).
+2. `campaign.ai_enabled` (bool, **default False** sulle nuove campagne) decide il branch:
+   - **False** (default) → `render_template()`: risolve SEMPRE lo spintax `{a|b|c}` e il placeholder nome (`{nome}`/`{name}`/`[nome]`/`[name]`), **zero chiamate AI, istantaneo**. Solleva `TemplateRenderError` se restano placeholder sconosciuti (es. `{azienda}`) o il risultato è vuoto dopo il render — meglio un messaggio fallito (retry/skip) che un DM col placeholder letterale o vuoto.
+   - **True** (opt-in per-campagna) → passa dal flusso `generate_message()` sotto, usando `campaign.ai_prompt_context` per il contesto e `campaign.ai_system_prompt` come override per-campagna del system prompt (vuoto/null = usa `AI_SYSTEM_PROMPT`/`DEFAULT_SYSTEM_PROMPT` globali).
+3. Migrazione **023**: le campagne preesistenti sono state impostate `ai_enabled=True` (comportamento invariato, era l'unico flusso prima di questa feature); le nuove campagne nascono `ai_enabled=False`.
+
+Frontend: form nuova campagna e dialog di modifica campagna (dettaglio campagna) espongono template C, toggle "Personalizza con AI" + campo "Istruzioni AI" condizionale, hint spintax e bottone anteprima varianti (`frontend/lib/spintax.ts`, usato SOLO per l'anteprima UI — il rendering reale che conta è quello Python sopra). Badge 🤖/📋 sulla card "Template messaggio" indica la modalità attiva della campagna.
+
+A livello **API**, questi campi (`base_message_template`, `message_template_b/c`, `ai_prompt_context`, `ai_enabled`, `ai_system_prompt`) sono `always_editable` in `update_campaign` — passano in **qualsiasi stato** della campagna, incluso `running` (letti freschi a ogni generazione: i messaggi già generati restano, i successivi seguono la nuova modalità; vedi `tests/test_template_mode_api.py`). Il dialog di modifica sul frontend espone la stessa possibilità: il bottone "Modifica" nella card è visibile in ogni stato, e `handleSaveTemplate` include `messaging_enabled` nel payload **solo se cambiato** (non è `always_editable`: invariato va omesso, altrimenti un update a campagna `running` prenderebbe 400). Il toggle "Invia messaggi" nel dialog resta disabilitato fuori da `draft/ready/paused/completed` con hint dedicato — template e campi AI invece si salvano anche a campagna in corso.
+
+Il layer AI sotto (branch `ai_enabled=True`) supporta tre provider configurabili via `.env`:
 
 | Provider | Config | Default model | Note |
 |---|---|---|---|

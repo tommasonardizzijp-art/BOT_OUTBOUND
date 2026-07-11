@@ -13,6 +13,11 @@ class CampaignCreate(BaseModel):
     ai_prompt_context: str | None = None
     # M10: optional second template for A/B testing
     message_template_b: str | None = Field(default=None, min_length=10)
+    # Template mode: False (default) = rendering locale A/B/C+spintax, no AI.
+    ai_enabled: bool = False
+    message_template_c: str | None = Field(default=None, min_length=10)
+    # Override per-campagna del prompt di sistema AI (vuoto = globale .env)
+    ai_system_prompt: str | None = None
     # Max DMs/day across all accounts for this campaign. NULL = unlimited.
     daily_limit: int | None = Field(default=None, ge=1, le=500)
     # M15 rev: approval sampling
@@ -55,6 +60,10 @@ class CampaignUpdate(BaseModel):
     ai_prompt_context: str | None = None
     # M10: can be set to None to disable A/B testing
     message_template_b: str | None = Field(default=None, min_length=10)
+    ai_enabled: bool | None = None
+    # Come message_template_b: None esplicito = rimuovi il template
+    message_template_c: str | None = Field(default=None, min_length=10)
+    ai_system_prompt: str | None = None
     daily_limit: int | None = Field(default=None, ge=1, le=500)
     # M15 rev: approval sampling
     require_approval: bool | None = None
@@ -80,6 +89,9 @@ class CampaignResponse(BaseModel):
     ai_prompt_context: str | None
     # M10: A/B testing
     message_template_b: str | None
+    ai_enabled: bool = True
+    message_template_c: str | None = None
+    ai_system_prompt: str | None = None
     status: CampaignStatus
     total_followers: int
     messages_sent: int

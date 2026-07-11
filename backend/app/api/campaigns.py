@@ -191,6 +191,9 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         scrape_daily_limit=data.scrape_daily_limit,
         ai_prompt_context=data.ai_prompt_context,
         message_template_b=data.message_template_b,
+        ai_enabled=data.ai_enabled,
+        message_template_c=data.message_template_c,
+        ai_system_prompt=data.ai_system_prompt,
         daily_limit=data.daily_limit,
         require_approval=data.require_approval,
         approval_sample_size=data.approval_sample_size,
@@ -245,6 +248,15 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         # bio_engine has its OWN status guard below (draft only — a scraping
         # campaign already has bio workers/loops that assume one engine).
         "bio_engine",
+        # Campi messaggi/AI: letti freschi a ogni generazione, sicuri da
+        # cambiare anche a campagna running — i messaggi già generati restano,
+        # i prossimi seguono la nuova modalità (decisione 11/07).
+        "base_message_template",
+        "message_template_b",
+        "message_template_c",
+        "ai_prompt_context",
+        "ai_enabled",
+        "ai_system_prompt",
     }
     if "daily_limit" in data.model_fields_set:
         campaign.daily_limit = data.daily_limit
@@ -252,10 +264,11 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
     # Other fields require draft/ready/paused state. A completed scraping-only
     # campaign can still be converted into a DM campaign by editing message config.
     other_fields = data.model_fields_set - always_editable
+    # base_message_template/message_template_b/ai_prompt_context sono state promosse
+    # ad always_editable sopra (editabili in ogni stato): qui restano solo i campi
+    # che a campagna completed hanno ancora bisogno del percorso speciale sotto
+    # (riattivare la messaggistica riporta la campagna a 'ready').
     completed_message_fields = {
-        "base_message_template",
-        "message_template_b",
-        "ai_prompt_context",
         "messaging_enabled",
         "require_approval",
         "approval_sample_size",
@@ -284,6 +297,12 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         campaign.ai_prompt_context = data.ai_prompt_context
     if "message_template_b" in data.model_fields_set:
         campaign.message_template_b = data.message_template_b
+    if "message_template_c" in data.model_fields_set:
+        campaign.message_template_c = data.message_template_c
+    if data.ai_enabled is not None:
+        campaign.ai_enabled = data.ai_enabled
+    if "ai_system_prompt" in data.model_fields_set:
+        campaign.ai_system_prompt = (data.ai_system_prompt or "").strip() or None
     if data.require_approval is not None:
         campaign.require_approval = data.require_approval
     if data.approval_sample_size is not None:

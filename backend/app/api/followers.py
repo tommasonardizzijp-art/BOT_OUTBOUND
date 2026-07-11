@@ -91,8 +91,7 @@ async def skip_follower(campaign_id: str, follower_id: str, db: AsyncSession = D
 @router.post("/{follower_id}/regenerate", response_model=FollowerResponse)
 async def regenerate_message(campaign_id: str, follower_id: str, db: AsyncSession = Depends(get_db)):
     """Regenerate AI message inline using the current campaign template."""
-    import random
-    from app.services.ai_personalizer import generate_message
+    from app.services.ai_personalizer import compose_message
 
     follower = await _follower_or_404(follower_id, campaign_id, db)
 
@@ -113,21 +112,8 @@ async def regenerate_message(campaign_id: str, follower_id: str, db: AsyncSessio
     # Delete existing messages so no orphan duplicates remain
     await db.execute(delete(Message).where(Message.follower_id == follower_id))
 
-    if campaign.message_template_b and random.random() < 0.5:
-        template = campaign.message_template_b
-        variant = 'b'
-    else:
-        template = campaign.base_message_template
-        variant = 'a'
-
     try:
-        text = await generate_message(
-            base_template=template,
-            follower_username=follower.username,
-            follower_full_name=follower.full_name,
-            follower_bio=follower.biography,
-            ai_context=campaign.ai_prompt_context,
-        )
+        text, variant = await compose_message(campaign, follower)
     except Exception as e:
         follower.status = FollowerStatus.bio_scraped
         await db.commit()

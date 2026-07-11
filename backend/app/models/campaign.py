@@ -55,6 +55,15 @@ class Campaign(Base):
     ai_prompt_context: Mapped[str | None] = mapped_column(Text, nullable=True)
     # M10: optional second template for A/B testing (50/50 random split)
     message_template_b: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Template mode: se False (default nuove campagne) i DM sono renderizzati
+    # localmente dai template A/B/C + spintax, SENZA chiamate AI. Migration 023
+    # setta True sulle campagne esistenti (comportamento invariato).
+    ai_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Terzo template opzionale (variante 'c'), simmetrico a message_template_b.
+    message_template_c: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Istruzioni AI per-campagna: override del prompt di sistema globale (.env).
+    # NULL/vuoto = usa il globale.
+    ai_system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[CampaignStatus] = mapped_column(
         SAEnum(CampaignStatus, native_enum=False), nullable=False, default=CampaignStatus.draft
     )

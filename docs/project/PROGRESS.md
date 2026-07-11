@@ -1129,6 +1129,16 @@ Nuovo motore per la Fase Bio: `Campaign.bio_engine` (`'api'` default | `'browser
 
 ---
 
+## [2026-07-11] Template mode — rendering locale A/B/C+spintax, AI opt-in per-campagna
+
+Il testo dei DM ora è **di default un rendering locale** (`template_renderer.py`: spintax `{a|b}` + placeholder `{nome}`, pick A/B/C a pesi uguali) — zero chiamate AI, istantaneo. L'AI (`ai_enabled`, bool per-campagna, default **False** per le nuove campagne) resta disponibile come **opt-in**, con `ai_system_prompt` per personalizzare le istruzioni solo su quella campagna. `compose_message()` è ora l'unica entry point per i 4 call-site che generano testo DM. Frontend: form nuova campagna + dialog di modifica campagna hanno toggle AI, template C, hint spintax e anteprima varianti; badge 🤖/📋 sulla card indica la modalità attiva.
+
+**File**: `backend/app/services/template_renderer.py` (nuovo), `backend/app/services/ai_personalizer.py` (`compose_message`), `backend/app/schemas/campaign.py`, `backend/app/api/campaigns.py`, `backend/alembic/versions/023_ai_enabled_template_c.py`, `frontend/app/campaigns/new/page.tsx`, `frontend/app/campaigns/[id]/page.tsx`, `frontend/lib/{spintax,types}.ts`. **Suite: 553 passed.**
+
+⚠️ Migrazione 023 (colonne `ai_enabled`/`message_template_c`/`ai_system_prompt`) va applicata su Supabase al deploy (`alembic upgrade head`) — non ancora eseguita.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |
