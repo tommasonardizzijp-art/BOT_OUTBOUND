@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { api } from '@/lib/api'
+import { renderPreview, findUnknownPlaceholders } from '@/lib/spintax'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -25,7 +26,10 @@ export default function NewCampaignPage() {
     scrape_mode: 'followers' as 'followers' | 'following' | 'dm_threads',
     base_message_template: '',
     message_template_b: '',
+    message_template_c: '',
     ai_prompt_context: '',
+    ai_enabled: false,
+    ai_system_prompt: '',
     daily_limit: '',
     scrape_daily_limit: '',
     require_approval: false,
@@ -45,6 +49,8 @@ export default function NewCampaignPage() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [showTemplateB, setShowTemplateB] = useState(false)
+  const [showTemplateC, setShowTemplateC] = useState(false)
+  const [previews, setPreviews] = useState<string[]>([])
 
   const validate = () => {
     const errs: Record<string, string> = {}
@@ -59,7 +65,20 @@ export default function NewCampaignPage() {
     } else if (sourceType !== 'scrape' && !importFile) {
       errs.import_file = 'Carica un file con i profili da contattare'
     }
-    if (messagingEnabled && !form.base_message_template.trim()) errs.base_message_template = 'Il template è obbligatorio'
+    if (messagingEnabled && !form.base_message_template.trim()) {
+      errs.base_message_template = 'Il template è obbligatorio'
+    } else if (messagingEnabled) {
+      const unknownA = findUnknownPlaceholders(form.base_message_template)
+      if (unknownA.length > 0) errs.base_message_template = `Placeholder sconosciuto: ${unknownA[0]} — usa solo {nome} o gruppi {a|b}`
+    }
+    if (messagingEnabled && showTemplateB && form.message_template_b.trim()) {
+      const unknownB = findUnknownPlaceholders(form.message_template_b)
+      if (unknownB.length > 0) errs.message_template_b = `Placeholder sconosciuto: ${unknownB[0]} — usa solo {nome} o gruppi {a|b}`
+    }
+    if (messagingEnabled && showTemplateC && form.message_template_c.trim()) {
+      const unknownC = findUnknownPlaceholders(form.message_template_c)
+      if (unknownC.length > 0) errs.message_template_c = `Placeholder sconosciuto: ${unknownC[0]} — usa solo {nome} o gruppi {a|b}`
+    }
     if (form.daily_limit && Number(form.daily_limit) < 1) errs.daily_limit = 'Il limite deve essere almeno 1'
     if (form.scrape_daily_limit && Number(form.scrape_daily_limit) < 1) errs.scrape_daily_limit = 'Il cap deve essere almeno 1'
     return errs
@@ -84,7 +103,10 @@ export default function NewCampaignPage() {
         messaging_enabled: messagingEnabled,
         base_message_template: messagingEnabled ? form.base_message_template : null,
         message_template_b: messagingEnabled && showTemplateB && form.message_template_b ? form.message_template_b : null,
+        message_template_c: messagingEnabled && showTemplateC && form.message_template_c.trim() ? form.message_template_c : null,
         ai_prompt_context: messagingEnabled && form.ai_prompt_context ? form.ai_prompt_context : undefined,
+        ai_enabled: messagingEnabled ? form.ai_enabled : false,
+        ai_system_prompt: messagingEnabled && form.ai_enabled && form.ai_system_prompt.trim() ? form.ai_system_prompt : undefined,
         daily_limit: form.daily_limit ? Number(form.daily_limit) : null,
         scrape_daily_limit: form.scrape_daily_limit ? Number(form.scrape_daily_limit) : null,
         require_approval: form.require_approval,
@@ -296,8 +318,21 @@ export default function NewCampaignPage() {
               />
               {errors.base_message_template
                 ? <p className="text-xs text-red-400">{errors.base_message_template}</p>
-                : <p className="text-xs text-gray-500">L&apos;AI userà questo come base per creare messaggi personalizzati per ogni follower</p>
+                : <p className="text-xs text-gray-500">
+                    {'{nome}'} = nome del destinatario · {'{Ciao|Hey|Salve}'} = il bot sceglie una variante a caso per ogni DM
+                  </p>
               }
+              <button type="button" className="text-xs text-blue-400 hover:text-blue-300"
+                onClick={() => setPreviews([1, 2, 3].map(() => renderPreview(form.base_message_template)))}>
+                ⚡ Anteprima varianti
+              </button>
+              {previews.length > 0 && (
+                <div className="space-y-1">
+                  {previews.map((p, i) => (
+                    <p key={i} className="text-xs text-gray-400 bg-gray-800 rounded p-2 whitespace-pre-wrap">{p}</p>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* M10: A/B testing — optional second template */}
@@ -317,31 +352,94 @@ export default function NewCampaignPage() {
               {showTemplateB && (
                 <>
                   <Textarea
-                    placeholder="Variante B del messaggio — l'AI genererà il 50% dei messaggi con questo template"
+                    placeholder="Variante B del messaggio — il bot sceglierà a caso tra i template attivi per ogni DM"
                     value={form.message_template_b}
-                    onChange={e => setForm(f => ({ ...f, message_template_b: e.target.value }))}
+                    onChange={e => { setForm(f => ({ ...f, message_template_b: e.target.value })); setErrors(er => ({ ...er, message_template_b: '' })) }}
                     rows={4}
-                    className="bg-gray-800 border-gray-700 text-white resize-none"
+                    className={`bg-gray-800 border-gray-700 text-white resize-none ${errors.message_template_b ? 'border-red-600' : ''}`}
                   />
-                  <p className="text-xs text-gray-500">
-                    50% dei follower riceveranno il messaggio A, 50% il messaggio B.
-                    I risultati sono visibili nel dettaglio campagna.
-                  </p>
+                  {errors.message_template_b
+                    ? <p className="text-xs text-red-400">{errors.message_template_b}</p>
+                    : <p className="text-xs text-gray-500">
+                        50% dei follower riceveranno il messaggio A, 50% il messaggio B.
+                        I risultati sono visibili nel dettaglio campagna.
+                      </p>
+                  }
                 </>
               )}
             </div>
 
+            {/* Template mode: optional third variant — A/B/C rendering locale (spintax), nessun costo AI */}
             <div className="space-y-1.5">
-              <label className="text-sm text-gray-300 font-medium">Contesto aggiuntivo per l&apos;AI</label>
-              <Textarea
-                placeholder="Es. Siamo un brand di moda sostenibile. Vogliamo un tono amichevole e non commerciale."
-                value={form.ai_prompt_context}
-                onChange={e => setForm(f => ({ ...f, ai_prompt_context: e.target.value }))}
-                rows={3}
-                className="bg-gray-800 border-gray-700 text-white resize-none"
-              />
-              <p className="text-xs text-gray-500">Opzionale. Aiuta l&apos;AI a capire il contesto del brand e il tono desiderato</p>
+              <div className="flex items-center justify-between">
+                <label className="text-sm text-gray-300 font-medium">Template C</label>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="text-xs text-purple-400 hover:text-purple-300 h-auto p-0"
+                  onClick={() => setShowTemplateC(v => !v)}
+                >
+                  {showTemplateC ? '— Rimuovi template C' : '+ Aggiungi template C'}
+                </Button>
+              </div>
+              {showTemplateC && (
+                <>
+                  <Textarea
+                    placeholder="Variante C del messaggio — il bot sceglierà a caso tra i template attivi per ogni DM"
+                    value={form.message_template_c}
+                    onChange={e => { setForm(f => ({ ...f, message_template_c: e.target.value })); setErrors(er => ({ ...er, message_template_c: '' })) }}
+                    rows={4}
+                    className={`bg-gray-800 border-gray-700 text-white resize-none ${errors.message_template_c ? 'border-red-600' : ''}`}
+                  />
+                  {errors.message_template_c
+                    ? <p className="text-xs text-red-400">{errors.message_template_c}</p>
+                    : <p className="text-xs text-gray-500">
+                        I follower riceveranno a caso uno dei template attivi (A/B/C). Risultati visibili nel dettaglio campagna.
+                      </p>
+                  }
+                </>
+              )}
             </div>
+
+            <div className="flex items-center justify-between rounded-lg border border-gray-700 p-3">
+              <div>
+                <p className="text-sm text-gray-200 font-medium">Personalizza con AI</p>
+                <p className="text-xs text-gray-500">
+                  OFF (default): il template parte così com&apos;è, con le varianti {'{a|b}'} — zero quota AI.
+                  ON: l&apos;AI riscrive il messaggio sulla bio del destinatario.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setForm(f => ({ ...f, ai_enabled: !f.ai_enabled }))}
+                className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full transition-colors ${form.ai_enabled ? 'bg-purple-600' : 'bg-gray-600'}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${form.ai_enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+            {form.ai_enabled && (
+              <>
+                <div className="space-y-1.5">
+                  <label className="text-sm text-gray-300 font-medium">Contesto aggiuntivo per l&apos;AI</label>
+                  <Textarea
+                    placeholder="Es. Siamo un brand di moda sostenibile. Vogliamo un tono amichevole e non commerciale."
+                    value={form.ai_prompt_context}
+                    onChange={e => setForm(f => ({ ...f, ai_prompt_context: e.target.value }))}
+                    rows={3}
+                    className="bg-gray-800 border-gray-700 text-white resize-none"
+                  />
+                  <p className="text-xs text-gray-500">Opzionale. Aiuta l&apos;AI a capire il contesto del brand e il tono desiderato</p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm text-gray-300 font-medium">Istruzioni AI (opzionale)</label>
+                  <Textarea rows={3} value={form.ai_system_prompt}
+                    onChange={e => setForm(f => ({ ...f, ai_system_prompt: e.target.value }))}
+                    placeholder="Sovrascrive le istruzioni globali solo per questa campagna. Es: tono informale, max 3 frasi, niente emoji."
+                    className="bg-gray-800 border-gray-700 text-white resize-none" />
+                </div>
+              </>
+            )}
             </>)}
 
             <div className="space-y-1.5">
