@@ -568,8 +568,13 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     }
     setSavingTemplate(true)
     try {
+      // messaging_enabled va nel payload SOLO se cambiato: non e' always_editable
+      // lato backend, includerlo invariato farebbe fallire con 400 l'update dei
+      // campi template/AI su una campagna running (che invece e' permesso).
       await api.campaigns.update(id, {
-        messaging_enabled: editMessagingEnabled,
+        ...(campaign && editMessagingEnabled !== campaign.messaging_enabled
+          ? { messaging_enabled: editMessagingEnabled }
+          : {}),
         base_message_template: editMessagingEnabled ? editTemplateValue : null,
         ai_prompt_context: editMessagingEnabled ? (editContextValue || undefined) : undefined,
         message_template_b: editMessagingEnabled ? (editTemplateBValue.trim() || null) : null,
@@ -1387,24 +1392,25 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 <Badge variant="outline" className="ml-2 text-xs border-purple-700 text-purple-400">A/B</Badge>
               )}
             </CardTitle>
-            {(['draft', 'ready', 'paused', 'completed'] as Campaign['status'][]).includes(campaign.status) && (
-              <button
-                className="text-gray-600 hover:text-gray-300 flex items-center gap-1 text-xs"
-                onClick={() => {
-                  setEditTemplateValue(campaign.base_message_template ?? '')
-                  setEditTemplateBValue(campaign.message_template_b ?? '')
-                  setEditTemplateCValue(campaign.message_template_c ?? '')
-                  setEditContextValue(campaign.ai_prompt_context ?? '')
-                  setEditAiEnabled(campaign.ai_enabled)
-                  setEditAiSystemPrompt(campaign.ai_system_prompt ?? '')
-                  setEditMessagingEnabled(campaign.messaging_enabled)
-                  setEditPreviews([])
-                  setEditTemplateOpen(true)
-                }}
-              >
-                <Pencil className="w-3 h-3" />{campaign.messaging_enabled ? 'Modifica' : 'Abilita messaggi'}
-              </button>
-            )}
+            {/* Template/AI editabili in QUALSIASI stato (anche running): il backend li
+                legge freschi a ogni generazione — i messaggi gia' generati restano,
+                i prossimi seguono la nuova modalita' (decisione 11/07). */}
+            <button
+              className="text-gray-600 hover:text-gray-300 flex items-center gap-1 text-xs"
+              onClick={() => {
+                setEditTemplateValue(campaign.base_message_template ?? '')
+                setEditTemplateBValue(campaign.message_template_b ?? '')
+                setEditTemplateCValue(campaign.message_template_c ?? '')
+                setEditContextValue(campaign.ai_prompt_context ?? '')
+                setEditAiEnabled(campaign.ai_enabled)
+                setEditAiSystemPrompt(campaign.ai_system_prompt ?? '')
+                setEditMessagingEnabled(campaign.messaging_enabled)
+                setEditPreviews([])
+                setEditTemplateOpen(true)
+              }}
+            >
+              <Pencil className="w-3 h-3" />{campaign.messaging_enabled ? 'Modifica' : 'Abilita messaggi'}
+            </button>
           </div>
         </CardHeader>
         <CardContent>
@@ -2120,23 +2126,35 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           </DialogHeader>
 
           <div className="space-y-4 py-2">
+            {/* messaging_enabled si cambia solo a campagna ferma (gate backend:
+                draft/ready/paused, + completed). Template e campi AI invece sono
+                editabili in ogni stato — il toggle qui sotto resta quindi bloccato
+                a campagna in corso, il resto del dialog no. */}
+            {(() => {
+              const messagingToggleLocked = !campaign || !['draft', 'ready', 'paused', 'completed'].includes(campaign.status as string)
+              return (
             <div className="flex items-center justify-between rounded-md border border-gray-700 bg-gray-800/40 px-3 py-2">
               <div>
                 <p className="text-sm text-gray-300 font-medium">Invia messaggi</p>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  {editMessagingEnabled
-                    ? 'La campagna potra generare e inviare DM.'
-                    : 'Modalita solo raccolta lead: nessun DM verra inviato.'}
+                  {messagingToggleLocked
+                    ? 'Si cambia solo a campagna ferma (bozza/pronta/pausa/completata).'
+                    : editMessagingEnabled
+                      ? 'La campagna potra generare e inviare DM.'
+                      : 'Modalita solo raccolta lead: nessun DM verra inviato.'}
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setEditMessagingEnabled(v => !v)}
-                className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full transition-colors ${editMessagingEnabled ? 'bg-purple-600' : 'bg-gray-600'}`}
+                disabled={messagingToggleLocked}
+                onClick={() => { if (!messagingToggleLocked) setEditMessagingEnabled(v => !v) }}
+                className={`relative inline-flex h-5 w-9 flex-shrink-0 rounded-full transition-colors ${messagingToggleLocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'} ${editMessagingEnabled ? 'bg-purple-600' : 'bg-gray-600'}`}
               >
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${editMessagingEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
               </button>
             </div>
+              )
+            })()}
             {editMessagingEnabled && (<>
             <div className="space-y-1.5">
               <label className="text-sm text-gray-300 font-medium">Template base *</label>
