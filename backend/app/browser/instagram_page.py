@@ -124,15 +124,27 @@ class InstagramPage:
     async def _dismiss_ig_modals(self, page, username: str) -> None:
         """Dismiss any Instagram modal/popup overlay (sleep mode, notifications, etc.).
         Safe to call multiple times — only clicks if a matching button is visible.
-        Uses has-text (not text-is) to tolerate whitespace differences.
+
+        Selettori ESATTI (:text-is) e scoped a div[role="dialog"] — mai broad.
+        Il vecchio `[role="button"]:has-text("OK")` era substring case-insensitive:
+        matchava il cerchio highlight "New Bo(OK)"/"Tshirts bo(OK)s" sul profilo e
+        il bot apriva il viewer storie al posto di chiudere un popup (causa reale
+        dei fallimenti 'finisce nelle storie', 2 casi confermati da screenshot).
+        Un "OK"/"Non ora" legittimo sta dentro un dialog, non sul profilo.
         """
         for selector in [
-            'button:has-text("OK")',
-            'button:has-text("Not Now")',
-            'button:has-text("Not now")',
-            'button:has-text("Cancel")',
-            'button:has-text("Maybe Later")',
-            '[role="button"]:has-text("OK")',
+            'div[role="dialog"] button:text-is("OK")',
+            'div[role="dialog"] button:text-is("Ok")',
+            'div[role="dialog"] button:text-is("Not Now")',
+            'div[role="dialog"] button:text-is("Not now")',
+            'div[role="dialog"] button:text-is("Non ora")',
+            'div[role="dialog"] button:text-is("Cancel")',
+            'div[role="dialog"] button:text-is("Annulla")',
+            'div[role="dialog"] button:text-is("Maybe Later")',
+            'div[role="dialog"] button:text-is("Più tardi")',
+            'div[role="dialog"] [role="button"]:text-is("OK")',
+            'div[role="dialog"] [role="button"]:text-is("Not Now")',
+            'div[role="dialog"] [role="button"]:text-is("Non ora")',
         ]:
             btn = page.locator(selector)
             try:
@@ -242,41 +254,6 @@ class InstagramPage:
         await asyncio.sleep(random.uniform(1.5, 2.5))
         return
 
-        """Close Instagram's Stories viewer if it auto-opened on profile navigation.
-
-        The stories viewer has a completely different DOM — no profile header,
-        no Message button — so we must escape it before proceeding.
-        """
-        # URL-based: Instagram redirected to /stories/username/...
-        if "/stories/" in page.url:
-            logger.info(f"@{username}: redirected to Stories — pressing Escape to return to profile")
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(random.uniform(1.2, 2.0))
-            # If Escape didn't work, navigate directly
-            if "/stories/" in page.url:
-                logger.info(f"@{username}: Escape failed, navigating directly to profile")
-                await page.goto(f"{self.BASE_URL}/{username}/", wait_until="domcontentloaded")
-                await asyncio.sleep(random.uniform(1.5, 2.5))
-            return
-
-        # DOM-based: stories overlay without URL change (stories as modal on profile page).
-        # The "Reply to story" input is unique to the stories viewer.
-        story_selectors = [
-            'textarea[placeholder*="Reply"]',
-            'textarea[placeholder*="Rispondi"]',
-            '[placeholder*="Reply to"]',
-            '[placeholder*="Rispondi alla storia"]',
-        ]
-        for selector in story_selectors:
-            try:
-                if await page.locator(selector).count() > 0:
-                    logger.info(f"@{username}: Stories overlay detected — pressing Escape")
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(random.uniform(1.2, 2.0))
-                    break
-            except Exception:
-                pass
-
     # Candidati input DM, dal più specifico al più generico (cross-locale).
     _DM_INPUT_SELECTORS = (
         'div[aria-label="Message"][contenteditable="true"]',
@@ -310,6 +287,34 @@ class InstagramPage:
                 continue
         # Union visibile ma priorità mancata (race DOM): usa il primo dell'unione.
         return page.locator(union).first, union
+
+    async def _verify_dm_thread(self, page, username: str) -> bool:
+        """True se il thread DM aperto appartiene DAVVERO a `username`.
+
+        Guardia anti-misinstradamento. Il click su "Messaggio" a volte atterra
+        sull'inbox DM invece che sul thread del bersaglio; l'inbox tiene aperta
+        la conversazione in cima (spesso di un'ALTRA persona). Senza questo
+        controllo il bot scriveva nel thread sbagliato — caso reale: 26 DM di
+        lead diversi finiti tutti nella chat di @giovanni1927, con i lead
+        segnati 'sent' ma mai realmente contattati.
+
+        Segnale: nell'header della conversazione aperta c'e' il link al profilo
+        del destinatario (`a[href="/username/"]`). E' specifico del thread
+        aperto: la lista-thread laterale linka `/direct/t/<id>`, non `/username/`.
+        Un lead a freddo non e' nella sidebar, quindi se il suo link non c'e'
+        vuol dire che il suo thread NON e' aperto -> abort prima di scrivere.
+        """
+        u = username.lower().lstrip("@").strip()
+        if not u:
+            return False
+        for sel in (f'a[href="/{u}/"]', f'a[href="/{u}"]'):
+            try:
+                loc = page.locator(sel)
+                if await loc.count() > 0 and await loc.first.is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def send_dm(self, username: str, message: str, pre_send_callback: Optional[Callable[[], Awaitable[bool]]] = None, on_enter: Optional[Callable[[], Awaitable[None]]] = None) -> None:
         """Navigate to a user's profile and send a DM.
@@ -436,16 +441,21 @@ class InstagramPage:
         # Find DM input — una sola attesa sull'unione dei selettori (no timeout
         # impilati per locale: vedi _locate_dm_input).
         msg_input, found_selector = await self._locate_dm_input(page)
+        # Anti-misinstradamento: verifica che il thread aperto sia DAVVERO del
+        # bersaglio prima di scrivere (vedi _verify_dm_thread).
+        thread_ok = msg_input is not None and await self._verify_dm_thread(page, username)
 
-        if msg_input is None:
-            # Recovery incondizionato (una volta): qualunque cosa abbia ingoiato
-            # il flusso — viewer storie/highlights col reply-box non riconosciuto,
-            # modale 'Link', overlay nuovi — tornare al profilo con goto e
-            # ripartire è più robusto che riconoscere ogni singolo overlay.
-            # (Caso reale: highlights viewer aperto da un click impreciso, il
-            # retry condizionato alle sole storie non scattava.)
+        if msg_input is None or not thread_ok:
+            # Recovery incondizionato (una volta): input mancante OPPURE thread
+            # sbagliato aperto (click 'Messaggio' atterrato sull'inbox con un
+            # altro thread in cima). In entrambi i casi tornare al profilo con
+            # goto e ripartire è più robusto che riconoscere ogni singolo stato.
+            # (Casi reali: highlights viewer aperto da un click impreciso; e 26
+            # DM finiti nel thread di @giovanni1927 perché il thread non veniva
+            # verificato.)
+            reason = "DM input non trovato" if msg_input is None else "thread aperto NON suo"
             logger.info(
-                f"@{username}: DM input non trovato (URL: {page.url}) — "
+                f"@{username}: {reason} (URL: {page.url}) — "
                 f"torno al profilo e riprovo una volta"
             )
             await self._dismiss_stories_if_open(page, username)
@@ -464,6 +474,7 @@ class InstagramPage:
             await self._dismiss_ig_modals(page, username)
 
             msg_input, found_selector = await self._locate_dm_input(page)
+            thread_ok = msg_input is not None and await self._verify_dm_thread(page, username)
 
         if msg_input is None:
             try:
@@ -484,6 +495,34 @@ class InstagramPage:
                     f"(URL: {page.url}). Possibile miss del click o layout cambiato."
                 )
             raise DMSendError(f"@{username}: DM input non trovato dopo navigazione a /direct/")
+
+        # Hard gate anti-misinstradamento: l'input c'è ma il thread aperto NON
+        # risulta del bersaglio (nemmeno dopo il retry). NON scrivere: meglio un
+        # mancato invio (retry pulito, il chiamante non marca 'sent') che un DM
+        # consegnato alla persona sbagliata con il lead segnato 'sent' ma mai
+        # contattato. Vedi _verify_dm_thread.
+        if not thread_ok:
+            try:
+                path = f"data/debug_wrong_thread_{username}.png"
+                await page.screenshot(path=path)
+                from app.services.notifier import send_telegram_photo
+                asyncio.create_task(send_telegram_photo(
+                    path,
+                    caption=(
+                        f"Critical DM error: thread aperto NON di @{username} — "
+                        f"invio annullato per non scrivere alla persona sbagliata"
+                    ),
+                    level="error",
+                ))
+                logger.warning(
+                    f"@{username}: thread non verificato → data/debug_wrong_thread_{username}.png"
+                )
+            except Exception:
+                pass
+            raise DMSendError(
+                f"@{username}: thread DM aperto non appartiene al bersaglio "
+                f"(URL: {page.url}) — invio annullato (anti-misinstradamento)"
+            )
 
         logger.debug(f"@{username}: input trovato — selettore: {found_selector}")
 
@@ -682,7 +721,7 @@ class InstagramPage:
                 pass
             return False
 
-    async def _click_message_button(self, page, username: str) -> None:
+    async def _click_message_button(self, page, username: str, _retry: bool = False) -> None:
         """
         Find and click the Message button on a profile page.
 
@@ -751,6 +790,19 @@ class InstagramPage:
         try:
             await three_dots.first.wait_for(state="visible", timeout=4000)
         except Exception:
+            # Ne' bottone ne' tre-puntini: se nel frattempo si e' aperto il viewer
+            # storie/highlights (mount ritardato di un click andato storto — IG
+            # mostra lo spinner sul cerchio e monta il viewer secondi dopo, oltre
+            # il check pre-bottone), chiudilo e rifai la ricerca UNA volta.
+            # Caso reale @antonellonigro: viewer montato durante la ricerca ->
+            # falso "User has DM restrictions".
+            if not _retry and await self._is_stories_viewer_open(page):
+                logger.info(
+                    f"@{username}: viewer storie aperto durante la ricerca del "
+                    f"bottone Messaggio — chiudo e riprovo una volta"
+                )
+                await self._dismiss_stories_if_open(page, username)
+                return await self._click_message_button(page, username, _retry=True)
             # Debug screenshot before failing
             try:
                 path = f"data/debug_no_menu_{username}.png"
