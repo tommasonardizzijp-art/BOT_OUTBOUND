@@ -128,3 +128,41 @@ def test_dismiss_link_modal_noop_senza_dialog(monkeypatch):
     page = _DialogPage(url="https://www.instagram.com/target/", dialog_open=False)
     asyncio.run(InstagramPage(None)._dismiss_blocking_dialog(page, "target"))
     assert page.escape_presses == 0
+
+
+# ── _verify_dm_thread: il thread DM aperto appartiene davvero al destinatario? ──
+# Guardia anti-misinstradamento: quando il click su "Messaggio" atterra sull'inbox
+# con un ALTRO thread in cima (bug reale: 26 DM finiti nel thread di giovanni), il
+# link al profilo del destinatario NON e' presente -> non scrivere alla persona sbagliata.
+
+def test_verify_thread_true_quando_link_profilo_del_target_presente():
+    # Thread corretto aperto: header ha a[href="/target/"]
+    page = _FakePage(
+        url="https://www.instagram.com/direct/t/111/",
+        visible_selectors={'a[href="/target/"]'},
+    )
+    assert asyncio.run(InstagramPage(None)._verify_dm_thread(page, "target"))
+
+
+def test_verify_thread_false_quando_thread_di_altra_persona_aperto():
+    # Misinstradamento: e' aperto il thread di giovanni1927, non di target.
+    page = _FakePage(
+        url="https://www.instagram.com/direct/t/999/",
+        visible_selectors={'a[href="/giovanni1927/"]'},
+    )
+    assert not asyncio.run(InstagramPage(None)._verify_dm_thread(page, "target"))
+
+
+def test_verify_thread_false_su_inbox_senza_link_profilo():
+    # Inbox generica: nessun link al profilo del target -> non verificato.
+    page = _FakePage(url="https://www.instagram.com/direct/inbox/")
+    assert not asyncio.run(InstagramPage(None)._verify_dm_thread(page, "target"))
+
+
+def test_verify_thread_username_case_insensitive_e_at():
+    # IG usa href lowercase; il metodo normalizza username (@ e maiuscole).
+    page = _FakePage(
+        url="https://www.instagram.com/direct/t/111/",
+        visible_selectors={'a[href="/target/"]'},
+    )
+    assert asyncio.run(InstagramPage(None)._verify_dm_thread(page, "@Target"))
