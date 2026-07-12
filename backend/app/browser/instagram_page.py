@@ -124,15 +124,27 @@ class InstagramPage:
     async def _dismiss_ig_modals(self, page, username: str) -> None:
         """Dismiss any Instagram modal/popup overlay (sleep mode, notifications, etc.).
         Safe to call multiple times — only clicks if a matching button is visible.
-        Uses has-text (not text-is) to tolerate whitespace differences.
+
+        Selettori ESATTI (:text-is) e scoped a div[role="dialog"] — mai broad.
+        Il vecchio `[role="button"]:has-text("OK")` era substring case-insensitive:
+        matchava il cerchio highlight "New Bo(OK)"/"Tshirts bo(OK)s" sul profilo e
+        il bot apriva il viewer storie al posto di chiudere un popup (causa reale
+        dei fallimenti 'finisce nelle storie', 2 casi confermati da screenshot).
+        Un "OK"/"Non ora" legittimo sta dentro un dialog, non sul profilo.
         """
         for selector in [
-            'button:has-text("OK")',
-            'button:has-text("Not Now")',
-            'button:has-text("Not now")',
-            'button:has-text("Cancel")',
-            'button:has-text("Maybe Later")',
-            '[role="button"]:has-text("OK")',
+            'div[role="dialog"] button:text-is("OK")',
+            'div[role="dialog"] button:text-is("Ok")',
+            'div[role="dialog"] button:text-is("Not Now")',
+            'div[role="dialog"] button:text-is("Not now")',
+            'div[role="dialog"] button:text-is("Non ora")',
+            'div[role="dialog"] button:text-is("Cancel")',
+            'div[role="dialog"] button:text-is("Annulla")',
+            'div[role="dialog"] button:text-is("Maybe Later")',
+            'div[role="dialog"] button:text-is("Più tardi")',
+            'div[role="dialog"] [role="button"]:text-is("OK")',
+            'div[role="dialog"] [role="button"]:text-is("Not Now")',
+            'div[role="dialog"] [role="button"]:text-is("Non ora")',
         ]:
             btn = page.locator(selector)
             try:
@@ -241,41 +253,6 @@ class InstagramPage:
         await page.goto(f"{self.BASE_URL}/{username}/", wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(1.5, 2.5))
         return
-
-        """Close Instagram's Stories viewer if it auto-opened on profile navigation.
-
-        The stories viewer has a completely different DOM — no profile header,
-        no Message button — so we must escape it before proceeding.
-        """
-        # URL-based: Instagram redirected to /stories/username/...
-        if "/stories/" in page.url:
-            logger.info(f"@{username}: redirected to Stories — pressing Escape to return to profile")
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(random.uniform(1.2, 2.0))
-            # If Escape didn't work, navigate directly
-            if "/stories/" in page.url:
-                logger.info(f"@{username}: Escape failed, navigating directly to profile")
-                await page.goto(f"{self.BASE_URL}/{username}/", wait_until="domcontentloaded")
-                await asyncio.sleep(random.uniform(1.5, 2.5))
-            return
-
-        # DOM-based: stories overlay without URL change (stories as modal on profile page).
-        # The "Reply to story" input is unique to the stories viewer.
-        story_selectors = [
-            'textarea[placeholder*="Reply"]',
-            'textarea[placeholder*="Rispondi"]',
-            '[placeholder*="Reply to"]',
-            '[placeholder*="Rispondi alla storia"]',
-        ]
-        for selector in story_selectors:
-            try:
-                if await page.locator(selector).count() > 0:
-                    logger.info(f"@{username}: Stories overlay detected — pressing Escape")
-                    await page.keyboard.press("Escape")
-                    await asyncio.sleep(random.uniform(1.2, 2.0))
-                    break
-            except Exception:
-                pass
 
     # Candidati input DM, dal più specifico al più generico (cross-locale).
     _DM_INPUT_SELECTORS = (
@@ -744,7 +721,7 @@ class InstagramPage:
                 pass
             return False
 
-    async def _click_message_button(self, page, username: str) -> None:
+    async def _click_message_button(self, page, username: str, _retry: bool = False) -> None:
         """
         Find and click the Message button on a profile page.
 
@@ -813,6 +790,19 @@ class InstagramPage:
         try:
             await three_dots.first.wait_for(state="visible", timeout=4000)
         except Exception:
+            # Ne' bottone ne' tre-puntini: se nel frattempo si e' aperto il viewer
+            # storie/highlights (mount ritardato di un click andato storto — IG
+            # mostra lo spinner sul cerchio e monta il viewer secondi dopo, oltre
+            # il check pre-bottone), chiudilo e rifai la ricerca UNA volta.
+            # Caso reale @antonellonigro: viewer montato durante la ricerca ->
+            # falso "User has DM restrictions".
+            if not _retry and await self._is_stories_viewer_open(page):
+                logger.info(
+                    f"@{username}: viewer storie aperto durante la ricerca del "
+                    f"bottone Messaggio — chiudo e riprovo una volta"
+                )
+                await self._dismiss_stories_if_open(page, username)
+                return await self._click_message_button(page, username, _retry=True)
             # Debug screenshot before failing
             try:
                 path = f"data/debug_no_menu_{username}.png"

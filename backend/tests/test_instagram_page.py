@@ -166,3 +166,64 @@ def test_verify_thread_username_case_insensitive_e_at():
         visible_selectors={'a[href="/target/"]'},
     )
     assert asyncio.run(InstagramPage(None)._verify_dm_thread(page, "@Target"))
+
+
+# ── _dismiss_ig_modals: mai cliccare elementi del profilo scambiati per popup ──
+# Bug reale: `[role="button"]:has-text("OK")` (substring, case-insensitive) matchava
+# il cerchio highlight "New Bo(OK)" -> il bot apriva il viewer storie e l'invio
+# falliva dentro il viewer. I selettori devono essere ESATTI e scoped al dialog.
+
+class _ClickTrackingLocator:
+    def __init__(self, page, selector: str) -> None:
+        self._page = page
+        self._selector = selector
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self) -> int:
+        return 1 if self._selector in self._page.present_selectors else 0
+
+    async def is_visible(self) -> bool:
+        return self._selector in self._page.present_selectors
+
+    async def click(self) -> None:
+        self._page.clicked.append(self._selector)
+
+
+class _ModalPage:
+    def __init__(self, present_selectors: set[str]) -> None:
+        self.url = "https://www.instagram.com/target/"
+        self.present_selectors = present_selectors
+        self.clicked: list[str] = []
+
+    def locator(self, selector: str) -> _ClickTrackingLocator:
+        return _ClickTrackingLocator(self, selector)
+
+
+def test_dismiss_modals_non_clicca_highlight_con_ok_nel_titolo(monkeypatch):
+    _no_sleep(monkeypatch)
+    # Profilo con highlight "New Book": i VECCHI selettori broad matchavano.
+    # Nessun dialog aperto -> il metodo non deve cliccare NULLA.
+    page = _ModalPage(present_selectors={
+        'button:has-text("OK")',            # match del vecchio selettore broad
+        '[role="button"]:has-text("OK")',   # idem
+    })
+    asyncio.run(InstagramPage(None)._dismiss_ig_modals(page, "target"))
+    assert page.clicked == []
+
+
+def test_dismiss_modals_clicca_ok_dentro_dialog(monkeypatch):
+    _no_sleep(monkeypatch)
+    page = _ModalPage(present_selectors={'div[role="dialog"] button:text-is("OK")'})
+    asyncio.run(InstagramPage(None)._dismiss_ig_modals(page, "target"))
+    assert page.clicked == ['div[role="dialog"] button:text-is("OK")']
+
+
+def test_dismiss_modals_supporta_ui_italiana(monkeypatch):
+    _no_sleep(monkeypatch)
+    # Popup "sleep mode" con UI italiana: "Non ora" dentro il dialog.
+    page = _ModalPage(present_selectors={'div[role="dialog"] button:text-is("Non ora")'})
+    asyncio.run(InstagramPage(None)._dismiss_ig_modals(page, "target"))
+    assert page.clicked == ['div[role="dialog"] button:text-is("Non ora")']
