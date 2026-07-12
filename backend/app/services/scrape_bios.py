@@ -35,6 +35,12 @@ MAX_CONSECUTIVE_BIO_FAIL = 5
 # che resta la cadenza "umana": questo serve SOLO a non sforare il timeout di ARQ.
 MICRO_YIELD_EVERY = 100
 MICRO_YIELD_MAX_SECONDS = 40 * 60
+# Defer brevissimo con cui un job API in volo cede il passo quando l'operatore
+# cambia bio_engine a 'browser' a caldo. Il job API non rilegge bio_engine dopo il
+# dispatch iniziale, e finche' esegue tiene il lock arq in-progress (che blocca anche
+# un nuovo bios/start). Auto-deferrando, arq rilascia in-progress e ri-accoda bios:{cid},
+# che al rientro dispaccia sul motore browser. Stesso valore del micro-yield.
+ENGINE_SWITCH_DEFER = 2
 
 
 def bio_should_continue(target: int | None, done: int) -> bool:
@@ -153,6 +159,24 @@ async def scrape_bios(campaign_id: str) -> int | None:
                 if campaign.status not in SCRAPING_ACTIVE_STATES:
                     logger.info(f"[Bio] Stato '{campaign.status.value}' — interrotto a {done}")
                     return
+
+                # Motore cambiato a caldo: questo job (path API) legge bio_engine solo
+                # al dispatch iniziale; se l'operatore ha switchato a 'browser' mentre
+                # giravamo, ci auto-deferriamo. Il worker solleva Retry(defer), arq
+                # rilascia il lock in-progress e ri-accoda bios:{cid}, che al rientro
+                # dispaccia sul motore browser (riga ~90). Senza questo il job resta
+                # "zombie" e continua via API ignorando lo switch — e il lock in-progress
+                # blocca pure un nuovo bios/start.
+                if campaign.bio_engine == 'browser':
+                    logger.info(
+                        f"[Bio] Motore cambiato a 'browser' a caldo — cedo il job "
+                        f"per ridispacciare su browser ({done} bio via API finora)"
+                    )
+                    emit_event(
+                        campaign_id, "scrape_engine_switch",
+                        "Motore Fase Bio cambiato a Browser — passaggio al nuovo motore in corso",
+                    )
+                    return ENGINE_SWITCH_DEFER
 
                 follower = (await db.execute(
                     select(Follower).where(
