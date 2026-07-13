@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     # Girare RARO e mirato per ridurre il footprint API (rischio checkpoint):
     # solo campagne attive e solo follower contattati negli ultimi N giorni.
     reply_check_max_age_days: int = 7
+    # Dopo il COMPLETAMENTO di una campagna si continua a cercare risposte per
+    # ancora N giorni (le risposte tardive sono ancora interessanti), poi stop:
+    # oltre non ci si aspetta piu' risposte utili. Bilancia footprint API vs
+    # risposte perse (caso reale: PODCAST completed, risposte a 24h non tracciate).
+    reply_check_completed_grace_days: int = 3
 
     # Timing defaults
     min_delay_seconds: int = 120

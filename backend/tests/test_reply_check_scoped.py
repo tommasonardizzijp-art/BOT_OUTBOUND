@@ -19,14 +19,15 @@ from app.models.message import Message, MessageStatus
 from app.services import reply_checker
 
 
-def _mk_campaign(db, status):
+def _mk_campaign(db, status, completed_at=None):
     cid = str(uuid.uuid4())
     db.add(Campaign(id=cid, name=f"rc-{cid[:6]}", source_type="scrape",
-                    target_username="t", scrape_mode="followers", status=status))
+                    target_username="t", scrape_mode="followers", status=status,
+                    completed_at=completed_at))
     return cid
 
 
-# ── filtro STATO: solo campagne attive vengono scansionate ─────────────────
+# ── filtro STATO: attive SEMPRE; completed solo entro la finestra di grazia ──
 
 def test_solo_campagne_attive_scansionate(monkeypatch):
     ids = {}
@@ -36,6 +37,7 @@ def test_solo_campagne_attive_scansionate(monkeypatch):
             ids["running"] = _mk_campaign(db, CampaignStatus.running)
             ids["parr"] = _mk_campaign(db, CampaignStatus.scraping_and_running)
             ids["paused"] = _mk_campaign(db, CampaignStatus.paused)
+            # completed SENZA completed_at (vecchie) resta esclusa
             ids["completed"] = _mk_campaign(db, CampaignStatus.completed)
             await db.commit()
     asyncio.run(_seed())
@@ -52,7 +54,37 @@ def test_solo_campagne_attive_scansionate(monkeypatch):
     assert ids["running"] in scanned
     assert ids["parr"] in scanned
     assert ids["paused"] not in scanned      # niente polling delle ferme
-    assert ids["completed"] not in scanned
+    assert ids["completed"] not in scanned   # completed senza completed_at: esclusa
+
+
+def test_completed_entro_finestra_grazia_ancora_scansionata(monkeypatch):
+    """Una campagna completata da poco deve ancora essere controllata per le
+    risposte tardive (caso reale: PODCAST 1 BORDERLINE completed, risposte a 24h
+    non tracciate). Dopo la finestra di grazia (default 3gg) si smette."""
+    ids = {}
+    grace = settings.reply_check_completed_grace_days
+
+    async def _seed():
+        async with AsyncSessionLocal() as db:
+            now = datetime.utcnow()
+            ids["recent"] = _mk_campaign(db, CampaignStatus.completed,
+                                         completed_at=now - timedelta(days=grace - 1))
+            ids["old"] = _mk_campaign(db, CampaignStatus.completed,
+                                      completed_at=now - timedelta(days=grace + 2))
+            await db.commit()
+    asyncio.run(_seed())
+
+    scanned = []
+
+    async def _fake_check_campaign(campaign_id, db):
+        scanned.append(campaign_id)
+        return 0
+    monkeypatch.setattr(reply_checker, "_check_campaign", _fake_check_campaign)
+
+    asyncio.run(reply_checker.check_all_replies())
+
+    assert ids["recent"] in scanned      # completata da <3gg: ancora controllata
+    assert ids["old"] not in scanned     # completata da >3gg: basta
 
 
 # ── filtro ETA': solo invii recenti diventano candidati ────────────────────

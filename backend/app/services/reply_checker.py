@@ -21,6 +21,27 @@ from app.utils.instagrapi_client import login as _login
 from app.utils.roles import DM_ROLES
 
 
+def _campaign_in_reply_window(status, completed_at, now, grace_days: int | None = None) -> bool:
+    """Va controllata per le risposte?
+    - running / scraping_and_running: sempre.
+    - completed: solo entro `grace_days` dal completamento (le risposte tardive
+      sono ancora interessanti; oltre no, e non si polla all'infinito).
+    - paused e completed senza completed_at: no.
+
+    Le paused NON vengono pollate (footprint API infinito era il problema
+    originale). Le completed hanno una finestra di grazia perche' una campagna
+    puo' completarsi mentre le risposte arrivano ancora (caso reale: PODCAST 1
+    BORDERLINE completed, risposte a 24h non tracciate)."""
+    from app.config import settings as _settings
+    if grace_days is None:
+        grace_days = _settings.reply_check_completed_grace_days
+    if status in (CampaignStatus.running, CampaignStatus.scraping_and_running):
+        return True
+    if status == CampaignStatus.completed and completed_at is not None:
+        return completed_at >= now - timedelta(days=grace_days)
+    return False
+
+
 async def check_all_replies() -> int:
     """
     Check all campaigns that have sent followers for DM replies.
@@ -28,18 +49,24 @@ async def check_all_replies() -> int:
     Called by the ARQ cron every 30 minutes.
     """
     async with AsyncSessionLocal() as db:
-        # SOLO campagne attive: le paused/completed NON vengono piu' pollate via API
-        # all'infinito (era il footprint principale — leggeva l'inbox ogni 30 min
-        # anche per campagne ferme, per sempre, finche' avevano follower 'sent').
+        # Attive SEMPRE; completed solo entro la finestra di grazia (vedi
+        # _campaign_in_reply_window). Le paused/completed-vecchie NON vengono
+        # pollate all'infinito — era il footprint principale (lettura inbox ogni
+        # 30 min per sempre finche' avevano follower 'sent').
+        now = datetime.utcnow()
         campaigns_result = await db.execute(
             select(Campaign).where(
                 Campaign.status.in_([
                     CampaignStatus.running,
                     CampaignStatus.scraping_and_running,
+                    CampaignStatus.completed,
                 ])
             )
         )
-        campaigns = campaigns_result.scalars().all()
+        campaigns = [
+            c for c in campaigns_result.scalars().all()
+            if _campaign_in_reply_window(c.status, c.completed_at, now)
+        ]
 
         total_replied = 0
         for campaign in campaigns:
