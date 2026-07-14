@@ -23,19 +23,28 @@ from app.utils.roles import DM_ROLES
 
 def _campaign_in_reply_window(status, completed_at, now, grace_days: int | None = None) -> bool:
     """Va controllata per le risposte?
-    - running / scraping_and_running: sempre.
-    - completed: solo entro `grace_days` dal completamento (le risposte tardive
-      sono ancora interessanti; oltre no, e non si polla all'infinito).
-    - paused e completed senza completed_at: no.
+    - running / scraping_and_running / paused: si'.
+    - completed: solo entro `grace_days` dal completamento; oltre, una risposta
+      non e' piu' un dato interessante.
+    - completed senza completed_at (vecchie) e ogni altro stato: no.
 
-    Le paused NON vengono pollate (footprint API infinito era il problema
-    originale). Le completed hanno una finestra di grazia perche' una campagna
-    puo' completarsi mentre le risposte arrivano ancora (caso reale: PODCAST 1
-    BORDERLINE completed, risposte a 24h non tracciate)."""
+    Perche' le paused SI: una campagna in pausa ha comunque contatti in attesa
+    di rispondere, e in pratica sta ferma il piu' del tempo (pause manuali,
+    cooldown, soft-block). Saltarle voleva dire non vedere MAI le loro risposte.
+
+    Il freno al footprint API NON e' lo stato ma il cutoff per-follower
+    (reply_check_max_age_days, vedi _check_campaign): senza invii recenti la
+    campagna non produce candidati e si esce PRIMA di qualsiasi login/chiamata
+    API. Una campagna morta costa zero comunque, senza doverla escludere per
+    stato."""
     from app.config import settings as _settings
     if grace_days is None:
         grace_days = _settings.reply_check_completed_grace_days
-    if status in (CampaignStatus.running, CampaignStatus.scraping_and_running):
+    if status in (
+        CampaignStatus.running,
+        CampaignStatus.scraping_and_running,
+        CampaignStatus.paused,
+    ):
         return True
     if status == CampaignStatus.completed and completed_at is not None:
         return completed_at >= now - timedelta(days=grace_days)
@@ -49,16 +58,17 @@ async def check_all_replies() -> int:
     Called by the ARQ cron every 30 minutes.
     """
     async with AsyncSessionLocal() as db:
-        # Attive SEMPRE; completed solo entro la finestra di grazia (vedi
-        # _campaign_in_reply_window). Le paused/completed-vecchie NON vengono
-        # pollate all'infinito — era il footprint principale (lettura inbox ogni
-        # 30 min per sempre finche' avevano follower 'sent').
+        # Attive e paused SEMPRE; completed solo entro la finestra di grazia
+        # (vedi _campaign_in_reply_window). Il footprint e' limitato dal cutoff
+        # per-follower in _check_campaign, non dallo stato: una campagna senza
+        # invii recenti esce prima di ogni login/chiamata API.
         now = datetime.utcnow()
         campaigns_result = await db.execute(
             select(Campaign).where(
                 Campaign.status.in_([
                     CampaignStatus.running,
                     CampaignStatus.scraping_and_running,
+                    CampaignStatus.paused,
                     CampaignStatus.completed,
                 ])
             )

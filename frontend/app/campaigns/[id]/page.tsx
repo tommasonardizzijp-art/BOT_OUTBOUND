@@ -857,6 +857,17 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />{campaign.scrape_completed_at ? 'Riprendi' : 'Riprendi scraping'}</>}
             </Button>
           )}
+          {/* Lista incompleta: invia DM ai profili GIA' raccolti senza riattivare lo
+              scraping. Senza questo, da 'paused' l'unica strada era 'Riprendi
+              scraping' -> i DM richiedevano per forza lo scraping attivo. */}
+          {campaign.messaging_enabled && campaign.status === 'paused' && !campaign.scrape_completed_at
+            && (campaignAccounts?.some(ca => ca.is_active && canDm(ca.role)) ?? false) && (
+            <Button size="sm" className="bg-green-700 hover:bg-green-600 text-white"
+              onClick={() => action(() => api.campaigns.start(id))} disabled={loadingAction}
+              title="Invia i DM ai profili già raccolti, lasciando lo scraping fermo">
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Zap className="w-4 h-4 mr-1" />Avvia solo DM</>}
+            </Button>
+          )}
           {campaign.status === 'scraping' && (
             <Button size="sm" variant="outline" className="border-orange-700 text-orange-400"
               onClick={() => openConfirm(

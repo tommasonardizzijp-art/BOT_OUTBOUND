@@ -544,25 +544,40 @@ async def _soft_block_reset(campaign_id: str, account_id: str) -> None:
 
 async def _pause_campaign_soft_block(campaign_id: str, account_id: str, n: int) -> None:
     """Dopo N soft-block CONSECUTIVI di un account (mirror del guard del path API),
-    mette la campagna in pausa e avvisa: stop al `429 -> defer -> 429` infinito."""
+    ferma la Fase Bio e avvisa: stop al `429 -> defer -> 429` infinito.
+
+    Ferma SOLO la bio: se i DM girano in parallelo (scraping_and_running) la
+    campagna scende a 'running', cosi' i worker DM continuano. Il 429 e' un
+    limite dell'endpoint web_profile_info per IP e riguarda l'account che
+    scrapa; l'invio DM gira su un altro account ed e' sano — non c'e' motivo di
+    spegnerlo. (Caso reale 14/07: 5x 429 della bio mettevano tutto in 'paused' e
+    il worker DM si fermava al giro dopo, a batch non finito.)"""
     from sqlalchemy import select
     from app.models.campaign import Campaign, CampaignStatus, SCRAPING_ACTIVE_STATES
     from app.models.activity_log import ActivityLog
     from app.utils.events import emit as emit_event
+    dm_kept = False
     async with AsyncSessionLocal() as db:
         campaign = (await db.execute(
             select(Campaign).where(Campaign.id == campaign_id)
         )).scalar_one_or_none()
         if campaign is not None and campaign.status in SCRAPING_ACTIVE_STATES:
-            campaign.status = CampaignStatus.paused
+            dm_kept = campaign.status == CampaignStatus.scraping_and_running
+            campaign.status = (
+                CampaignStatus.running if dm_kept else CampaignStatus.paused
+            )
             campaign.updated_at = datetime.utcnow()
             db.add(ActivityLog(
                 campaign_id=campaign_id, action="bios_paused_soft_block",
-                details=_json.dumps({"account_id": account_id, "consecutive": n}),
+                details=_json.dumps({
+                    "account_id": account_id, "consecutive": n,
+                    "dm_kept_running": dm_kept,
+                }),
             ))
             await db.commit()
     msg = (f"Fase Bio browser in PAUSA: {n} soft-block (429) consecutivi sull'account "
-           f"{account_id[:8]} — serve riposo/verifica account.")
+           f"{account_id[:8]} — serve riposo/verifica account."
+           + (" I DM continuano." if dm_kept else ""))
     logger.error(f"[BioBrowser] {msg}")
     emit_event(campaign_id, "scrape_stopped", msg, level="error")
     try:
