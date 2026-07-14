@@ -851,10 +851,33 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Pause className="w-4 h-4 mr-1" />Pausa</>}
             </Button>
           )}
-          {campaign.messaging_enabled && (campaign.status === 'paused' || (campaign.status === 'completed' && campaign.messages_pending > 0)) && (
+          {/* Ripresa. Su 'completed' si riprende anche a DM esauriti
+              (messages_pending=0) se lo scraping NON e' completo: la campagna puo'
+              chiudersi avendo contattato tutti i profili RACCOLTI ma con la lista
+              ancora da finire — il resume riparte da listing/scraping (nuovi
+              contatti). Senza questo restava solo il Reset, che torna a draft. */}
+          {campaign.messaging_enabled && (
+            campaign.status === 'paused'
+            || (campaign.status === 'completed'
+                && (campaign.messages_pending > 0 || !campaign.scrape_completed_at))
+          ) && (
             <Button size="sm" className="bg-green-600 hover:bg-green-700"
-              onClick={() => action(() => api.campaigns.resume(id))} disabled={loadingAction}>
+              onClick={() => action(() => api.campaigns.resume(id))} disabled={loadingAction}
+              title={campaign.scrape_completed_at
+                ? 'Riprende l\'invio dei DM'
+                : 'Riprende la raccolta profili (lista/bio) da dove era rimasta'}>
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />{campaign.scrape_completed_at ? 'Riprendi' : 'Riprendi scraping'}</>}
+            </Button>
+          )}
+          {/* Lista incompleta: invia DM ai profili GIA' raccolti senza riattivare lo
+              scraping. Senza questo, da 'paused' l'unica strada era 'Riprendi
+              scraping' -> i DM richiedevano per forza lo scraping attivo. */}
+          {campaign.messaging_enabled && campaign.status === 'paused' && !campaign.scrape_completed_at
+            && (campaignAccounts?.some(ca => ca.is_active && canDm(ca.role)) ?? false) && (
+            <Button size="sm" className="bg-green-700 hover:bg-green-600 text-white"
+              onClick={() => action(() => api.campaigns.start(id))} disabled={loadingAction}
+              title="Invia i DM ai profili già raccolti, lasciando lo scraping fermo">
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Zap className="w-4 h-4 mr-1" />Avvia solo DM</>}
             </Button>
           )}
           {campaign.status === 'scraping' && (
