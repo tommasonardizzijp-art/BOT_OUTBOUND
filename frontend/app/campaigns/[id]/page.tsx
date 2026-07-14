@@ -851,9 +851,21 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Pause className="w-4 h-4 mr-1" />Pausa</>}
             </Button>
           )}
-          {campaign.messaging_enabled && (campaign.status === 'paused' || (campaign.status === 'completed' && campaign.messages_pending > 0)) && (
+          {/* Ripresa. Su 'completed' si riprende anche a DM esauriti
+              (messages_pending=0) se lo scraping NON e' completo: la campagna puo'
+              chiudersi avendo contattato tutti i profili RACCOLTI ma con la lista
+              ancora da finire — il resume riparte da listing/scraping (nuovi
+              contatti). Senza questo restava solo il Reset, che torna a draft. */}
+          {campaign.messaging_enabled && (
+            campaign.status === 'paused'
+            || (campaign.status === 'completed'
+                && (campaign.messages_pending > 0 || !campaign.scrape_completed_at))
+          ) && (
             <Button size="sm" className="bg-green-600 hover:bg-green-700"
-              onClick={() => action(() => api.campaigns.resume(id))} disabled={loadingAction}>
+              onClick={() => action(() => api.campaigns.resume(id))} disabled={loadingAction}
+              title={campaign.scrape_completed_at
+                ? 'Riprende l\'invio dei DM'
+                : 'Riprende la raccolta profili (lista/bio) da dove era rimasta'}>
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />{campaign.scrape_completed_at ? 'Riprendi' : 'Riprendi scraping'}</>}
             </Button>
           )}
