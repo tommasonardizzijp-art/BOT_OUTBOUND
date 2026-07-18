@@ -76,7 +76,7 @@ def render_template(
 
 def pick_template(campaign, rng: random.Random | None = None) -> tuple[str, str]:
     """Sceglie a caso (pesi uguali) tra i template compilati della campagna.
-    Ritorna (testo, variante) con variante in 'a'|'b'|'c'.
+    Ritorna (testo, variante) con variante in 'a'|'b'|'c'|'d'.
     Unifica i vecchi meccanismi (50/50 random e alternanza generated%2)."""
     r = rng or random
     candidates: list[tuple[str, str]] = [(campaign.base_message_template or "", "a")]
@@ -84,4 +84,6 @@ def pick_template(campaign, rng: random.Random | None = None) -> tuple[str, str]
         candidates.append((campaign.message_template_b, "b"))
     if (campaign.message_template_c or "").strip():
         candidates.append((campaign.message_template_c, "c"))
+    if (getattr(campaign, "message_template_d", None) or "").strip():
+        candidates.append((campaign.message_template_d, "d"))
     return r.choice(candidates)

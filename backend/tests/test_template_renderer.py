@@ -7,10 +7,11 @@ from app.services.template_renderer import (
 
 
 class FakeCampaign:
-    def __init__(self, a="Template base abbastanza lungo", b=None, c=None):
+    def __init__(self, a="Template base abbastanza lungo", b=None, c=None, d=None):
         self.base_message_template = a
         self.message_template_b = b
         self.message_template_c = c
+        self.message_template_d = d
 
 
 # ── resolve_spintax ────────────────────────────────────────────────
@@ -99,6 +100,22 @@ def test_pick_a_b_c_all_come_out():
     camp = FakeCampaign(b="Secondo template B lungo", c="Terzo template C lungo")
     variants = {pick_template(camp, rng=random.Random(i))[1] for i in range(60)}
     assert variants == {"a", "b", "c"}
+
+def test_pick_a_b_c_d_all_come_out():
+    camp = FakeCampaign(b="Secondo template B lungo", c="Terzo template C lungo",
+                        d="Quarto template D lungo")
+    variants = {pick_template(camp, rng=random.Random(i))[1] for i in range(80)}
+    assert variants == {"a", "b", "c", "d"}
+
+def test_pick_d_without_legacy_attr():
+    # Campagna/oggetto senza l'attributo message_template_d (es. mock vecchi):
+    # pick_template non deve esplodere, solo ignorare la variante d.
+    class LegacyCampaign:
+        base_message_template = "Template base abbastanza lungo"
+        message_template_b = None
+        message_template_c = None
+    variants = {pick_template(LegacyCampaign(), rng=random.Random(i))[1] for i in range(20)}
+    assert variants == {"a"}
 
 def test_pick_skips_blank_templates():
     camp = FakeCampaign(b="   ", c=None)  # B solo spazi = non compilato

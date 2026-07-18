@@ -61,6 +61,8 @@ class Campaign(Base):
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Terzo template opzionale (variante 'c'), simmetrico a message_template_b.
     message_template_c: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Quarto template opzionale (variante 'd'), simmetrico a b/c. Migration 024.
+    message_template_d: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Istruzioni AI per-campagna: override del prompt di sistema globale (.env).
     # NULL/vuoto = usa il globale.
     ai_system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)

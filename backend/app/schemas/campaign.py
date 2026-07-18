@@ -16,6 +16,7 @@ class CampaignCreate(BaseModel):
     # Template mode: False (default) = rendering locale A/B/C+spintax, no AI.
     ai_enabled: bool = False
     message_template_c: str | None = Field(default=None, min_length=10)
+    message_template_d: str | None = Field(default=None, min_length=10)
     # Override per-campagna del prompt di sistema AI (vuoto = globale .env)
     ai_system_prompt: str | None = None
     # Max DMs/day across all accounts for this campaign. NULL = unlimited.
@@ -63,6 +64,7 @@ class CampaignUpdate(BaseModel):
     ai_enabled: bool | None = None
     # Come message_template_b: None esplicito = rimuovi il template
     message_template_c: str | None = Field(default=None, min_length=10)
+    message_template_d: str | None = Field(default=None, min_length=10)
     ai_system_prompt: str | None = None
     daily_limit: int | None = Field(default=None, ge=1, le=500)
     # M15 rev: approval sampling
@@ -91,6 +93,7 @@ class CampaignResponse(BaseModel):
     message_template_b: str | None
     ai_enabled: bool = True
     message_template_c: str | None = None
+    message_template_d: str | None = None
     ai_system_prompt: str | None = None
     status: CampaignStatus
     total_followers: int

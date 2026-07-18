@@ -242,6 +242,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   const [editTemplateValue, setEditTemplateValue] = useState('')
   const [editTemplateBValue, setEditTemplateBValue] = useState('')
   const [editTemplateCValue, setEditTemplateCValue] = useState('')
+  const [editTemplateDValue, setEditTemplateDValue] = useState('')
   const [editContextValue, setEditContextValue] = useState('')
   const [editAiEnabled, setEditAiEnabled] = useState(false)
   const [editAiSystemPrompt, setEditAiSystemPrompt] = useState('')
@@ -565,6 +566,11 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         toast.error(`Template C: placeholder sconosciuto ${unknownC[0]} — usa solo {nome} o gruppi {a|b}`)
         return
       }
+      const unknownD = findUnknownPlaceholders(editTemplateDValue)
+      if (unknownD.length > 0) {
+        toast.error(`Template D: placeholder sconosciuto ${unknownD[0]} — usa solo {nome} o gruppi {a|b}`)
+        return
+      }
     }
     setSavingTemplate(true)
     try {
@@ -579,6 +585,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         ai_prompt_context: editMessagingEnabled ? (editContextValue || undefined) : undefined,
         message_template_b: editMessagingEnabled ? (editTemplateBValue.trim() || null) : null,
         message_template_c: editMessagingEnabled ? (editTemplateCValue.trim() || null) : null,
+        message_template_d: editMessagingEnabled ? (editTemplateDValue.trim() || null) : null,
         ai_enabled: editMessagingEnabled ? editAiEnabled : false,
         ai_system_prompt: editMessagingEnabled && editAiEnabled ? (editAiSystemPrompt.trim() || null) : null,
       })
@@ -1424,6 +1431,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 setEditTemplateValue(campaign.base_message_template ?? '')
                 setEditTemplateBValue(campaign.message_template_b ?? '')
                 setEditTemplateCValue(campaign.message_template_c ?? '')
+                setEditTemplateDValue(campaign.message_template_d ?? '')
                 setEditContextValue(campaign.ai_prompt_context ?? '')
                 setEditAiEnabled(campaign.ai_enabled)
                 setEditAiSystemPrompt(campaign.ai_system_prompt ?? '')
@@ -2229,7 +2237,21 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-purple-500"
                 placeholder="Lascia vuoto per disattivare la terza variante..."
               />
-              <p className="text-xs text-gray-600">I follower riceveranno a caso uno dei template attivi (A/B/C).</p>
+              <p className="text-xs text-gray-600">I follower riceveranno a caso uno dei template attivi (A/B/C/D).</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm text-gray-300 font-medium">
+                Template D
+                <span className="ml-1 text-gray-600 font-normal">(opzionale)</span>
+              </label>
+              <textarea
+                value={editTemplateDValue}
+                onChange={e => setEditTemplateDValue(e.target.value)}
+                rows={4}
+                className="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-md px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-purple-500"
+                placeholder="Lascia vuoto per disattivare la quarta variante..."
+              />
+              <p className="text-xs text-gray-600">I follower riceveranno a caso uno dei template attivi (A/B/C/D).</p>
             </div>
 
             <div className="flex items-center justify-between rounded-md border border-gray-700 bg-gray-800/40 px-3 py-2">

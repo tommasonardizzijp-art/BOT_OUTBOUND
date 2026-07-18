@@ -46,6 +46,8 @@ export interface Campaign {
   message_template_b: string | null
   // Template mode: third variant (optional), rendering locale spintax A/B/C
   message_template_c: string | null
+  // Quarta variante opzionale ('d'), simmetrica a B/C
+  message_template_d: string | null
   // False (default) = rendering locale da template (no AI); True = AI riscrive sulla bio
   ai_enabled: boolean
   // Override per-campagna del prompt di sistema AI (vuoto/null = usa il globale)
@@ -116,6 +118,7 @@ export interface CampaignCreate {
   ai_prompt_context?: string
   message_template_b?: string | null
   message_template_c?: string | null
+  message_template_d?: string | null
   ai_enabled?: boolean
   ai_system_prompt?: string | null
   messaging_enabled?: boolean

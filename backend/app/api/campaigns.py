@@ -193,6 +193,7 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         message_template_b=data.message_template_b,
         ai_enabled=data.ai_enabled,
         message_template_c=data.message_template_c,
+        message_template_d=data.message_template_d,
         ai_system_prompt=data.ai_system_prompt,
         daily_limit=data.daily_limit,
         require_approval=data.require_approval,
@@ -254,6 +255,7 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         "base_message_template",
         "message_template_b",
         "message_template_c",
+        "message_template_d",
         "ai_prompt_context",
         "ai_enabled",
         "ai_system_prompt",
@@ -299,6 +301,8 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         campaign.message_template_b = data.message_template_b
     if "message_template_c" in data.model_fields_set:
         campaign.message_template_c = data.message_template_c
+    if "message_template_d" in data.model_fields_set:
+        campaign.message_template_d = data.message_template_d
     if data.ai_enabled is not None:
         campaign.ai_enabled = data.ai_enabled
     if "ai_system_prompt" in data.model_fields_set:
