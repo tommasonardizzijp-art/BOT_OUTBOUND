@@ -1139,6 +1139,16 @@ Il testo dei DM ora è **di default un rendering locale** (`template_renderer.py
 
 ---
 
+## [2026-07-18] Template D (quarta variante) + sweep one-off inbox replied
+
+**Template D**: quarta variante opzionale del rendering locale (`message_template_d`, migrazione **024 applicata su Supabase prod**). Simmetrica a B/C: colonna Text nullable, `pick_template()` la include a pesi uguali (con `getattr` per compat con mock legacy senza l'attributo), schema Create/Update/Response, `always_editable` nell'update API, textarea "Template D" nel modale "Modifica template messaggio" del dettaglio campagna. Il form nuova campagna NON espone ancora D (solo il modale di modifica). Test: `test_template_renderer.py` (26 passed). Commit `410e81d` su main.
+
+**Sweep one-off inbox** (`backend/scripts/sweep_inbox_replies.py`): per campagne `dm_threads`, una scansione paginata dell'inbox (riusa `fetch_inbox_page` di `inbox_source.py`: pagine da 20, pacing `inbox_api_page_delay_*` 10-40s + pausa lunga occasionale) che in un solo passaggio: marca `replied` i follower con almeno un messaggio dell'altro utente (tra gli ultimi 10 del thread), promuove i `pending` non-replied a `bio_scraped` (skip Fase Bio: in template mode la bio non serve), aggiunge i thread nuovi non ancora in lista, opzionale `--daily-limit`. Snapshot JSON di audit in `backend/data/`. Caso d'uso: follow-up "DM borderline_agenzia" solo a chi non ha mai risposto.
+
+**Miglioramento potenziale annotato (non implementato, decisione 18/07)**: `reply_checker.py` usa `client.direct_threads(amount=200)` che internamente fa ~10 richieste `direct_v2/inbox/` da 20 thread **in burst senza pause** (verificato su instagrapi `mixins/direct.py`: loop su `direct_threads_chunk`, `limit=20`, nessun delay tra chunk). Pattern piu' rumoroso del necessario per l'endpoint piu' sensibile ai checkpoint. Fix possibile: passare alla paginazione manuale con cursore + pacing come `inbox_source.py`/`sweep_inbox_replies.py`. Rimandato per non complicare/rallentare il tracciamento risposte esistente.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |

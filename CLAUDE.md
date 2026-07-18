@@ -188,6 +188,7 @@ Una campagna = una sorgente di profili + un template messaggio.
 - `base_message_template`: template principale (ora **nullable** — NULL consentito quando `messaging_enabled=False`; non può essere vuoto/NULL se `messaging_enabled=True`)
 - `message_template_b`: template B opzionale per A/B testing (M10)
 - `message_template_c`: template C opzionale, terza variante per il rendering locale A/B/C (Template mode, migrazione 023) — `pick_template()` sceglie a pesi uguali tra i template compilati
+- `message_template_d`: template D opzionale, quarta variante (migrazione 024), simmetrico a B/C
 - `ai_enabled`: bool — default **False** per le nuove campagne (rendering locale, no AI); la migrazione 023 ha impostato **True** sulle campagne preesistenti per non cambiarne il comportamento. Vedi sezione "Architettura AI" per il flusso completo
 - `ai_system_prompt`: override per-campagna del system prompt AI (vuoto/null = usa `AI_SYSTEM_PROMPT`/default globale); ha effetto solo se `ai_enabled=True`
 - `daily_limit`: limite DM/giorno per l'intera campagna
@@ -353,7 +354,7 @@ Non modificare il comportamento di timing o simulazione umana senza considerare 
 ### Modalità messaggi: rendering locale (default) vs AI (opt-in per-campagna) — Template mode
 
 Il testo del DM **di default NON passa dall'AI**: `compose_message(campaign, follower)` (`ai_personalizer.py`) è l'**unica entry point** usata dai 4 call-site che generano testo (`generate_preview_batch`, `generate_messages_batch`, `campaign_orchestrator._get_or_create_message`, `followers.regenerate_message`) e decide così:
-1. `pick_template()` (`template_renderer.py`) sceglie a caso, pesi uguali, tra i template compilati della campagna (A = `base_message_template`, B = `message_template_b`, C = `message_template_c` — B/C opzionali).
+1. `pick_template()` (`template_renderer.py`) sceglie a caso, pesi uguali, tra i template compilati della campagna (A = `base_message_template`, B = `message_template_b`, C = `message_template_c`, D = `message_template_d` — B/C/D opzionali; D aggiunto in migrazione 024).
 2. `campaign.ai_enabled` (bool, **default False** sulle nuove campagne) decide il branch:
    - **False** (default) → `render_template()`: risolve SEMPRE lo spintax `{a|b|c}` e il placeholder nome (`{nome}`/`{name}`/`[nome]`/`[name]`), **zero chiamate AI, istantaneo**. Solleva `TemplateRenderError` se restano placeholder sconosciuti (es. `{azienda}`) o il risultato è vuoto dopo il render — meglio un messaggio fallito (retry/skip) che un DM col placeholder letterale o vuoto.
    - **True** (opt-in per-campagna) → passa dal flusso `generate_message()` sotto, usando `campaign.ai_prompt_context` per il contesto e `campaign.ai_system_prompt` come override per-campagna del system prompt (vuoto/null = usa `AI_SYSTEM_PROMPT`/`DEFAULT_SYSTEM_PROMPT` globali).
