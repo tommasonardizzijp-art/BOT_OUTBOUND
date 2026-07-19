@@ -323,7 +323,7 @@ class InstagramPage:
     # False = pagina ancora vuota (solo shell, nessun contenuto in `main`).
     _RENDER_PROBE_JS = """
         () => {
-            const term = /sorry, this page isn|page isn't available|spiacenti, questa pagina non|pagina non .{0,3}disponibile|cette page n'est pas disponible|seite ist leider nicht verf|this account is private|questo account.{0,10}privat|something went wrong/i;
+            const term = /sorry, this page isn|page isn't available|spiacenti, questa pagina non|pagina non .{0,3}disponibile|cette page n'est pas disponible|seite ist leider nicht verf|this account is private|questo account.{0,10}privat/i;
             const body = (document.body && document.body.innerText) || '';
             if (term.test(body)) return true;
             const main = document.querySelector('main');
@@ -361,7 +361,7 @@ class InstagramPage:
             await asyncio.sleep(interval)
         raise DMSendError(
             f"@{username}: profilo non renderizzato entro {timeout_ms}ms "
-            f"(pagina lenta) — retry, non una restrizione"
+            f"(pagina lenta) - retry, non una restrizione"
         )
 
     async def send_dm(self, username: str, message: str, pre_send_callback: Optional[Callable[[], Awaitable[bool]]] = None, on_enter: Optional[Callable[[], Awaitable[None]]] = None) -> None:
@@ -876,8 +876,8 @@ class InstagramPage:
             # lead resta in coda invece di essere skippato come "dm_restricted".
             if not await self._is_profile_rendered(page):
                 raise DMSendError(
-                    f"@{username}: né bottone Messaggio né menu ⋯ trovati ma "
-                    f"profilo non renderizzato (pagina lenta) — retry"
+                    f"@{username}: ne bottone Messaggio ne menu profilo trovati ma "
+                    f"pagina non renderizzata (lenta) - retry"
                 )
             raise DMRestrictedError(
                 f"@{username}: neither Message button nor three dots menu found on profile"
