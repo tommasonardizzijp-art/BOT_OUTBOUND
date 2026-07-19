@@ -316,6 +316,54 @@ class InstagramPage:
                 continue
         return False
 
+    # Predicato JS: il profilo ha dipinto uno stato DECIDIBILE?
+    # - header profilo presente (caso normale), OPPURE
+    # - body con testo di stato terminale (non disponibile / privato / errore), OPPURE
+    # - `main` con contenuto reale (fallback anti-redesign se IG toglie <header>).
+    # False = pagina ancora vuota (solo shell, nessun contenuto in `main`).
+    _RENDER_PROBE_JS = """
+        () => {
+            const term = /sorry, this page isn|page isn't available|spiacenti, questa pagina non|pagina non .{0,3}disponibile|cette page n'est pas disponible|seite ist leider nicht verf|this account is private|questo account.{0,10}privat|something went wrong/i;
+            const body = (document.body && document.body.innerText) || '';
+            if (term.test(body)) return true;
+            const main = document.querySelector('main');
+            if (!main) return false;
+            if (main.querySelector('header')) return true;
+            return ((main.innerText || '').trim().length > 20);
+        }
+    """
+
+    async def _is_profile_rendered(self, page) -> bool:
+        """True se la SPA del profilo ha dipinto qualcosa di decidibile (vedi
+        _RENDER_PROBE_JS). False se la pagina è ancora vuota o su errore JS."""
+        try:
+            return bool(await page.evaluate(self._RENDER_PROBE_JS))
+        except Exception:
+            return False
+
+    async def _wait_profile_rendered(self, page, username: str, timeout_ms: int = 15000) -> None:
+        """Attende che il profilo dipinga PRIMA di cercare i controlli DM.
+
+        `page.goto(..., domcontentloaded)` ritorna al parse dell'HTML, ma IG monta
+        header/bottone Messaggio/menu ⋯ via JS secondi dopo. Procedere su una
+        pagina bianca faceva scadere i timeout di _click_message_button → falso
+        DMRestrictedError → lead skippato come 'dm_restricted' (buttato via come
+        "non accetta DM" quando la pagina era solo lenta).
+
+        NON allunga il timing anti-detection: nel caso normale il profilo è già
+        dipinto e questo ritorna subito; l'attesa scatta SOLO quando la pagina è
+        lenta. Se dopo `timeout_ms` è ancora vuota solleva DMSendError (retryable),
+        mai un falso DMRestrictedError."""
+        interval = 0.4
+        for _ in range(int(timeout_ms / (interval * 1000)) + 1):
+            if await self._is_profile_rendered(page):
+                return
+            await asyncio.sleep(interval)
+        raise DMSendError(
+            f"@{username}: profilo non renderizzato entro {timeout_ms}ms "
+            f"(pagina lenta) — retry, non una restrizione"
+        )
+
     async def send_dm(self, username: str, message: str, pre_send_callback: Optional[Callable[[], Awaitable[bool]]] = None, on_enter: Optional[Callable[[], Awaitable[None]]] = None) -> None:
         """Navigate to a user's profile and send a DM.
 
@@ -338,6 +386,13 @@ class InstagramPage:
             logger.info(f"@{username}: IG error page detected — reloading once")
             await page.reload(wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(2.0, 3.5))
+
+        # Aspetta che il profilo dipinga PRIMA di cercare i controlli DM.
+        # Root cause dei falsi "dm_restricted": la pagina non era ancora
+        # renderizzata → bottone Messaggio/menu non trovati → lead buttato come
+        # "non accetta DM". Ritorna subito se già dipinto (nessun tempo aggiunto
+        # nel caso normale, timing anti-detection invariato).
+        await self._wait_profile_rendered(page, username)
 
         # Dismiss modals that may appear on page load
         await self._dismiss_ig_modals(page, username)
@@ -816,6 +871,14 @@ class InstagramPage:
                 logger.warning(f"@{username}: debug screenshot → data/debug_no_menu_{username}.png")
             except Exception:
                 pass
+            # Rete di sicurezza: se il profilo NON è renderizzato (pagina
+            # bianca/lenta), non è una restrizione → errore retryable, così il
+            # lead resta in coda invece di essere skippato come "dm_restricted".
+            if not await self._is_profile_rendered(page):
+                raise DMSendError(
+                    f"@{username}: né bottone Messaggio né menu ⋯ trovati ma "
+                    f"profilo non renderizzato (pagina lenta) — retry"
+                )
             raise DMRestrictedError(
                 f"@{username}: neither Message button nor three dots menu found on profile"
             )

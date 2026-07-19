@@ -1,6 +1,9 @@
 import asyncio
 
+import pytest
+
 from app.browser.instagram_page import InstagramPage
+from app.utils.exceptions import DMSendError
 
 
 class _FakeLocator:
@@ -227,3 +230,54 @@ def test_dismiss_modals_supporta_ui_italiana(monkeypatch):
     page = _ModalPage(present_selectors={'div[role="dialog"] button:text-is("Non ora")'})
     asyncio.run(InstagramPage(None)._dismiss_ig_modals(page, "target"))
     assert page.clicked == ['div[role="dialog"] button:text-is("Non ora")']
+
+
+# ── _wait_profile_rendered: aspetta il paint della SPA, mai falso dm_restricted ──
+# Root cause dei falsi "User has DM restrictions": il bot cercava il bottone
+# Messaggio su una pagina ancora BIANCA (goto ritorna al domcontentloaded, IG
+# monta il profilo via JS dopo). Screenshot reali del 19/07: debug_no_menu_* da
+# 9-14 KB = pagina vuota. Il render-wait dà tempo al paint e, se non arriva,
+# solleva un errore RETRYABLE invece di skippare il lead per sempre.
+
+class _RenderPage:
+    """Ritorna una sequenza di esiti da evaluate() per simulare il paint ritardato.
+    Esaurita la sequenza, resta sull'ultimo valore."""
+    def __init__(self, results):
+        self.url = "https://www.instagram.com/target/"
+        self._results = list(results)
+        self._last = results[-1] if results else False
+        self.evaluated = 0
+
+    async def evaluate(self, js):
+        self.evaluated += 1
+        if self._results:
+            self._last = self._results.pop(0)
+        return self._last
+
+
+def test_is_profile_rendered_true_e_false():
+    assert asyncio.run(InstagramPage(None)._is_profile_rendered(_RenderPage([True]))) is True
+    assert asyncio.run(InstagramPage(None)._is_profile_rendered(_RenderPage([False]))) is False
+
+
+def test_is_profile_rendered_false_su_eccezione():
+    class _Boom:
+        async def evaluate(self, js):
+            raise RuntimeError("evaluate boom")
+    assert asyncio.run(InstagramPage(None)._is_profile_rendered(_Boom())) is False
+
+
+def test_wait_profile_rendered_ritorna_appena_dipinge(monkeypatch):
+    _no_sleep(monkeypatch)
+    # Vuota per 3 poll, poi dipinge al 4°.
+    page = _RenderPage([False, False, False, True])
+    asyncio.run(InstagramPage(None)._wait_profile_rendered(page, "target", timeout_ms=15000))
+    assert page.evaluated == 4  # si ferma al primo True, non consuma il resto
+
+
+def test_wait_profile_rendered_solleva_retryable_se_resta_vuota(monkeypatch):
+    _no_sleep(monkeypatch)
+    # Pagina sempre bianca: DMSendError (retryable), MAI DMRestrictedError.
+    page = _RenderPage([False])
+    with pytest.raises(DMSendError):
+        asyncio.run(InstagramPage(None)._wait_profile_rendered(page, "target", timeout_ms=2000))
