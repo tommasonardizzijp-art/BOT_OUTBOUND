@@ -1149,6 +1149,22 @@ Il testo dei DM ora è **di default un rendering locale** (`template_renderer.py
 
 ---
 
+## [2026-07-23] Canale WhatsApp — brainstorming & design (fase pre-SDD)
+
+Avviato il design di un **secondo canale WhatsApp** (il progetto evolve in **piattaforma outreach multi-canale**, non più solo IG). Sessione di brainstorming (no codice). Deliverable in `docs/whatsapp/`: `00-problematiche-e-decisioni.md` (living doc: scopo, valutazione strade, P1-P11, PoC gate, log decisioni) + `sviluppi-futuri.md` (backlog fase 2+).
+
+**Decisioni chiave:**
+- **Scopo:** marketing/re-engagement a contatti **caldi** (chi ha già scritto al business, chat esistenti). NON cold outbound → crolla il rischio ban classico.
+- **Strada tecnica: A = automazione browser (Patchright su WhatsApp Web).** Scartate: B (Baileys/librerie non ufficiali, intercettate) e C (WhatsApp Business API ufficiale — prende possesso del numero e paga per messaggio, incompatibile col modello ricavo "per messaggio sotto Meta" e col cliente che vuole tenere l'app WhatsApp normale).
+- **Mono-progetto multi-canale** dentro questo repo (no progetto/DB separato). Riuso ~50-60% as-is: `browser/context_manager.py`+`fingerprint.py`, `template_renderer.py`, `timing.py`, `human_behavior.py`, `account_manager.py`, worker ARQ, `ai_personalizer.py`. Da adattare: campaign engine + schema DB (**identità `ig_user_id` → generalizzata a canale+telefono**, no merge cross-canale). Da riscrivere: `WhatsAppWebPage` POM. Blueprint diretto: `services/browser_bio.py`.
+- **Perimetro MVP:** sequenze semplici `msg1→2→3` + branching base (risposto/non risposto/attendi X gg); rilevamento risposte **via DOM** (no API, no Telegram) per branching + statistiche; template fissi A/B/C/D+spintax+placeholder da CSV; **ingest CSV** (solo `numero` obbligatorio); cap invio basso modificabile; multi-tenant lato admin.
+- **Rimandato a fase 2 (in `sviluppi-futuri.md`):** flow builder visuale/n8n (preferenza Tommaso, invio/risposta progettati webhook-ready per innestarlo), UI cliente self-serve, AI lettura-conversazione (2 modalità, ultimi ~10 msg), auto-reply con timer anti-doppio-messaggio, ingest via API CRM, analytics avanzate.
+- **Infra:** PC fisico 16-32GB, sessioni browser dedicate per numero, proxy mobili (EveryProxy + tether USB), 1 proxy ↔ max 2 numeri stessa azienda, proxy forniti da Tommaso. ~10 clienti nei primi 6 mesi. Primo cliente candidato: **Primero**.
+
+**Prossimo passo:** completare mini-Tema 4 (GDPR ruoli, stats, definition-of-done) → scrivere l'**SDD completo** in `docs/whatsapp/` (poi spec/plan via workflow superpowers).
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |
