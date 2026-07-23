@@ -1149,6 +1149,23 @@ Il testo dei DM ora è **di default un rendering locale** (`template_renderer.py
 
 ---
 
+## [2026-07-23] Canale WhatsApp — SDD completo scritto
+
+Scritto l'**SDD** in `docs/whatsapp/SDD-whatsapp-channel.md` (18 sezioni). Parte dai due doc di design del brainstorming (voce sotto), traducendo le decisioni in specifica implementabile — non un design greenfield, ma il **delta** sul motore esistente.
+
+**Contenuti:** visione/obiettivi, glossario, vincoli V1-V10 + assunzioni A1-A8, architettura logica (component diagram ASCII), modello dati (tabelle nuove `tenants`/`wa_numbers`/`wa_contacts`/`wa_campaigns`/`wa_sequence_steps`/`wa_campaign_contacts`/`wa_messages`/`wa_inbound_events` — canale IG intatto), tabella riuso/adatta/nuovo mappata sui moduli reali, 6 sequence diagram ASCII (ingest, invio, reply-via-DOM, branching, opt-out, QR/sessione), 3 state machine (campagna/contatto/numero), regole coesistenza C1-C6, threat model T1-T9 + parametri anti-ban, failure mode FM1-FM15, appendice GDPR (ruoli + P12 HMAC/masking/minimizzazione), PoC gate PoC-1..5 con criteri GO/NO-GO misurabili, roadmap M0-M5, KPI+DoD, backlog tecnico BT1-BT9, **110 domande di validazione residue** taggate [T]/[PoC]/[L]/[S].
+
+**Decisioni di design nuove (proposte nell'SDD, da confermare con Tommaso):**
+- **Modello dati (5.1): tabelle WA nuove, NON refactoring di `followers`/`campaigns`** — il canale IG in produzione resta intoccato; la "generalizzazione identità" si realizza a livello piattaforma (tenancy, eventi comuni), non forzando i contatti WA in tabelle IG-centriche.
+- **D2b (raccomandato): `wa_campaigns` dedicata** vs riga in `campaigns` con colonna `channel` (D2a). UI unificata logicamente, DB separato in MVP. **Da confermare (Q25).**
+- **Reply-watcher legge SOLO la lista chat, mai apre le chat** (coesistenza: aprire = marcare letto). Branching asincrono a granularità `wait_days`, nessun requisito realtime.
+- **Guardia "chat esistente" V2** come check bloccante nel POM: contatto senza cronologia → `skipped('no_existing_chat')`, il canale non crea conversazioni nuove.
+- Principio failure trasversale: distinguere "colpa contatto" (→ failed/DNC) da "colpa nostra/infra" (→ pausa+retry, contatti restano queued) — un selettore rotto non brucia una lista.
+
+**Prossimo passo:** review di Tommaso sull'SDD → risolvere le domande [T] bloccanti → spec/plan via workflow superpowers + skill `sviluppo-modulo`, partendo da **M0 (PoC gate)** su numero test.
+
+---
+
 ## [2026-07-23] Canale WhatsApp — brainstorming & design (fase pre-SDD)
 
 Avviato il design di un **secondo canale WhatsApp** (il progetto evolve in **piattaforma outreach multi-canale**, non più solo IG). Sessione di brainstorming (no codice). Deliverable in `docs/whatsapp/`: `00-problematiche-e-decisioni.md` (living doc: scopo, valutazione strade, P1-P11, PoC gate, log decisioni) + `sviluppi-futuri.md` (backlog fase 2+).

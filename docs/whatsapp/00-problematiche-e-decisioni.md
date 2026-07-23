@@ -1,8 +1,8 @@
 # Canale WhatsApp — Problematiche & Decisioni (living doc)
 
-> Stato: **DRAFT / brainstorming in corso** · Data: 2026-07-23 · Owner: Tommaso
+> Stato: **brainstorming CHIUSO** · Data: 2026-07-23 · Owner: Tommaso
 > Questo NON è l'SDD. È il registro vivo delle criticità e delle decisioni preso durante il brainstorming.
-> L'SDD (decine di pagine, con diagrammi/sequence/component/roadmap) verrà scritto a valle, in `docs/whatsapp/`, quando il brainstorming è chiuso.
+> ➡️ **SDD scritto: [`SDD-whatsapp-channel.md`](SDD-whatsapp-channel.md)** (18 sezioni, diagrammi/sequence/state, threat model, roadmap, 110 domande residue). Questo doc resta la fonte delle decisioni; l'SDD le traduce in specifica.
 
 ---
 
