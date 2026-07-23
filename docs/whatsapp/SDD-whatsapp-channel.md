@@ -1,6 +1,6 @@
 # SDD — Canale WhatsApp (BOT OUTBOUND → piattaforma outreach multi-canale)
 
-> Stato: **BOZZA v1 — in attesa di review di Tommaso** · Data: 2026-07-23 · Owner: Tommaso
+> Stato: **v1.1 — review Tommaso 23/07 APPLICATA** (guardia opt-out pre-invio, title-numero mai salvato, matching ambiguo→solo numero, kill-switch per-canale, 1 campagna per numero, UI a due temi) · Data: 2026-07-23 · Owner: Tommaso
 > Fonti: `00-problematiche-e-decisioni.md` (decisioni chiuse, brainstorming 23/07), `sviluppi-futuri.md` (backlog fase 2+), mappatura repo verificata sul codice.
 > Questo documento È l'SDD: descrive **cosa cambia** sulla piattaforma esistente per aggiungere il canale WhatsApp. Non è un design greenfield.
 > Dopo la review: spec/plan via workflow superpowers + skill `sviluppo-modulo` per l'MVP.
@@ -44,6 +44,7 @@ Il canale usa la **strada A**: automazione browser **Patchright** su **WhatsApp 
 - **Non è un motore di segmentazione.** Il targeting vive nel CRM del cliente: noi **ingeriamo una lista già filtrata** (CSV; API in fase 2). "Manda *questa* campagna a *questi* numeri."
 - **Non è un sistema nuovo.** È un canale su piattaforma esistente: ~50-60% del motore (browser stack, template, timing, worker, caps, AI) si riusa. L'SDD descrive il delta, non l'universo.
 - **Non usa API WhatsApp** (né ufficiale né librerie protocollo non ufficiali). Vedi §3 per il razionale.
+- **Non tocca gruppi né liste broadcast.** Solo chat 1-a-1 con contatti individuali. Un numero che risolve a un gruppo/broadcast è fuori perimetro (skip in apertura chat).
 
 ### 1.3 Obiettivi misurabili del canale (MVP)
 
@@ -179,7 +180,7 @@ Un **canale** = (identità contatto, trasporto invio, rilevamento risposte, rego
 - **Ingest** (confine dati in ingresso): CSV upload via API. Contratto: colonna `numero` obbligatoria; `nome` + N colonne libere opzionali, usabili come placeholder (`{nome}`, `{ultimo_ordine}`, …). In fase 2 lo stesso contratto viene esposto come endpoint API per CRM (F5) — l'MVP definisce già il contratto, il CSV è solo il primo adattatore.
 - **Invio / risposta come interfacce webhook-ready** (decisione 23/07): il sequence engine parla con l'esterno solo tramite eventi interni (`emit_event` su Redis, già esistente): `wa.message.sent`, `wa.reply.received`, `wa.optout`, `wa.step.advanced`, `wa.contact.dnc`. In fase 2 un bridge webhook pubblica questi eventi a n8n e accetta comandi di invio → il flow builder (F1) si innesta senza toccare il motore.
 - **Browser** (confine dati in uscita): unico punto dove il numero in chiaro tocca l'esterno (apertura chat + invio). Vedi §12 (P12).
-- **Kill-switch**: `bot_state.halted` esistente vale anche per il canale WA (i worker WA fanno lo stesso check interno dei worker IG).
+- **Kill-switch**: **separato per canale** (review 23/07). `bot_state.halted` esistente resta solo per IG; il canale WA ha un flag proprio `wa_halted` (stessa tabella `bot_state`, campo nuovo) con comandi admin dedicati. Un incidente WhatsApp non ferma Instagram in produzione, e viceversa. I worker WA fanno lo stesso check interno dei worker IG, ma sul flag proprio.
 
 ### 4.4 Cosa resta intenzionalmente fuori dall'MVP
 
@@ -262,7 +263,7 @@ Niente password: l'autenticazione è la sessione QR nel profilo browser. Il "log
 | `phone_hmac` | str | UNIQUE per tenant (`UNIQUE(tenant_id, phone_hmac)`) |
 | `encrypted_phone` | str | Fernet — decifrato SOLO da wa_sender al momento dell'apertura chat |
 | `display_name` | str nullable | da CSV (`nome`) |
-| `chat_title` | str nullable | titolo della chat come appare su WhatsApp Web (appreso al primo invio — serve al reply-watcher per il matching, vedi §7.3) |
+| `chat_title` | str nullable | titolo della chat su WhatsApp Web (appreso al primo invio — serve al reply-watcher, §7.3). **Salvato SOLO se è un nome**: se il titolo è un numero di telefono (contatto non in rubrica del cliente) resta NULL — il matching in quel caso usa già `phone_hmac`, e salvare il title metterebbe il numero in chiaro nel DB violando P12 (review 23/07) |
 | `attributes` | JSON | colonne libere del CSV (`{ultimo_ordine: "2026-01-10", …}`) — placeholder per i template |
 | `opted_out` | bool | STOP ricevuto → mai più contattabile (per-canale, per-tenant) |
 | `opted_out_at` | ts nullable | |
@@ -284,7 +285,7 @@ Due opzioni:
 | Colonna (`wa_campaigns`) | Tipo | Note |
 |---|---|---|
 | `id` | PK | |
-| `tenant_id` / `wa_number_id` | FK | un numero dedicato per campagna (decisione 23/07) |
+| `tenant_id` / `wa_number_id` | FK | un numero dedicato per campagna (decisione 23/07). **Max 1 campagna `running` per numero alla volta** (review 23/07): lo start valida che il numero non abbia altre campagne attive → il pacing resta per-job senza rischio di ritmo doppio sul numero |
 | `name` | str | |
 | `campaign_type` | enum | `marketing \| followup` — pilota l'obbligo opt-out (V10) |
 | `status` | enum | §8.1 |
@@ -375,7 +376,7 @@ Tabella operativa (raffina quella del living doc con i moduli target):
 | Sessioni/finestre orarie/break | `services/human_behavior.py` | pacing invii per numero |
 | Retry + backoff | `utils/retry.py` | |
 | Classificazione errori DB transitori | `utils/db_resilience.py` | stessi `Retry(defer)` sui blip Supabase |
-| Kill-switch globale | `models/bot_state.py`, `services/bot_state_service.py` | check interno nei worker WA |
+| Kill-switch (pattern) | `models/bot_state.py`, `services/bot_state_service.py` | campo nuovo `wa_halted` nella stessa tabella — kill-switch **per-canale** (review 23/07); check interno nei worker WA sul flag proprio |
 | Eventi live-log | `utils/events.py` | namespace eventi `wa.*` |
 | Notifiche Telegram admin | `services/notifier.py` | alert operativi a Tommaso (QR scaduto, selettori rotti, stop campagna). NB: notifiche *admin*, non notifiche-risposte al cliente (escluse da decisione) |
 | Crypto Fernet | `utils/crypto.py` | `encrypted_phone` |
@@ -406,7 +407,7 @@ Tabella operativa (raffina quella del living doc con i moduli target):
 | Pseudonymizer | `utils/phone_pseudonym.py` | `hmac_phone(e164) -> str` + helper masking log (`+39•••••077`) | P12 |
 | Session/QR flow | `services/wa_session.py` + endpoint admin | health-check sessione, stato `qr_required`, pagina admin che mostra il QR al cliente (screenshot/stream), conferma link | `manual_login.py` (login browser assistito IG) |
 | API REST | `api/wa_campaigns.py`, `api/wa_numbers.py`, `api/wa_contacts.py`, `api/tenants.py` | CRUD + start/pause/stop + ingest + KPI | `api/campaigns.py` |
-| Frontend | `frontend/src/app/wa/…` | pagine campagne WA, numeri, ingest, KPI | pagine campaigns esistenti |
+| Frontend | `frontend/src/app/wa/…` | **Mondo WA separato** (review 23/07): stessa shell e stesso login, **picker canale post-login** (scegli Instagram o WhatsApp), poi interfaccia WA costruita da zero con **tema dedicato verde WhatsApp scuro** (proposta #128C7E) mentre IG si sposta verso magenta/rosa brand IG — il colore dice a colpo d'occhio "dove sono". Nessuna vista mista: i due mondi non condividono pagine né dati. Pagine WA: campagne, numeri, ingest, KPI | pagine campaigns esistenti (solo come pattern) |
 
 ---
 
@@ -466,7 +467,12 @@ cron/API      wa_sequence_engine     ARQ        wa_sender      WhatsAppWebPage  
    │                  │               │             │                │  se nessuna    │
    │                  │               │             │                │  cronologia →  │
    │                  │               │             │                │  SKIP, no invio)│
+   │                  │               │             │                ├─ GUARDIA pre-invio:
+   │                  │               │             │                │  leggi inbound dopo
+   │                  │               │             │                │  ultimo msg bot →
+   │                  │               │             │                │  STOP? risposta?
    │                  │               │             │                ├─ salva chat_title
+   │                  │               │             │                │  (solo se ≠ numero)
    │                  │               │             │                ├─ typing umano  │
    │                  │               │             │                │  (human_input, │
    │                  │               │             │                │  Shift+Enter)  ├─►
@@ -483,6 +489,7 @@ cron/API      wa_sequence_engine     ARQ        wa_sender      WhatsAppWebPage  
 ```
 
 Punti fermi:
+- **Guardia opt-out/reply pre-invio (review 23/07) — la garanzia strutturale del canale.** A chat aperta, PRIMA del typing, il POM legge gli inbound successivi all'ultimo messaggio del bot (`wa_messages.sent_at` noto → il bot riconosce il proprio ultimo messaggio e legge da lì in giù). Budget fisso: messaggi già renderizzati all'apertura (~20-30) + max 1-2 scroll — costo stimato 1-2s per invio, **misura esplicita in PoC-2** (se molto più caro, rivedere strategia). Esiti: (a) STOP-like trovato → opt-out, salva il messaggio come prova (audit legale), niente invio; (b) risposta trovata → rivaluta la condizione dello step (un `if_no_reply` non parte, contatto → `replied`); (c) cronologia intermedia più lunga del budget → rinvio conservativo dello step (conversazione evidentemente attiva, il bot non si intromette). Con questa guardia uno STOP non è mai scavalcabile, anche tra campagne distanti mesi e anche se lo scan lista (§7.3) lo ha perso — lo scan resta solo come rete veloce durante le campagne attive.
 - **Guardia "chat esistente" (V2):** se all'apertura la chat non ha cronologia (contatto mai sentito), il contatto va in `skipped` con motivo `no_existing_chat` — il canale non crea conversazioni nuove. Questo è un check bloccante nel POM, non una convenzione.
 - **Cap in AND**: cap numero (warmup/daily) ∧ cap campagna ∧ finestra oraria ∧ kill-switch. Tutti con query live, non contatori stale (lezione IG).
 - **Worker short-lived**: mai sleep lunghi in-job; sessione finita → `Retry(defer)`; micro-yield se la sessione è lunga (lezione `job_timeout` della Fase Bio).
@@ -525,8 +532,10 @@ cron wa_reply_scan     wa_reply_watcher       WhatsAppWebPage         DB
 ```
 
 Limiti accettati in MVP (espliciti):
-- La preview è troncata e mostra solo l'**ultimo** messaggio: se il contatto scrive 3 messaggi, vediamo l'ultimo. Per branching sì/no e opt-out basta. (Se "STOP" è seguito da altro messaggio prima dello scan → possibile miss: mitigazione = scan frequente + fallback umano; domanda Q58.)
-- Se l'**umano legge la chat dal telefono prima dello scan**, il badge unread sparisce → la risposta può sfuggire al watcher. Mitigazioni possibili (da PoC-3): confronto `preview/ts` dell'ultima riga anche senza badge, direzione del messaggio se il DOM la espone. Rischio residuo documentato; il branching `if_no_reply` degrada in modo conservativo (manda un follow-up a chi aveva risposto = fastidio, non disastro; frequency cap lo limita).
+- La preview è troncata e mostra solo l'**ultimo** messaggio: se il contatto scrive 3 messaggi, vediamo l'ultimo. Per branching sì/no basta. "STOP" seguito da altro messaggio prima dello scan → miss dello scan **senza rischio sostanziale**: la guardia pre-invio (§7.2) lo intercetta comunque prima di qualsiasi invio successivo (Q58).
+- Se l'**umano legge la chat dal telefono prima dello scan**, il badge unread sparisce → la risposta può sfuggire al watcher. Mitigazioni possibili (da PoC-3): confronto `preview/ts` dell'ultima riga anche senza badge, direzione del messaggio se il DOM la espone. Rischio residuo limitato: la guardia pre-invio (§7.2) ristabilisce la verità all'apertura della chat per lo step successivo — un `if_no_reply` non parte mai contro un contatto che ha risposto.
+- **Title ambiguo (review 23/07):** se ≥2 contatti del tenant condividono lo stesso `chat_title` (omonimi in rubrica), il matching per title è disabilitato per quel title — si matcha solo se il title è parsabile come numero (→ hmac); altrimenti evento non associato + alert admin. **Mai indovinare**: un `replied`/opt-out applicato al contatto sbagliato è peggio di un miss (il vero contatto continuerebbe a ricevere marketing).
+- Dedup eventi su (title, ts, preview): il timestamp della lista ha granularità al minuto e la preview è troncata → due inbound quasi identici nello stesso minuto possono collassare in un evento. Accettato in MVP (irrilevante per branching/opt-out).
 - Risposte arrivate **fuori finestra di scan** vengono viste allo scan successivo: il branching è per definizione asincrono (granularità `wait_days`, non minuti) → nessun requisito realtime.
 
 ### 7.4 Branching sequenza (tick)
@@ -569,6 +578,7 @@ Nota semantica (da confermare, Q29): default MVP = **una risposta qualsiasi ferm
 4. Evento `wa.optout` + contatore campagna.
 5. Ingest futuri: il contatto è escluso e riportato (7.1). Nessuna riattivazione automatica; riattivazione solo manuale admin con motivazione (caso: falso positivo).
 6. Falso positivo ("non mi stoppare ahah"): accettato in MVP — meglio un opt-out di troppo che uno mancato. L'admin può riattivare a mano.
+7. **Garanzia strutturale (review 23/07):** anche se lo scan perde lo STOP (preview troncata, umano ha già letto, campagna finita da mesi), la guardia pre-invio (§7.2) lo intercetta leggendo gli inbound dopo l'ultimo messaggio del bot, direttamente dalla chat aperta, prima di ogni invio futuro. Lo STOP non è mai scavalcabile. Il messaggio di STOP trovato si salva (testo+data) come prova dell'opposizione.
 
 ### 7.6 Sessione / QR (onboarding numero e recovery)
 
@@ -801,7 +811,7 @@ Ordine sequenziale: ogni PoC sblocca il successivo. Il fallimento non recuperabi
 | PoC | Cosa prova | Setup | Criteri GO (misurabili) | Criteri NO-GO |
 |---|---|---|---|---|
 | **PoC-1 — Sessione persistente** | Login QR una volta → sessione dura su profilo Chromium persistente; riavvii PC/browser inclusi | Numero di test (SIM dedicata di Tommaso, NON un numero cliente), profilo Patchright, proxy mobile | Sessione viva ≥ **14 giorni** con uso quotidiano; sopravvive a ≥ 5 riavvii browser e ≥ 2 riavvii PC; nessun re-scan richiesto | Re-scan richiesto > 1 volta/settimana senza causa identificabile |
-| **PoC-2 — Invio in chat esistente** | Aprire chat per numero (search interna e/o deep-link `web.whatsapp.com/send?phone=`) e inviare, indipendente dall'ordine lista | chat pre-esistenti col numero test | 50/50 invii riusciti su chat esistenti diverse; metodo di apertura deterministico scelto; segnale affidabile per "chat inesistente" e "chat senza cronologia" (guardia V2); check spunta post-invio caratterizzato | apertura per numero non affidabile (< 90%) o indistinguibile fallimento/successo |
+| **PoC-2 — Invio in chat esistente** | Aprire chat per numero (search interna e/o deep-link `web.whatsapp.com/send?phone=`) e inviare, indipendente dall'ordine lista | chat pre-esistenti col numero test | 50/50 invii riusciti su chat esistenti diverse; metodo di apertura deterministico scelto; segnale affidabile per "chat inesistente" e "chat senza cronologia" (guardia V2); check spunta post-invio caratterizzato; **guardia pre-invio: lettura inbound dalla chat aperta fattibile e misurata (target ≤ 2s/invio — se molto più cara, rivedere la strategia opt-out)** | apertura per numero non affidabile (< 90%) o indistinguibile fallimento/successo |
 | **PoC-3 — Lettura risposte da DOM** | Rilevare inbound **dalla sola lista chat** (unread badge + preview + title), associare al contatto, senza aprire chat | scenari: contatto salvato in rubrica (title=nome) e non salvato (title=numero); risposta letta prima dall'umano | 20/20 risposte rilevate entro 1 ciclo di scan; matching corretto nei 2 scenari; comportamento documentato nel caso "umano ha già letto" | il DOM non espone abbastanza per il matching o lo scan richiede di aprire le chat |
 | **PoC-4 — Coesistenza** | Bot invia mentre l'umano usa app dal telefono; umano scrive nella chat che il bot sta per toccare | 2 persone: una fa l'umano-business | nessun doppio messaggio; check C4 funziona; nessuna anomalia visibile lato telefono (sessione non buttata fuori) | interferenze sistematiche o logout del telefono |
 | **PoC-5 — Volume/stress** | Ritmo da produzione per giorni | 100-200 msg/giorno × ≥ 5 giorni sul numero test, timing §10.3 | zero warning/limitazioni WhatsApp; sessione stabile; error rate invii < 5%; CPU/RAM per sessione misurate (→ verifica A5) | warning WhatsApp o instabilità sistematica |
@@ -849,6 +859,8 @@ Dipendenze esterne alla roadmap: parere legale GDPR (12.1) — necessario prima 
 
 Dashboard: card KPI per campagna + contatori denormalizzati (pattern IG). Analytics ricche = F6.
 
+Nota: risposte arrivate **dopo** la chiusura della campagna possono sfuggire allo scan (gira solo su campagne attive) → il tasso risposta è una stima per difetto; la guardia pre-invio le recupera comunque al contatto successivo (stato del contatto corretto, KPI storico della campagna no). Accettato in MVP.
+
 ### 15.2 Definition of Done MVP — decisione 4.3
 
 Software pronto a lanciare una **campagna vera end-to-end**: ingest CSV reale → sequenza 3-step con branching → invii con pacing anti-ban → risposte rilevate → opt-out onorato → KPI corretti. Tutte le logiche testate + **QA adversarial come da skill `sviluppo-modulo`** (QA agent che prova fisicamente, lista funzionale + lista adversarial dove PASS = il sistema si difende, fix loop al 100%), collaudo finale di Tommaso. **Primo banco di prova: Primero.**
@@ -870,6 +882,7 @@ Debiti/refactor consapevoli creati o rimandati da questo design (distinti dal ba
 | BT7 | Retention/purge automatica `wa_inbound_events.preview_text` e `rendered_text` | serve decisione retention (Q92) | esito valutazione legale |
 | BT8 | Cifratura disco / hardening macchina sessioni (T9) | decisione infra di Tommaso | prima del multi-cliente reale |
 | BT9 | Naming piattaforma (il progetto non è più solo "BOT OUTBOUND") | puro branding, zero urgenza tecnica | quando serve presentarla ai clienti |
+| BT10 | Vista fatturazione per-tenant (aggregato `sent` mensile, per fattura a consuntivo) | KPI MVP sono per-campagna; l'aggregato si deriva a mano da query | prima fattura reale |
 
 ---
 
@@ -880,7 +893,7 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 ### A. Prodotto e cliente
 
 1. [T] Il cliente fornisce sempre WhatsApp **Business** (app), o dobbiamo supportare anche WhatsApp consumer? (Linked device e limiti potrebbero differire.)
-2. [T] Una campagna per numero alla volta, o più campagne concorrenti sullo stesso numero? (MVP assume: più campagne possibili ma cap numero condiviso — confermare.)
+2. **DECISA (review 23/07):** max 1 campagna `running` per numero alla volta; per lanciarne un'altra sullo stesso numero si attende o si pausa la prima. (Il pacing per-numero cross-campagna diventa non necessario; eventuale concorrenza multi-campagna = fase 2 con `last_sent_at` per numero.)
 3. [T] Il report "non-raggiungibili/catalogati" al cliente: formato? (CSV export? vista dashboard? per l'MVP basta la vista?)
 4. [T] Chi scrive i testi delle campagne MVP: il cliente, Tommaso, o insieme? (Impatta T6 e il contratto.)
 5. [T] La CTA opt-out standard va bene fissa per tenant o serve per-campagna?
@@ -909,7 +922,7 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 
 ### C. Sequenze e branching
 
-25. [T] **D2 (§5.2): confermare D2b** (tabella `wa_campaigns` dedicata, UI unificata logicamente) vs D2a (riga in `campaigns`).
+25. **DECISA (review 23/07): D2b** — mondi completamente separati: tabelle dedicate, kill-switch per-canale, UI a due temi nella stessa shell (picker post-login). I due canali non comunicano.
 26. [T] Numero massimo step per sequenza in MVP? (Proposta: 5.)
 27. [T] `wait_days` minimo consentito? (Proposta: 1 giorno — niente step a distanza di ore in MVP, riduce rischi T1.)
 28. [S] Modifica sequenza a campagna `running`: consentita? (Proposta: solo per step non ancora raggiunti da nessun contatto; altrimenti pausa-modifica-riprendi.)

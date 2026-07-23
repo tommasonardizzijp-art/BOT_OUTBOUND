@@ -188,6 +188,15 @@ Motivazioni:
 - 2026-07-23 — KPI MVP: inviati/risposti/opt-out/falliti (+derivati). DoD = campagna reale + QA adversarial. Primo target Primero.
 - 2026-07-23 — Falliti/non-raggiungibili → "non contattare" + catalogazione (perimetro MVP).
 
+### Review SDD (23/07, sessione serale)
+
+- **Opt-out garantito dalla guardia pre-invio**: a chat aperta, prima del typing, il bot legge gli inbound successivi al proprio ultimo messaggio (budget fisso: visibili + 1-2 scroll; costo target ≤2s, misura in PoC-2). STOP mai scavalcabile anche tra campagne distanti; lo scan lista resta solo come rete veloce durante campagne attive. Se il costo reale sfora → rivedere strategia.
+- **Kill-switch separato per canale** (`wa_halted`): incidente WA non ferma IG e viceversa.
+- **Max 1 campagna `running` per numero** → problema pacing cross-campagna eliminato alla radice.
+- **UI: mondi separati, stessa shell** — stesso login, picker canale post-login; tema WA verde scuro (~#128C7E), IG spostato verso magenta/rosa. DB logicamente disgiunti (D2b confermato, i canali non comunicano).
+- **`chat_title` salvato solo se è un nome** (mai numero in chiaro → P12); matching con title ambiguo (omonimi) → solo via numero, altrimenti evento non associato + alert. Mai indovinare.
+- Non-goal espliciti aggiunti: no gruppi, no liste broadcast.
+
 ---
 
 ## 13. Prossimo passo
