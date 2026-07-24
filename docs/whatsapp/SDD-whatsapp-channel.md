@@ -1,9 +1,11 @@
 # SDD — Canale WhatsApp (BOT OUTBOUND → piattaforma outreach multi-canale)
 
-> Stato: **v1.1 — review Tommaso 23/07 APPLICATA** (guardia opt-out pre-invio, title-numero mai salvato, matching ambiguo→solo numero, kill-switch per-canale, 1 campagna per numero, UI a due temi) · Data: 2026-07-23 · Owner: Tommaso
+> Stato: **v1.2 — [T] bloccanti sciolte (24/07)** · Data: 2026-07-24 · Owner: Tommaso
+> v1.2 (24/07): scope MVP = **campagne a 1 messaggio** (schema sequenze completo, motore multi-step post-MVP); numero di test = **secondario Primero WhatsApp Business** con vincolo "solo messaggi reali"; **PoC-5 volume spostato a rampa M5**; PoC-2 riscalato su chat controllate; solo testo, solo italiano; testi scritti da Tommaso; PC attuale per M0-M3.
+> v1.1 (23/07): review Tommaso applicata (guardia opt-out pre-invio, title-numero mai salvato, matching ambiguo→solo numero, kill-switch per-canale, 1 campagna per numero, UI a due temi).
 > Fonti: `00-problematiche-e-decisioni.md` (decisioni chiuse, brainstorming 23/07), `sviluppi-futuri.md` (backlog fase 2+), mappatura repo verificata sul codice.
 > Questo documento È l'SDD: descrive **cosa cambia** sulla piattaforma esistente per aggiungere il canale WhatsApp. Non è un design greenfield.
-> Dopo la review: spec/plan via workflow superpowers + skill `sviluppo-modulo` per l'MVP.
+> Prossimo passo: spec/plan di **M0 (PoC gate)** — script usa-e-getta, non codice di produzione.
 
 ---
 
@@ -106,9 +108,9 @@ Il canale usa la **strada A**: automazione browser **Patchright** su **WhatsApp 
 | A1 | La sessione WhatsApp Web su profilo Chromium persistente sopravvive giorni/settimane senza re-scan QR. | Ops onerosa: il cliente deve riscansionare spesso. | PoC-1 |
 | A2 | Si può aprire una chat esistente **per numero** in modo deterministico (search interna o deep-link), senza dipendere dall'ordine della lista chat. | L'invio diventa fragile. | PoC-2 |
 | A3 | La lista chat espone abbastanza informazione (titolo, badge unread, preview testo) per rilevare risposte **senza aprire la chat**. | Il reply-watcher marcherebbe "letto" → interferenza con l'umano. | PoC-3 |
-| A4 | Il DOM di WhatsApp Web è abbastanza stabile da reggere settimane con selettori robusti. | Manutenzione continua dei selettori. | PoC-3/5 + monitor |
-| A5 | Un PC 16-32GB regge ~10 sessioni Chromium persistenti simultanee. | Serve seconda macchina / scaglionamento. | Test infra (M0) |
-| A6 | Volumi "qualche centinaio msg/giorno per numero" a contatti caldi non triggherano ban con timing umano. | Ridurre caps, rivedere pacing. | PoC-5 |
+| A4 | Il DOM di WhatsApp Web è abbastanza stabile da reggere settimane con selettori robusti. | Manutenzione continua dei selettori. | PoC-1/3 (14 giorni) + monitor |
+| A5 | Un PC 16-32GB regge ~10 sessioni Chromium persistenti simultanee. | Serve seconda macchina / scaglionamento. | PoC-1 (campionamento RAM/CPU); M0-M3 girano sul PC attuale 7,4 GB (Q97) |
+| A6 | Volumi "qualche centinaio msg/giorno per numero" a contatti caldi non triggherano ban con timing umano. | Ridurre caps, rivedere pacing. | **Rampa M5** (ex PoC-5, spostato 24/07): resta non verificata fino al collaudo — rischio accettato, §13 |
 | A7 | WhatsApp Business (app) consente il numero di linked device necessario (≥1 slot libero per il bot). | Conflitto col WhatsApp Web che il cliente già usa. | PoC-1 + check per-cliente |
 | A8 | Il cliente accetta il modello "sessione scade → riscansiona QR" (a suo carico, guidato). | Serve remote-QR flow più sofisticato. | Contratto/onboarding |
 
@@ -308,7 +310,9 @@ Due opzioni:
 | `send_condition` | enum | `always` (step 0) \| `if_no_reply` \| `if_replied` |
 | `wait_days` | int | attesa dallo step precedente prima di valutare la condizione |
 
-MVP: set minimo di operatori = esattamente questi tre (`always`, `if_no_reply`, `if_replied`) + `wait_days`. Niente rami annidati, niente condizioni su contenuto risposta (fuori: F1/F3). La struttura a step lineari con condizione è volutamente un sottoinsieme serializzabile di un flow n8n → migrabile a F1 senza conversione dati distruttiva.
+Set minimo di operatori = esattamente questi tre (`always`, `if_no_reply`, `if_replied`) + `wait_days`. Niente rami annidati, niente condizioni su contenuto risposta (fuori: F1/F3). La struttura a step lineari con condizione è volutamente un sottoinsieme serializzabile di un flow n8n → migrabile a F1 senza conversione dati distruttiva.
+
+**Scope MVP (deciso 24/07, Q29):** lo **schema qui sopra si crea per intero in M1**, ma l'MVP **usa un solo step per campagna** (`step_order=0`, `condition='always'`, `wait_days` ignorato) e la UI non espone la costruzione di sequenze multi-step. Il motore multi-step (tick di 7.4) si accende post-MVP **senza migrazione né riscrittura dati**. Motivo: le campagne reali di partenza sono single-shot; costruire branching non ancora venduto allunga M4 e sposta il collaudo.
 
 #### `wa_campaign_contacts` (nuova — stato per contatto × campagna)
 
@@ -568,7 +572,11 @@ Limiti accettati in MVP (espliciti):
         campagna) → rinvia (next_action_at += 1 giorno), non salta
 ```
 
-Nota semantica (da confermare, Q29): default MVP = **una risposta qualsiasi ferma la sequenza** (`replied` è terminale salvo step espliciti `if_replied`). È il comportamento sicuro: chi risponde entra in conversazione umana (umano-prima), il marketing automatico si toglie di mezzo.
+**Semantica DECISA (24/07, Q29):** una risposta qualsiasi ferma la sequenza (`replied` è terminale salvo step espliciti `if_replied`). Chi risponde entra in conversazione umana (umano-prima), il marketing automatico si toglie di mezzo.
+
+**Scope MVP DECISO (24/07, Q29):** le campagne MVP sono a **un solo messaggio** (step 0, nessun `wait_days`, nessun branching da configurare in UI). Lo **schema dati resta completo** (`wa_sequence_steps` con `condition` e `wait_days`, §5): il motore multi-step si accende post-MVP **senza migrazione**. Quindi in M4 si implementa: invio dello step 0, rilevamento risposta → `replied` (terminale), opt-out. Il tick del branching (7.4) è progettato qui ma **non costruito** nell'MVP.
+
+**Opt-out DECISO (24/07):** lo STOP marca il contatto in DB con un tag permanente per-tenant (`opted_out` + `do_not_contact`): **non viene più ricontattato da nessuna campagna** di quel tenant, in nessun canale WA. Dettaglio in 7.5.
 
 ### 7.5 Opt-out (dettaglio)
 
@@ -715,7 +723,7 @@ I contatti sono caldi: chat esistenti, relazione reale col business. I vettori d
 | # | Minaccia | Vettore | Mitigazioni | Residuo |
 |---|---|---|---|---|
 | T1 | **Segnalazioni/blocchi utente** ("marketing fatigue") → WhatsApp banna il numero su segnali spam aggregati | Promo ripetute, troppo frequenti, impersonali | Frequency cap cross-campagna per contatto; cap giornaliero basso per numero (warmup); spintax A/B/C/D (testi mai identici); placeholder personalizzazione; opt-out CTA visibile (chi può uscire non segnala); qualità contenuto = responsabilità condivisa col cliente (da contratto) | Medio-basso. KPI opt-out/blocchi monitorati per campagna; soglia di allarme → pausa |
-| T2 | **Detection automazione client-side** (WhatsApp Web rileva pattern non umani) | Typing/click meccanici, ritmi costanti, sessione browser anomala | Patchright (no webdriver flags) + fingerprint per-profilo + profilo Chromium persistente (mai incognito); typing lognormale con typo e pause (human_input); delay lognormali tra invii; sessioni corte con break (human_behavior); finestra oraria; scroll/idle naturali tra le azioni | Basso-medio. PoC-5 misura; nessuna garanzia formale |
+| T2 | **Detection automazione client-side** (WhatsApp Web rileva pattern non umani) | Typing/click meccanici, ritmi costanti, sessione browser anomala | Patchright (no webdriver flags) + fingerprint per-profilo + profilo Chromium persistente (mai incognito); typing lognormale con typo e pause (human_input); delay lognormali tra invii; sessioni corte con break (human_behavior); finestra oraria; scroll/idle naturali tra le azioni | Basso-medio. La rampa M5 misura (ex PoC-5); nessuna garanzia formale prima del collaudo |
 | T3 | **Correlazione multi-numero** (stesso IP/fingerprint per tenant diversi) | Datacenter IP, numeri N su 1 IP | Proxy mobili 4G (tether USB + EveryProxy); **1 IP ↔ max 2 numeri, stessa azienda** (V9); fingerprint browser distinto per numero | Basso |
 | T4 | **Linked-device hygiene** (sessione bot vista come dispositivo sospetto) | Login/logout frequenti, IP ballerino sulla stessa sessione | Sessione stabile su profilo persistente; proxy fisso per numero; niente re-login se non necessario | Basso; PoC-1 osserva |
 | T5 | **Volume burst** | Coda che scarica 200 msg appena parte la finestra oraria | Pacing: delay lognormale per-messaggio + cap sessione + stagger tra numeri (riuso stagger IG) | Basso |
@@ -724,7 +732,7 @@ I contatti sono caldi: chat esistenti, relazione reale col business. I vettori d
 | T8 | **Accesso non autorizzato alla dashboard** | Dashboard esposta, multi-tenant | Auth esistente (`api/auth.py`, `utils/auth_deps.py`); MVP solo admin; scoping tenant su ogni query WA fin dal giorno 1 (anche se l'unico utente è Tommaso) | Basso |
 | T9 | **Il PC di casa è un single point of failure + contiene sessioni di numeri altrui** | Furto/compromissione macchina | Disco/profili su macchina dedicata; secrets in `.env` fuori repo; valutare cifratura disco (Q99) | Da decidere |
 
-### 10.3 Parametri anti-ban iniziali (proposta, da tarare in PoC-5)
+### 10.3 Parametri anti-ban iniziali (proposta, da tarare sulla rampa M5 — ex PoC-5)
 
 | Parametro | Valore iniziale | Note |
 |---|---|---|
@@ -808,13 +816,26 @@ Il numero di telefono in chiaro esiste solo ai **due confini**:
 
 Ordine sequenziale: ogni PoC sblocca il successivo. Il fallimento non recuperabile di PoC-1/2/3 rimette in discussione la strada A (→ riconsiderare B, con occhi aperti).
 
+**Setup DECISO (24/07):**
+
+| Voce | Decisione | Q |
+|---|---|---|
+| Numero di test | **Numero secondario di Primero** (non il numero operativo principale), **WhatsApp Business**, 30-100 chat pre-esistenti reali | Q60, Q1, Q105 |
+| Vincolo sui messaggi | **Solo messaggi reali, mai messaggi di test**, per non bruciare i contatti del cliente. Conseguenza: **PoC-2 invia solo a chat controllate** (numeri di Tommaso/conoscenti già in rubrica sul secondario), mai a clienti Primero | Q60 |
+| Macchina | **PC attuale di Tommaso** per M0-M3 (7,4 GB: 1-2 sessioni bastano). PoC-1 richiede che resti acceso/collegato per la durata della prova | Q97 |
+| Umano di test PoC-4 | **Tommaso** col telefono del numero secondario + un secondo dispositivo/numero suo come contatto | Q104 |
+| Lingua | italiano | Q6 |
+| Media | fuori perimetro: solo testo | Q71 |
+
+**PoC-5 (volume) è uscito da M0 (24/07).** Con pochi contatti e il vincolo "solo messaggi reali", 100-200 msg/giorno × 5 giorni non è eseguibile onestamente: mandare 500-1000 messaggi finti brucerebbe i contatti, mandarli a 10 numeri controllati non replica il pattern "blast a lista" e proverebbe poco. La validazione volume/anti-ban si sposta a **M5, come rampa sulla prima campagna vera** (10 → 30 → 60 → 100 msg/giorno, stop al primo warning). **Rischio accettato consapevolmente:** l'assunzione A6 resta non verificata fino a M5, e il primo a incassare un'eventuale limitazione è il numero del cliente. Mitigazione: rampa lenta, cap prudente, monitor early-warning (Q64) attivo dal primo giorno.
+
 | PoC | Cosa prova | Setup | Criteri GO (misurabili) | Criteri NO-GO |
 |---|---|---|---|---|
-| **PoC-1 — Sessione persistente** | Login QR una volta → sessione dura su profilo Chromium persistente; riavvii PC/browser inclusi | Numero di test (SIM dedicata di Tommaso, NON un numero cliente), profilo Patchright, proxy mobile | Sessione viva ≥ **14 giorni** con uso quotidiano; sopravvive a ≥ 5 riavvii browser e ≥ 2 riavvii PC; nessun re-scan richiesto | Re-scan richiesto > 1 volta/settimana senza causa identificabile |
-| **PoC-2 — Invio in chat esistente** | Aprire chat per numero (search interna e/o deep-link `web.whatsapp.com/send?phone=`) e inviare, indipendente dall'ordine lista | chat pre-esistenti col numero test | 50/50 invii riusciti su chat esistenti diverse; metodo di apertura deterministico scelto; segnale affidabile per "chat inesistente" e "chat senza cronologia" (guardia V2); check spunta post-invio caratterizzato; **guardia pre-invio: lettura inbound dalla chat aperta fattibile e misurata (target ≤ 2s/invio — se molto più cara, rivedere la strategia opt-out)** | apertura per numero non affidabile (< 90%) o indistinguibile fallimento/successo |
-| **PoC-3 — Lettura risposte da DOM** | Rilevare inbound **dalla sola lista chat** (unread badge + preview + title), associare al contatto, senza aprire chat | scenari: contatto salvato in rubrica (title=nome) e non salvato (title=numero); risposta letta prima dall'umano | 20/20 risposte rilevate entro 1 ciclo di scan; matching corretto nei 2 scenari; comportamento documentato nel caso "umano ha già letto" | il DOM non espone abbastanza per il matching o lo scan richiede di aprire le chat |
-| **PoC-4 — Coesistenza** | Bot invia mentre l'umano usa app dal telefono; umano scrive nella chat che il bot sta per toccare | 2 persone: una fa l'umano-business | nessun doppio messaggio; check C4 funziona; nessuna anomalia visibile lato telefono (sessione non buttata fuori) | interferenze sistematiche o logout del telefono |
-| **PoC-5 — Volume/stress** | Ritmo da produzione per giorni | 100-200 msg/giorno × ≥ 5 giorni sul numero test, timing §10.3 | zero warning/limitazioni WhatsApp; sessione stabile; error rate invii < 5%; CPU/RAM per sessione misurate (→ verifica A5) | warning WhatsApp o instabilità sistematica |
+| **PoC-1 — Sessione persistente** | Login QR una volta → sessione dura su profilo Chromium persistente; riavvii PC/browser inclusi | Numero secondario Primero (WhatsApp Business), profilo Patchright, proxy mobile, PC di Tommaso acceso | Sessione viva ≥ **14 giorni** con uso quotidiano; sopravvive a ≥ 5 riavvii browser e ≥ 2 riavvii PC; nessun re-scan richiesto; **RAM/CPU della sessione campionate per tutta la durata** (verifica A5, ex PoC-5) | Re-scan richiesto > 1 volta/settimana senza causa identificabile |
+| **PoC-2 — Invio in chat esistente** | Aprire chat per numero (search interna e/o deep-link `web.whatsapp.com/send?phone=`) e inviare, indipendente dall'ordine lista | **solo chat controllate** (numeri di Tommaso/conoscenti già in rubrica del secondario, ≥ 6 chat distinte), messaggi reali | **20/20 invii riusciti su ≥ 6 chat controllate distinte**, ripetuti su chat in posizioni diverse della lista (in cima / in fondo / raggiungibili solo via search); metodo di apertura deterministico scelto; segnale affidabile per "chat inesistente" e "chat senza cronologia" (guardia V2); check spunta post-invio caratterizzato; **guardia pre-invio: lettura inbound dalla chat aperta fattibile e misurata (target ≤ 2s/invio — se molto più cara, rivedere la strategia opt-out)** | apertura per numero non affidabile (< 90%) o indistinguibile fallimento/successo |
+| **PoC-3 — Lettura risposte da DOM** | Rilevare inbound **dalla sola lista chat** (unread badge + preview + title), associare al contatto, senza aprire chat | risposte delle chat controllate (PoC-2) **+ inbound reali spontanei** dei clienti Primero sul secondario (osservazione passiva, nessun invio); scenari: contatto salvato in rubrica (title=nome) e non salvato (title=numero); risposta letta prima dall'umano | 20/20 inbound rilevati entro 1 ciclo di scan (di cui ≥ 5 spontanei reali); matching corretto nei 2 scenari; comportamento documentato nel caso "umano ha già letto"; **nessuna chat marcata come letta dal watcher** (verifica dal telefono) | il DOM non espone abbastanza per il matching o lo scan richiede di aprire le chat |
+| **PoC-4 — Coesistenza** | Bot invia mentre l'umano usa app dal telefono; umano scrive nella chat che il bot sta per toccare | Tommaso col telefono del secondario (fa l'umano-business) + un suo secondo numero/dispositivo come contatto | nessun doppio messaggio; check C4 funziona; nessuna anomalia visibile lato telefono (sessione non buttata fuori); comportamento con away-message Business documentato (Q78) | interferenze sistematiche o logout del telefono |
+| ~~PoC-5 — Volume/stress~~ | **Spostato fuori da M0 (24/07)** → rampa su campagna vera in M5, vedi nota sopra | — | — | — |
 
 Output dei PoC: `docs/whatsapp/poc-report.md` con esiti, selettori catalogati, segnali di errore censiti (base per il POM definitivo).
 
@@ -833,12 +854,12 @@ Percorso: PoC → fondamenta → MVP → collaudo. Ogni milestone di codice segu
 
 | Milestone | Contenuto | Include | Gate di uscita |
 |---|---|---|---|
-| **M0 — PoC gate** | PoC-1..5 su numero test; catalogazione selettori/segnali; misura RAM per sessione | script PoC usa-e-getta (non codice prodotto) | tutti GO (§13); report scritto |
+| **M0 — PoC gate** | **PoC-1..4** sul numero secondario Primero (PoC-5 spostato a M5); catalogazione selettori/segnali; misura RAM per sessione | script PoC usa-e-getta (non codice prodotto) | PoC-1..4 tutti GO (§13); report scritto |
 | **M1 — Fondamenta** | migrazioni (tenants, wa_*), `phone_pseudonym`, `WhatsAppWebPage` v1 (sessione, apertura chat, invio), `human_input` estratto da `instagram_page`, `wa_session` + flusso QR admin | refactor estrazione human_input con test di non-regressione IG | POM supera test manuali su numero test; canale IG regredito zero |
 | **M2 — Ingest + campagne** | `wa_ingest` CSV + report scarti, CRUD campagne/sequenze/numeri, frontend admin base | contratto ingest documentato (futuro F5) | campagna definibile end-to-end da UI, contatti caricati e dedupati |
 | **M3 — Invio** | `wa_sender` + `wa_worker` (mini-sessioni, claim, caps, defer), `wa_number_manager` (warmup/cap date-aware), pacing, kill-switch, eventi | guardia V2, check C4, failure FM1-FM7 | campagna 1-step gira su numero test con cap basso; KPI inviati/falliti corretti |
-| **M4 — Reply, branching, opt-out** | `wa_reply_watcher` + cron, matching contatto, `wa_sequence_engine` completo (tick, condizioni, wait_days), opt-out end-to-end, DNC/catalogazione non-raggiungibili | eventi webhook-ready (`wa.*`) | sequenza 3-step con branching reale verificata su numero test; STOP funziona |
-| **M5 — QA + collaudo Primero** | QA adversarial (skill `sviluppo-modulo`): lista funzionale + lista adversarial, fix loop 100%; script purge tenant (GDPR); runbook operativo (onboarding numero, QR, incident) | collaudo di Tommaso; poi prima campagna reale Primero con cap prudente | DoD §15 raggiunta |
+| **M4 — Reply e opt-out** (scope ridotto 24/07) | `wa_reply_watcher` + cron, matching contatto, **step singolo** (nessun tick multi-step: Q29), risposta → `replied` terminale, opt-out end-to-end + tag DNC permanente per-tenant, DNC/catalogazione non-raggiungibili | eventi webhook-ready (`wa.*`); schema sequenze completo ma motore branching non costruito | campagna a 1 messaggio verificata su numero test: invio → risposta rilevata → contatto `replied`; STOP → DNC e nessun ricontatto da nessuna campagna |
+| **M5 — QA + collaudo Primero + rampa volume** | QA adversarial (skill `sviluppo-modulo`): lista funzionale + lista adversarial, fix loop 100%; script purge tenant (GDPR); runbook operativo (onboarding numero, QR, incident); **rampa volume ex PoC-5** (10 → 30 → 60 → 100 msg/giorno sulla prima campagna vera, stop al primo warning) | collaudo di Tommaso; poi prima campagna reale Primero con cap prudente | DoD §15 raggiunta; A6 verificata sui dati della rampa |
 | **Fase 2** | F1 flow builder/n8n, F2 UI cliente, F3 AI conversazione, F4 auto-reply, F5 ingest API, F6 analytics, F7 multi-numero | vedi `sviluppi-futuri.md` | — |
 
 Dipendenze esterne alla roadmap: parere legale GDPR (12.1) — necessario prima del go-live commerciale multi-cliente, non blocca M0-M4 su numero test; acquisto SIM/proxy test; macchina con RAM adeguata (A5, misura in M0).
@@ -863,7 +884,7 @@ Nota: risposte arrivate **dopo** la chiusura della campagna possono sfuggire all
 
 ### 15.2 Definition of Done MVP — decisione 4.3
 
-Software pronto a lanciare una **campagna vera end-to-end**: ingest CSV reale → sequenza 3-step con branching → invii con pacing anti-ban → risposte rilevate → opt-out onorato → KPI corretti. Tutte le logiche testate + **QA adversarial come da skill `sviluppo-modulo`** (QA agent che prova fisicamente, lista funzionale + lista adversarial dove PASS = il sistema si difende, fix loop al 100%), collaudo finale di Tommaso. **Primo banco di prova: Primero.**
+Software pronto a lanciare una **campagna vera end-to-end**: ingest CSV reale → **campagna a 1 messaggio** (scope deciso 24/07, Q29) → invii con pacing anti-ban → risposte rilevate (risposta = fine sequenza per quel contatto) → opt-out onorato con tag DNC permanente → KPI corretti. Tutte le logiche testate + **QA adversarial come da skill `sviluppo-modulo`** (QA agent che prova fisicamente, lista funzionale + lista adversarial dove PASS = il sistema si difende, fix loop al 100%), collaudo finale di Tommaso. **Primo banco di prova: Primero.**
 
 ---
 
@@ -883,6 +904,8 @@ Debiti/refactor consapevoli creati o rimandati da questo design (distinti dal ba
 | BT8 | Cifratura disco / hardening macchina sessioni (T9) | decisione infra di Tommaso | prima del multi-cliente reale |
 | BT9 | Naming piattaforma (il progetto non è più solo "BOT OUTBOUND") | puro branding, zero urgenza tecnica | quando serve presentarla ai clienti |
 | BT10 | Vista fatturazione per-tenant (aggregato `sent` mensile, per fattura a consuntivo) | KPI MVP sono per-campagna; l'aggregato si deriva a mano da query | prima fattura reale |
+| BT11 | **Motore sequenze multi-step** (tick 7.4, `wait_days`, `if_replied`/`if_no_reply`) — schema creato in M1, motore non costruito | Scope MVP = 1 messaggio (Q29, 24/07): branching non ancora venduto | primo cliente che chiede un follow-up automatico. Nessuna migrazione richiesta |
+| BT12 | **Validazione volume/anti-ban** (ex PoC-5): A6 non verificata prima di M5 | Vincolo "solo messaggi reali" + pochi contatti sul numero test: lo stress non era eseguibile in M0 | rampa M5 sulla prima campagna vera (10→30→60→100/giorno, stop al primo warning) |
 
 ---
 
@@ -890,20 +913,22 @@ Debiti/refactor consapevoli creati o rimandati da questo design (distinti dal ba
 
 Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[PoC]** = risponde il PoC gate · **[L]** = legale · **[S]** = si decide nello spec/plan di milestone.
 
+> **Sessione 24/07:** sciolte tutte le [T] che bloccavano M0 — Q1, Q4, Q6, Q12, Q29, Q60, Q71, Q97, Q104, Q105, Q107. Sono marcate **DECISA (24/07)** qui sotto e riportate nel corpo dell'SDD (§5, §7.4, §13, §14, §15.2). Le [T] restanti non bloccano il PoC gate.
+
 ### A. Prodotto e cliente
 
-1. [T] Il cliente fornisce sempre WhatsApp **Business** (app), o dobbiamo supportare anche WhatsApp consumer? (Linked device e limiti potrebbero differire.)
+1. **DECISA (24/07): WhatsApp Business.** Il target è il negozio/azienda, che usa l'app Business; i PoC girano su Business (away-message, etichette, slot linked device inclusi nel test). Il consumer è un sottoinsieme più semplice: non lo si supporta esplicitamente in MVP, ma nulla lo impedisce.
 2. **DECISA (review 23/07):** max 1 campagna `running` per numero alla volta; per lanciarne un'altra sullo stesso numero si attende o si pausa la prima. (Il pacing per-numero cross-campagna diventa non necessario; eventuale concorrenza multi-campagna = fase 2 con `last_sent_at` per numero.)
 3. [T] Il report "non-raggiungibili/catalogati" al cliente: formato? (CSV export? vista dashboard? per l'MVP basta la vista?)
-4. [T] Chi scrive i testi delle campagne MVP: il cliente, Tommaso, o insieme? (Impatta T6 e il contratto.)
+4. **DECISA (24/07): li scrive Tommaso**, il cliente approva. Conseguenze: (a) il controllo anti-spam/anti-ban sul testo è interno (niente link accorciati, niente maiuscole urlate, CTA opt-out in coda); (b) è lavoro ricorrente di Tommaso a ogni campagna → da prezzare (Q107/Q108); (c) responsabilità contenuti nel contratto (T6, Q109) va scritta di conseguenza.
 5. [T] La CTA opt-out standard va bene fissa per tenant o serve per-campagna?
-6. [T] Lingue: solo italiano in MVP? (STOP-regex, template, finestra oraria.)
+6. **DECISA (24/07): solo italiano.** STOP-regex italiana, template IT, finestra oraria `Europe/Rome`. Multi-lingua = post-MVP (il modello dati non lo impedisce).
 7. [T] Il cliente deve poter vedere QUALCOSA in MVP (anche read-only), o zero accesso fino a F2?
 8. [T] Prezzo per messaggio: si fattura su `sent` confermati o su tentati? (Impatta quanto investire sul delivery_check.)
 9. [T] Cosa promettiamo contrattualmente sul rischio ban del numero cliente? (Disclaimer necessario.)
 10. [T] Un contatto può essere in più campagne attive dello stesso tenant contemporaneamente? (MVP propone: no — frequency cap lo impedisce di fatto. Confermare.)
 11. [T] Serve un "test send" (invio di prova a un numero interno) prima dello start campagna? (Proposta: sì, feature piccola e preziosa.)
-12. [T] Il killer use case Primero: quale primo caso concreto (promo? riattivazione 6 mesi? evento)? Serve per tarare template e KPI attesi.
+12. **RIMANDATA (24/07):** il primo caso concreto Primero si sceglie al collaudo M5. Conseguenza accettata: template e KPI attesi restano generici fino ad allora; M0-M4 non ne dipendono (i PoC usano messaggi reali su chat controllate, Q60).
 
 ### B. Ingest e dati
 
@@ -926,7 +951,7 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 26. [T] Numero massimo step per sequenza in MVP? (Proposta: 5.)
 27. [T] `wait_days` minimo consentito? (Proposta: 1 giorno — niente step a distanza di ore in MVP, riduce rischi T1.)
 28. [S] Modifica sequenza a campagna `running`: consentita? (Proposta: solo per step non ancora raggiunti da nessun contatto; altrimenti pausa-modifica-riprendi.)
-29. [T] Confermare la semantica §7.4: qualunque risposta ferma la sequenza del contatto (salvo step `if_replied` espliciti)?
+29. **DECISA (24/07):** sì, qualunque risposta ferma la sequenza. **In più — scope MVP ridotto:** le campagne MVP sono a **un solo messaggio**; schema sequenze completo ma motore multi-step non costruito (accensione post-MVP senza migrazione). Lo STOP mette un **tag DNC permanente per-tenant** sul contatto: mai più ricontattato da nessuna campagna. Ricadute in §5 (`wa_sequence_steps`), §7.4, §14 (M4), §15.2 (DoD).
 30. [S] `if_replied` con risposta arrivata PRIMA dello step (es. risponde a msg1 dopo che msg2 era già partito): la risposta "vale" per quale step? (Proposta: `replied` è uno stato del contatto, non dello step — vale da lì in poi.)
 31. [S] Ripartenza campagna dopo `paused` lunga: i `next_action_at` scaduti creano un burst — serve re-spalmatura? (Proposta: sì, re-pacing automatico al resume.)
 32. [T] Step "attendi X giorni poi manda comunque" (`always` con wait) serve in MVP o basta condizionale? (Il modello lo supporta gratis — confermare che è desiderato.)
@@ -963,11 +988,11 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 57. [S] Flusso QR remoto: il QR scade ~30-60s — meccanica del refresh sulla pagina admin e UX per il cliente al telefono. Dettagliare in M1.
 58. [T] SLA di rilevamento risposta: ogni quanto gira `wa_reply_scan`? (Proposta: 15-30 min nelle ore attive — abbastanza per `wait_days`, abbastanza rado da pesare poco. Impatta anche il miss "STOP seguito da altro messaggio".)
 59. [S] Un numero già collegato a un altro WhatsApp Web del cliente (suo PC): conflitto o coesistenza tra linked devices? (Dovrebbe coesistere — verificare in PoC-1.)
-60. [T] SIM del numero test PoC: quale numero si usa? (Serve SIM dedicata che Tommaso controlla, con chat pre-esistenti simulabili.)
+60. **DECISA (24/07): numero secondario di Primero** (non l'operativo principale), WhatsApp Business, 30-100 chat pre-esistenti reali. **Vincolo imposto da Tommaso: solo messaggi reali, mai messaggi di test** — bruciare i contatti del cliente non è accettabile. Conseguenze registrate in §13: PoC-2 invia **solo a chat controllate** (numeri di Tommaso/conoscenti già in rubrica), PoC-3 usa in più gli inbound spontanei reali in sola lettura, PoC-5 esce da M0.
 
 ### F. Anti-ban e timing
 
-61. [PoC] I parametri §10.3 reggono PoC-5? Tarare su dati.
+61. [M5] I parametri §10.3 reggono il volume? Tarare sulla rampa M5 (ex PoC-5, spostato 24/07).
 62. [T] Warmup anche per numeri "anziani" del cliente: confermare la rampa (il numero è vecchio ma il pattern-bot è nuovo).
 63. [S] Stagger tra numeri dello stesso proxy (V9: 2 numeri/IP): offset random come IG?
 64. [PoC] WhatsApp mostra warning espliciti pre-ban (es. "messaggi segnalati")? Catalogare i segnali early-warning per FM8.
@@ -977,7 +1002,7 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 68. [S] Distribuzione oraria dentro la finestra: uniforme-lognormale o con "picchi umani" (pausa pranzo)? (Proposta MVP: lognormale semplice, riuso human_behavior.)
 69. [PoC] Il numero risulta "online" mentre il bot è collegato? Il cliente lo accetta? (Percezione lato contatti: "il negozio è sempre online".)
 70. [S] Cap globale piattaforma (tutti i tenant) per la macchina: serve un tetto totale invii/giorno? (Proposta: sì, safety valve config.)
-71. [T] Messaggi con media (immagine promo) in MVP o solo testo? (Proposta: solo testo — media = superficie di rischio e complessità in più; fase 2.)
+71. **DECISA (24/07): solo testo.** Niente upload media in MVP (superficie anti-ban e complessità DOM in più). Media = fase 2.
 72. [S] Link nei messaggi (URL promo): accorciati o nudi? I link accorciati sono un classico segnale spam — proposta: URL nudi del dominio del cliente.
 
 ### G. Coesistenza
@@ -1015,20 +1040,20 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 
 ### J. Ops e infra
 
-97. [T] Macchina: PC dedicato nuovo (16-32GB) o si parte sul PC attuale per M0-M3? (Nota: PC attuale = 7,4GB RAM, 3-4 sessioni max — per PoC basta, per 10 clienti no.)
+97. **DECISA (24/07): PC attuale di Tommaso per M0-M3.** Vincolo operativo che ne deriva: durante PoC-1 il PC deve restare acceso e la sessione collegata (14 giorni) — spegnerlo di notte falsa la misura di durata. La misura RAM/CPU di PoC-1 dimensiona l'eventuale acquisto della macchina dedicata, con numeri veri.
 98. [T] Proxy: quante SIM/telefoni tether servono per partire (test + Primero)? Budget?
 99. [T] Cifratura disco della macchina sessioni (T9/BT8): BitLocker basta?
 100. [S] Avvio servizi: i worker WA entrano in `start.bat`/`start.sh` esistenti o processo separato? (Proposta: stesso ARQ worker esistente + coda dedicata, un solo runtime.)
 101. [S] Monitoraggio: health endpoint esteso (`api/health.py`) con stato sessioni WA; alert Telegram già coperti da notifier — definire la lista alert minima (QR, selettori, ban, proxy).
 102. [S] Aggiornamenti Chromium/Patchright: policy di update (pinnare versione, aggiornare a mano dopo test su numero test).
 103. [S] Timezone macchina vs tenant: tutto UTC internamente (lezione clock-skew TheVista).
-104. [T] Chi fa da "umano di test" nei PoC-4 (serve una seconda persona col telefono)?
-105. [S] Numero test: chat pre-esistenti da creare a mano prima dei PoC (seed realistico: 30-50 chat).
+104. **DECISA (24/07): Tommaso**, col telefono del numero secondario in mano (fa l'umano-business) più un suo secondo numero/dispositivo come contatto. Nessuna seconda persona da coordinare.
+105. **DECISA (24/07): nessun seed da costruire.** Il numero secondario Primero ha già 30-100 chat reali. Serve solo verificare che tra queste ci siano **≥ 6 chat controllate** (numeri di Tommaso/conoscenti) da usare come destinatari di PoC-2, in posizioni diverse della lista.
 106. [S] Disaster recovery profilo browser corrotto: backup periodico della cartella profilo? (Proposta: sì, zip giornaliero, cifrato.)
 
 ### K. Business e go-to-market
 
-107. [T] Prezzo per messaggio: quanto sotto Meta (€0,05-0,09)? Fatturazione mensile a consuntivo su `sent`?
+107. **RIMANDATA (24/07):** il prezzo si fissa **dopo il collaudo**, sui costi reali (proxy, SIM, tempo di gestione, tempo di scrittura testi ex Q4). Non blocca M0-M4. Primero come primo cliente si tratta a parte (Q110).
 108. [T] Setup fee per onboarding numero (SIM/proxy/QR/config)?
 109. [T] Contratto tipo: chi lo scrive, cosa copre (rischio ban Q9/Q91, DPA Q89, responsabilità contenuti T6)?
 110. [T] Primero come primo cliente: gratis/beta o pagante ridotto? Timeline desiderata per la prima campagna reale?

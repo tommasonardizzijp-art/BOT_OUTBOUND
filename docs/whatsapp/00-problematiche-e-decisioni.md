@@ -197,7 +197,26 @@ Motivazioni:
 - **`chat_title` salvato solo se è un nome** (mai numero in chiaro → P12); matching con title ambiguo (omonimi) → solo via numero, altrimenti evento non associato + alert. Mai indovinare.
 - Non-goal espliciti aggiunti: no gruppi, no liste broadcast.
 
+### Decisioni [T] (24/07, sessione pre-M0) — SDD → v1.2
+
+Sciolte le domande di §17 che bloccavano il PoC gate:
+
+| Q | Decisione | Impatto |
+|---|---|---|
+| Q1 | Numero cliente = **WhatsApp Business** (app) | PoC girano su Business: away-message, etichette, slot linked device inclusi nel test |
+| Q60 | Numero di test = **secondario di Primero**, non il principale. **Vincolo: solo messaggi reali, mai di test** (non si bruciano i contatti del cliente) | PoC-2 invia **solo a chat controllate** (numeri di Tommaso/conoscenti in rubrica); PoC-3 sfrutta anche gli inbound spontanei reali in sola lettura |
+| — | **PoC-5 (volume) fuori da M0** → rampa in M5 (10→30→60→100/giorno, stop al primo warning) | 500-1000 messaggi finti = impossibile col vincolo sopra. **A6 resta non verificata fino a M5: rischio accettato** (BT12) |
+| Q29 | Risposta qualsiasi ferma la sequenza. **Scope MVP = campagna a 1 messaggio**, schema sequenze completo ma motore multi-step non costruito (BT11). **STOP = tag DNC permanente per-tenant** | M4 si sgonfia; DoD §15.2 riscritta (single-shot); nessuna migrazione per accendere il branching dopo |
+| Q97 | **PC attuale** per M0-M3 | PoC-1 richiede PC acceso e sessione collegata per 14 giorni; la misura RAM/CPU dimensiona l'acquisto dopo |
+| Q104 | Umano di test PoC-4 = **Tommaso** + un suo secondo dispositivo/numero | Nessuna seconda persona da coordinare |
+| Q105 | **Nessun seed**: il secondario ha già 30-100 chat reali; servono ≥6 chat controllate tra queste | — |
+| Q4 | **Testi scritti da Tommaso**, cliente approva | Controllo anti-spam interno; lavoro ricorrente da prezzare |
+| Q6 | Solo **italiano** | STOP-regex IT, `Europe/Rome` |
+| Q71 | Solo **testo**, niente media | Meno superficie anti-ban e DOM |
+| Q12 | Caso concreto Primero **rimandato** al collaudo M5 | Template/KPI attesi restano generici; M0-M4 non dipendono |
+| Q107 | Prezzo **deciso dopo il collaudo**, su costi reali | Non blocca M0-M4 |
+
 ---
 
 ## 13. Prossimo passo
-Scrivere l'**SDD completo** in `docs/whatsapp/` (decine di pagine: diagrammi ASCII component/sequence/state, casi d'uso, threat model, failure mode, roadmap milestone, backlog tecnico, ~100 domande di validazione residue). Poi spec/plan via workflow superpowers + skill `sviluppo-modulo` per l'implementazione.
+SDD scritto (v1.1 23/07) e aggiornato a **v1.2** (24/07, [T] bloccanti sciolte). Prossimo: **spec/plan di M0 (PoC gate)** — script PoC usa-e-getta, non codice di produzione. Gate duro: PoC-1/2/3 falliti ⇒ strada A rimessa in discussione prima di costruire M1+.
