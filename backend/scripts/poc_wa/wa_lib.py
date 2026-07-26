@@ -23,8 +23,11 @@ _STOP_PATTERNS = [
 ]
 _STOP_RE = re.compile("|".join(_STOP_PATTERNS), re.IGNORECASE)
 
-# 6+ cifre consecutive = quasi certamente un numero di telefono in un dump.
-_NUM_RE = re.compile(r"\d{6,}")
+# Numero di telefono in un dump: 6+ cifre, tollerando UN separatore
+# (spazio, punto, trattino, slash) tra le cifre — WhatsApp mostra
+# "342 146 0077", non "3421460077". Falso positivo accettato: date e
+# prezzi lunghi finiscono in <num>, su artefatti di debug va bene.
+_NUM_RE = re.compile(r"\d(?:[\s.\-/]?\d){5,}")
 
 
 class NotAllowed(Exception):

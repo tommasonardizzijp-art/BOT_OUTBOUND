@@ -52,6 +52,29 @@ def test_mask_pii_nasconde_numeri_e_tronca():
     assert len(wa_lib.mask_pii("x" * 500, keep=40)) <= 43
 
 
+@pytest.mark.parametrize("text", [
+    "chiamami al 342 146 0077 domani",
+    "342-146-0077",
+    "342.146.0077",
+    "+39 342 146 0077",
+])
+def test_mask_pii_numero_con_un_separatore(text):
+    """WhatsApp mostra i numeri con separatori ("342 146 0077"), non a cifre
+    consecutive: mask_pii deve mascherarli comunque (vincolo P12)."""
+    out = wa_lib.mask_pii(text, keep=200)
+    assert "<num>" in out
+    assert not any(c.isdigit() for c in out)
+
+
+@pytest.mark.parametrize("text", [
+    "ore 12 30",
+    "costa 15 euro",
+])
+def test_mask_pii_non_maschera_numeri_troppo_corti(text):
+    out = wa_lib.mask_pii(text, keep=200)
+    assert out == text
+
+
 def test_allowlist_blocca_i_non_autorizzati(monkeypatch):
     monkeypatch.setenv("POC_WA_ALLOWED_NUMBERS", "+39 342 146 0077, 3331112222")
     al = wa_lib.AllowList.load()
