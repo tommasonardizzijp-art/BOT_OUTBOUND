@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from _common import artifacts_dir, first_locator, human_type, log_event, snap, wa_context
 from poc2_open import COMPOSER_SEL, open_by_deeplink
 from poc2_send import guardia_pre_invio, leggi_spunta
+from poc_state import OptOutStore
 from wa_lib import AllowList, load_messages, normalize_e164
 
 ISTRUZIONI = {
@@ -33,10 +34,36 @@ ISTRUZIONI = {
 }
 
 
+def _scrivi_riga_csv(scenario: str, esito: str, dettaglio: str) -> None:
+    path = artifacts_dir() / "coexist_results.csv"
+    new = not path.exists()
+    with path.open("a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(["ts", "scenario", "esito", "dettaglio"])
+        w.writerow([datetime.now(timezone.utc).isoformat(timespec="seconds"), scenario, esito, dettaglio])
+
+
 async def main(numero: str, messaggio: str, scenario: str) -> None:
     allow = AllowList.load()
     e164 = normalize_e164(numero)
     allow.assert_allowed(e164)
+
+    # Guardia opt-out (stesso ordine di poc2_send.py, A1 punto 1): un numero
+    # gia' in opt-out non si vede aprire nemmeno la chat. Controllato PRIMA del
+    # protocollo a schermo (e fuori da wa_context): non ha senso far mettere
+    # Tommaso in posizione col telefono per uno scenario che va comunque
+    # saltato. `e164` e' gia' normalizzato: OptOutStore non normalizza le
+    # chiavi (contratto in poc_state.py), passargli qualcos'altro
+    # significherebbe registrare/cercare un opt-out su una chiave sbagliata.
+    optout = OptOutStore.load()
+    if optout.is_opted_out(e164):
+        esito = "skip-optout-preesistente"
+        dettaglio = "numero gia' in opt-out: nessuna chat aperta, nessun invio"
+        _scrivi_riga_csv(scenario, esito, dettaglio)
+        log_event("coexist_skip_optout", scenario=scenario, numero_masked=f"…{e164[-4:]}")
+        print(f"Numero gia' in opt-out: {dettaglio}")
+        return
 
     print(f"\n=== {scenario} ===\n{ISTRUZIONI[scenario]}")
     input("> ")
@@ -53,6 +80,16 @@ async def main(numero: str, messaggio: str, scenario: str) -> None:
         # non si invia.
         coda_non_agganciata = tail is None
         inbound_letti = len(tail) if tail is not None else 0
+
+        # Uno STOP visto nella coda si registra SEMPRE (come poc2_send.py fa
+        # indipendentemente dal flag --send), non solo negli scenari che
+        # inviano: e' un net di sicurezza, non un dettaglio dello scenario in
+        # corso. Va distinto nel CSV da "coda non agganciata": il primo e'
+        # "ho letto la coda e c'era uno STOP", il secondo e' "non ho letto
+        # niente, non so se c'era".
+        if stop:
+            optout.add(e164, motivo="STOP rilevato nella coda inbound pre-invio (poc4_coexist)")
+
         dettaglio = (f"inbound_in_coda={inbound_letti} "
                      f"coda_non_agganciata={int(coda_non_agganciata)} "
                      f"guardia_ms={round(guardia_ms)} stop={stop}")
@@ -78,13 +115,7 @@ async def main(numero: str, messaggio: str, scenario: str) -> None:
             esito = "inviato"
         await snap(page, f"poc4-{scenario}")
 
-        path = artifacts_dir() / "coexist_results.csv"
-        new = not path.exists()
-        with path.open("a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            if new:
-                w.writerow(["ts", "scenario", "esito", "dettaglio"])
-            w.writerow([datetime.now(timezone.utc).isoformat(timespec="seconds"), scenario, esito, dettaglio])
+        _scrivi_riga_csv(scenario, esito, dettaglio)
         log_event("coexist", scenario=scenario, esito=esito, dettaglio=dettaglio)
 
     print("\nOra GUARDA IL TELEFONO e annota nel report:")
