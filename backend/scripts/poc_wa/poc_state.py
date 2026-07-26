@@ -13,6 +13,12 @@ In M0 lo stato sta su file (e' un PoC). In produzione l'opt-out dovra' stare
 nel DB insieme al contatto (requisito vincolante per M1/M3) — la logica qui
 sotto (persistenza append-only, un opt-out vale per sempre, mai testo in
 chiaro) e' quella che verra' riportata a DB, non un dettaglio usa-e-getta.
+
+Contratto implicito sulle chiavi: `e164` deve essere gia' normalizzato con
+`wa_lib.normalize_e164` prima di chiamare questi metodi. Ne' OptOutStore ne'
+SentLog normalizzano (come AllowList): passare un numero non normalizzato
+significa scrivere un opt-out/un invio su una chiave che poi nessuno
+ricerchera' nella forma giusta.
 """
 import hashlib
 import json
@@ -106,6 +112,15 @@ class OptOutStore:
         return e164 in self._entries
 
     def add(self, e164: str, motivo: str) -> None:
+        """Rilegge lo stato da disco e si fonde con esso prima di scrivere: due
+        OptOutStore caricati entrambi prima di qualunque write non devono farsi
+        last-write-wins a vicenda, altrimenti il primo opt-out registrato
+        sparirebbe sotto il secondo. Nessuna scrittura parallela e' garantita
+        oggi (il lock sul profilo Chromium ammette un solo sender), ma il
+        fallimento di questo modulo non e' un crash: e' scrivere di nuovo a
+        qualcuno che aveva chiesto di smettere, quindi non ci si affida a una
+        garanzia che vive altrove."""
+        self._entries = _load_json_object(self._path)
         self._entries[e164] = {"motivo": motivo, "ts": _now()}
         _atomic_write_json(self._path, self._entries)
 
@@ -126,6 +141,10 @@ class SentLog:
         return _hash_text(testo) in self._entries.get(e164, [])
 
     def record(self, e164: str, testo: str) -> None:
+        """Stesso motivo di OptOutStore.add(): rilegge da disco e si fonde
+        prima di scrivere, non serializza la copia in memoria caricata da
+        load()."""
+        self._entries = _load_json_object(self._path)
         h = _hash_text(testo)
         hashes = self._entries.setdefault(e164, [])
         if h not in hashes:

@@ -72,7 +72,25 @@ def test_optout_scrittura_atomica_json_valido(tmp_path):
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     assert "393421460077" in data
-    assert data["393421460077"]["motivo"] == "STOP nella coda DOM" or "motivo" in data["393421460077"]
+    assert data["393421460077"]["motivo"] == "STOP"
+
+
+def test_optout_due_store_indipendenti_non_si_sovrascrivono(tmp_path):
+    """Due OptOutStore caricati ENTRAMBI prima di qualunque scrittura (come due
+    run/processi che partono nello stesso istante): se add() serializza solo la
+    copia in memoria caricata all'avvio, il secondo write sovrascrive il primo
+    e un opt-out registrato sparisce. add() deve rileggere lo stato da disco e
+    fondersi con esso, non con last-write-wins."""
+    path = tmp_path / "optout.json"
+    store1 = poc_state.OptOutStore.load(path)
+    store2 = poc_state.OptOutStore.load(path)  # letto prima che store1 scriva
+
+    store1.add("393421460077", motivo="STOP")
+    store2.add("393331112222", motivo="basta")
+
+    ricaricato = poc_state.OptOutStore.load(path)
+    assert ricaricato.is_opted_out("393421460077") is True
+    assert ricaricato.is_opted_out("393331112222") is True
 
 
 def test_optout_nessun_file_temporaneo_residuo(tmp_path):
@@ -153,6 +171,22 @@ def test_sentlog_scrittura_atomica_json_valido(tmp_path):
     assert "393421460077" in data
     assert isinstance(data["393421460077"], list)
     assert len(data["393421460077"][0]) == 64  # sha256 esadecimale
+
+
+def test_sentlog_due_log_indipendenti_non_si_sovrascrivono(tmp_path):
+    """Stesso bug del test analogo su OptOutStore, versione SentLog: due
+    istanze caricate entrambe prima di qualunque record() non devono farsi
+    last-write-wins a vicenda."""
+    path = tmp_path / "sent_log.json"
+    log1 = poc_state.SentLog.load(path)
+    log2 = poc_state.SentLog.load(path)
+
+    log1.record("393421460077", "Ciao, come va?")
+    log2.record("393331112222", "Buongiorno!")
+
+    ricaricato = poc_state.SentLog.load(path)
+    assert ricaricato.already_sent("393421460077", "Ciao, come va?") is True
+    assert ricaricato.already_sent("393331112222", "Buongiorno!") is True
 
 
 def test_sentlog_record_ripetuto_non_duplica(tmp_path):
