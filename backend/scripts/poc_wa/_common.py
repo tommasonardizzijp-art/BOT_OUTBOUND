@@ -80,16 +80,39 @@ def _parse_proxy(url: str) -> dict | None:
     return out
 
 
+def _profile_arg(cmdline: list[str] | None) -> str | None:
+    """Estrae il valore di --user-data-dir=<path> da una cmdline, se presente."""
+    for arg in cmdline or []:
+        if arg.startswith("--user-data-dir="):
+            return arg.split("=", 1)[1].strip('"')
+    return None
+
+
+def cmdline_matches_profile(cmdline: list[str] | None, profile_dir: Path = PROFILE_DIR) -> bool:
+    """True se la cmdline appartiene a un Chromium lanciato su ESATTAMENTE profile_dir.
+
+    Match sull'argomento vero (--user-data-dir=<path>), normalizzato, non su una
+    substring libera della cmdline intera: un domani un profilo 'profile-2'
+    accanto a 'profile' darebbe falso positivo con un containment check
+    (needle in cmd), e qui il falso positivo blocca l'avvio di una sessione
+    legittima (_profile_in_use e' una guardia, non un dettaglio).
+    """
+    value = _profile_arg(cmdline)
+    if not value:
+        return False
+    target = os.path.normcase(os.path.normpath(str(profile_dir)))
+    return os.path.normcase(os.path.normpath(value)) == target
+
+
 def _profile_in_use() -> bool:
     """C'e' gia' un Chromium vivo su questo profilo?
 
     I lock si cancellano solo se NON c'e': cancellarli sotto una sessione viva
     (heartbeat lanciato mentre poc3_scan --loop gira) corrompe entrambe.
     """
-    needle = str(PROFILE_DIR).lower()
     for proc in psutil.process_iter(["cmdline"]):
         try:
-            if needle in " ".join(proc.info.get("cmdline") or []).lower():
+            if cmdline_matches_profile(proc.info.get("cmdline")):
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue

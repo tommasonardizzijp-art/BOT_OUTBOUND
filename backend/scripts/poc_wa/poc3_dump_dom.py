@@ -114,9 +114,12 @@ async def dump_sidebar(page) -> dict:
         dump = await page.evaluate(JS_DUMP, sel)
         if not dump.get("error") and dump.get("rowCount"):
             break
-    if not dump or dump.get("error"):
+    # A8: anche se l'ULTIMO candidato aggancia il pane senza errore ma con
+    # rowCount == 0, non e' un dump riuscito: un JSON "vuoto ma valido" qui
+    # manderebbe fuori strada tutta la compilazione del catalogo.
+    if not dump or dump.get("error") or not dump.get("rowCount"):
         await snap(page, "poc3-pane-non-trovato")
-        raise SystemExit(f"Pannello chat non trovato con nessun candidato: {dump}")
+        raise SystemExit(f"Pannello chat non trovato o vuoto con nessun candidato: {dump}")
 
     # Mascheramento: testi e attributi title/aria-label contengono nomi e numeri.
     def scrub(node):

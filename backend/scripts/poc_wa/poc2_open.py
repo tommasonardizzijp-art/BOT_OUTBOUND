@@ -53,10 +53,23 @@ async def open_by_search(page, e164: str) -> tuple[bool, float, str]:
     t0 = time.perf_counter()
     box = await first_locator(page, SEARCH_SEL, timeout_ms=10000)
     if not box:
-        return False, (time.perf_counter() - t0) * 1000, "casella-ricerca-non-trovata"
+        # A3: il ramo di fallimento deve contenere il marcatore 'nessuna-cronologia',
+        # altrimenti il Task 8 lo legge come "ha cronologia, procedi".
+        return False, (time.perf_counter() - t0) * 1000, "nessuna-cronologia:casella-ricerca-non-trovata"
     await box[0].click()
     await page.keyboard.type(e164, delay=60)
     await page.wait_for_timeout(2500)
+    # A4: verifica che il focus sia ANCORA sulla casella di ricerca subito prima
+    # di premere Enter. In --strategia both questa funzione gira appena dopo il
+    # deep-link, che ha gia' aperto una chat col suo composer: se il focus e'
+    # finito li' (per qualunque motivo), quell'Enter invia un messaggio vero da
+    # uno script che dichiara "zero invii". Se il focus non torna verificabile,
+    # si abortisce invece di premere.
+    focused = await box[0].evaluate("el => el === document.activeElement")
+    if not focused:
+        await snap(page, "poc2-open-search-focus-perso")
+        ms = (time.perf_counter() - t0) * 1000
+        return False, ms, "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio"
     await page.keyboard.press("Enter")
     ok = await first_locator(page, COMPOSER_SEL, timeout_ms=15000)
     ms = (time.perf_counter() - t0) * 1000
@@ -87,7 +100,9 @@ async def main(numeri: list[str], strategia: str) -> None:
                         ok, ms, segnale = await fn(page, e164)
                         note = ""
                     except Exception as e:
-                        ok, ms, segnale, note = False, -1, "eccezione", f"{type(e).__name__}: {e}"[:160]
+                        # A3: idem, l'eccezione non deve leggersi come "ha cronologia".
+                        ok, ms, segnale = False, -1, "nessuna-cronologia:eccezione"
+                        note = f"{type(e).__name__}: {e}"[:160]
                         await snap(page, f"poc2-open-fail-{strat}")
                     w.writerow([datetime.now(timezone.utc).isoformat(timespec="seconds"), strat,
                                 f"…{e164[-4:]}", "OK" if ok else "KO", round(ms), segnale, note])

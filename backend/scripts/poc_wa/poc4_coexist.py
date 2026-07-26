@@ -19,12 +19,11 @@ import asyncio
 import csv
 import random
 from datetime import datetime, timezone
-from pathlib import Path
 
 from _common import artifacts_dir, first_locator, human_type, log_event, snap, wa_context
 from poc2_open import COMPOSER_SEL, open_by_deeplink
 from poc2_send import guardia_pre_invio, leggi_spunta
-from wa_lib import AllowList, normalize_e164
+from wa_lib import AllowList, load_messages, normalize_e164
 
 ISTRUZIONI = {
     "S1": "Apri WhatsApp sul telefono su una chat DIVERSA e tienilo acceso. Poi premi Invio qui.",
@@ -47,17 +46,31 @@ async def main(numero: str, messaggio: str, scenario: str) -> None:
         if not ok:
             raise SystemExit(f"Chat non aperta: {segnale}")
         tail, guardia_ms, stop = await guardia_pre_invio(page)
-        dettaglio = f"inbound_in_coda={len(tail)} guardia_ms={round(guardia_ms)} stop={stop}"
+        # A5/A2: tail e' None quando JS_TAIL non ha agganciato NESSUNA bolla
+        # (sentinella), distinto dalla lista vuota (nessun inbound dopo il
+        # nostro ultimo messaggio). len(tail) su None crasherebbe a meta'
+        # scenario; stesso trattamento di poc2_send.py: coda non agganciata =>
+        # non si invia.
+        coda_non_agganciata = tail is None
+        inbound_letti = len(tail) if tail is not None else 0
+        dettaglio = (f"inbound_in_coda={inbound_letti} "
+                     f"coda_non_agganciata={int(coda_non_agganciata)} "
+                     f"guardia_ms={round(guardia_ms)} stop={stop}")
 
         if scenario == "S4":
             # Non si invia: si osserva solo se un inbound gia' letto dall'umano
             # resta rilevabile (il badge unread sparisce -> il watcher lo perde?).
             await snap(page, "poc4-S4-dopo-lettura-umana")
             esito = "osservato"
+        elif coda_non_agganciata:
+            esito = "invio-annullato-coda-non-agganciata"
         elif stop:
             esito = "invio-annullato-da-STOP"
         else:
             comp = await first_locator(page, COMPOSER_SEL, timeout_ms=10000)
+            if not comp:
+                await snap(page, "poc4-composer-non-trovato")
+                raise SystemExit("Composer non trovato: catalogare il selettore prima di riprovare.")
             await human_type(page, comp[0], messaggio)
             await page.keyboard.press("Enter")
             await page.wait_for_timeout(3000)
@@ -86,5 +99,8 @@ if __name__ == "__main__":
     ap.add_argument("--messaggio-file", required=True)
     ap.add_argument("--scenario", required=True, choices=["S1", "S2", "S3", "S4"])
     args = ap.parse_args()
-    righe = [r.strip() for r in Path(args.messaggio_file).read_text(encoding="utf-8").splitlines() if r.strip()]
-    asyncio.run(main(args.numero, random.choice(righe), args.scenario))
+    # A5/A7: parsing condiviso con poc2_send.py (wa_lib.load_messages), non piu'
+    # riga-per-riga: solleva MessagesFileError leggibile se il file e' vuoto o
+    # assente, invece di un IndexError su random.choice([]).
+    messaggi = load_messages(args.messaggio_file)
+    asyncio.run(main(args.numero, random.choice(messaggi), args.scenario))

@@ -14,12 +14,12 @@ import argparse
 import asyncio
 import csv
 from datetime import datetime, timezone
-from pathlib import Path
 
 import psutil
 
-from _common import PROFILE_DIR, artifacts_dir, first_locator, log_event, snap, wa_context
+from _common import artifacts_dir, cmdline_matches_profile, first_locator, log_event, snap, wa_context
 from poc1_login import CHATLIST_CANDIDATES, QR_CANDIDATES
+from wa_lib import mask_pii
 
 CSV_PATH = None  # impostato in main()
 
@@ -27,15 +27,15 @@ CSV_PATH = None  # impostato in main()
 def _sample_profile_processes() -> tuple[float, float]:
     """RSS totale (MB) e CPU% dei processi Chromium legati a QUESTO profilo.
 
-    Il filtro sulla cmdline evita di contare il Chrome personale di Tommaso.
+    Il match e' sull'argomento --user-data-dir=<path> (cmdline_matches_profile),
+    non su una substring libera della cmdline: evita sia di contare il Chrome
+    personale di Tommaso sia i falsi positivi con profili dal nome simile.
     """
-    needle = str(PROFILE_DIR).lower()
     rss = 0
     cpu = 0.0
     for proc in psutil.process_iter(["name", "cmdline"]):
         try:
-            cmd = " ".join(proc.info.get("cmdline") or []).lower()
-            if needle in cmd:
+            if cmdline_matches_profile(proc.info.get("cmdline")):
                 rss += proc.memory_info().rss
                 cpu += proc.cpu_percent(interval=0.1)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -67,7 +67,7 @@ async def main(nota: str) -> None:
                 w.writerow(["ts", "giorni_da_login", "sessione_viva", "selettore", "rss_mb", "cpu_pct", "note"])
             w.writerow([
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                giorni, int(viva), sel, rss_mb, cpu_pct, nota,
+                giorni, int(viva), sel, rss_mb, cpu_pct, mask_pii(nota),
             ])
         log_event("heartbeat", giorni=giorni, viva=viva, rss_mb=rss_mb, cpu_pct=cpu_pct, nota=nota)
         if not viva:

@@ -8,7 +8,6 @@ Uso:  python poc1_login.py
 """
 import asyncio
 from datetime import datetime, timezone
-from pathlib import Path
 
 from _common import artifacts_dir, first_locator, log_event, snap, wa_context
 
