@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+import psutil
+
 from wa_lib import mask_pii  # type: ignore  # eseguito come script dalla sua cartella
 
 WA_URL = "https://web.whatsapp.com/"
@@ -37,16 +39,32 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _scrub(value):
+    """Maschera ricorsivamente: str -> mask_pii, dict/list -> elemento per elemento.
+
+    Un valore annidato non mascherato vanificherebbe l'intero mascheramento:
+    gli artefatti restano su disco per settimane e riguardano chat di clienti veri.
+    """
+    if isinstance(value, str):
+        return mask_pii(value, keep=120)
+    if isinstance(value, dict):
+        return {k: _scrub(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub(v) for v in value]
+    return value
+
+
 def log_event(kind: str, **fields) -> None:
     """Append di una riga JSONL in artifacts/events.jsonl + echo a schermo.
 
-    I campi di testo passano da mask_pii: questi artefatti riguardano chat di
-    clienti veri e restano su disco per settimane.
+    I campi di testo (anche annidati in dict/list) passano da mask_pii: questi
+    artefatti riguardano chat di clienti veri e restano su disco per settimane.
     """
-    safe = {k: (mask_pii(v, keep=120) if isinstance(v, str) else v) for k, v in fields.items()}
+    safe = {k: _scrub(v) for k, v in fields.items()}
     rec = {"ts": _now(), "kind": kind, **safe}
     line = json.dumps(rec, ensure_ascii=False)
-    (artifacts_dir() / "events.jsonl").open("a", encoding="utf-8").write(line + "\n")
+    with (artifacts_dir() / "events.jsonl").open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
     print(line)
 
 
@@ -62,6 +80,22 @@ def _parse_proxy(url: str) -> dict | None:
     return out
 
 
+def _profile_in_use() -> bool:
+    """C'e' gia' un Chromium vivo su questo profilo?
+
+    I lock si cancellano solo se NON c'e': cancellarli sotto una sessione viva
+    (heartbeat lanciato mentre poc3_scan --loop gira) corrompe entrambe.
+    """
+    needle = str(PROFILE_DIR).lower()
+    for proc in psutil.process_iter(["cmdline"]):
+        try:
+            if needle in " ".join(proc.info.get("cmdline") or []).lower():
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return False
+
+
 @asynccontextmanager
 async def wa_context(headless: bool = False):
     """Apre il profilo persistente su web.whatsapp.com e restituisce (context, page).
@@ -72,6 +106,14 @@ async def wa_context(headless: bool = False):
     from patchright.async_api import async_playwright
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    if _profile_in_use():
+        raise SystemExit(
+            f"Un altro processo sta gia' usando il profilo {PROFILE_DIR}. "
+            f"Chiudilo prima di lanciare questo script: due sessioni sullo stesso "
+            f"profilo si corrompono a vicenda."
+        )
+
     # Lock lasciati da una sessione uccisa male: senza rimuoverli Chromium
     # inoltra il lancio a un PID fantasma ed esce subito (lezione IG).
     for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
@@ -99,9 +141,9 @@ async def wa_context(headless: bool = False):
 
     async with async_playwright() as pw:
         context = await pw.chromium.launch_persistent_context(**kwargs)
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto(WA_URL, wait_until="domcontentloaded", timeout=60000)
         try:
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(WA_URL, wait_until="domcontentloaded", timeout=60000)
             yield context, page
         finally:
             await context.close()
