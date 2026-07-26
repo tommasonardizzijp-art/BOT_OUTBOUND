@@ -5,6 +5,7 @@ dipendono dal DOM di WhatsApp Web, che e' esattamente cio' che il PoC deve scopr
 """
 import os
 import re
+from pathlib import Path
 
 DEFAULT_CC = "39"
 MIN_DIGITS = 8   # sotto questa soglia non e' un numero mobile plausibile
@@ -32,6 +33,12 @@ _NUM_RE = re.compile(r"\d(?:[\s.\-/]?\d){5,}")
 
 class NotAllowed(Exception):
     """Tentato invio verso un numero non in allowlist. In M0 e' un errore fatale."""
+
+
+class MessagesFileError(Exception):
+    """`messages.txt` malformato o vuoto: errore leggibile invece di una lista
+    vuota (che poc2_send.py interpreterebbe come "niente testi disponibili" e
+    proseguirebbe silenziosamente su un ramo sbagliato)."""
 
 
 def normalize_e164(raw: str, default_cc: str = DEFAULT_CC) -> str | None:
@@ -107,3 +114,57 @@ class AllowList:
 
     def __len__(self) -> int:
         return len(self._numbers)
+
+
+def load_messages(path: str | Path) -> list[str]:
+    """Legge `messages.txt`: un messaggio puo' occupare piu' righe, i messaggi
+    si separano con una riga vuota (SDD wave-a-spec.md, sez. A7 / decisione
+    Tommaso del 26/07).
+
+    "una riga = un messaggio" spezzava i testi veri in frammenti (partiva
+    "Ciao," da solo). I blocchi multi-riga esercitano anche il percorso
+    Shift+Enter di human_type, che altrimenti in M0 non verrebbe mai provato.
+
+    - encoding="utf-8-sig": un file salvato da Notepad lascia un BOM che
+      .strip() non toglie, e finirebbe nel primo messaggio;
+    - spazi in eccesso rimossi solo ai BORDI del blocco: gli a-capo interni
+      restano intatti (sono il contenuto, non whitespace accidentale);
+    - un TAB dentro un messaggio e' rifiutato: keyboard.type("\\t") sposta il
+      focus fuori dal composer di WhatsApp e il resto del testo finisce altrove;
+    - file assente/vuoto/senza blocchi -> errore leggibile, mai lista vuota
+      (una lista vuota verrebbe letta come "niente da mandare" e proseguirebbe).
+    """
+    p = Path(path)
+    try:
+        raw = p.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise MessagesFileError(f"File messaggi non leggibile: {p} ({exc})") from exc
+
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in raw.splitlines():
+        if line.strip() == "":
+            if current:
+                blocks.append("\n".join(current).strip())
+                current = []
+        else:
+            current.append(line)
+    if current:
+        blocks.append("\n".join(current).strip())
+
+    if not blocks:
+        raise MessagesFileError(
+            f"File messaggi vuoto o senza blocchi: {p}. Scrivi i testi veri "
+            f"prima (Task 0 step 6): un messaggio per blocco, blocchi separati "
+            f"da una riga vuota."
+        )
+
+    for i, block in enumerate(blocks, start=1):
+        if "\t" in block:
+            raise MessagesFileError(
+                f"Blocco {i} di {p} contiene un TAB: keyboard.type('\\t') "
+                f"sposterebbe il focus fuori dal composer di WhatsApp e il resto "
+                f"del messaggio finirebbe altrove. Sostituiscilo con spazi."
+            )
+
+    return blocks

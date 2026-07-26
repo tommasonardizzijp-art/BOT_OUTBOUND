@@ -90,3 +90,80 @@ def test_allowlist_vuota_blocca_tutto(monkeypatch):
     monkeypatch.delenv("POC_WA_ALLOWED_NUMBERS", raising=False)
     al = wa_lib.AllowList.load()
     assert al.is_allowed("393421460077") is False
+
+
+# --- load_messages (SDD wave-a-spec.md A7): blocchi separati da riga vuota ---
+
+def test_load_messages_blocco_singolo(tmp_path):
+    p = tmp_path / "messages.txt"
+    p.write_text("Ciao, come stai?", encoding="utf-8")
+    assert wa_lib.load_messages(p) == ["Ciao, come stai?"]
+
+
+def test_load_messages_piu_blocchi(tmp_path):
+    p = tmp_path / "messages.txt"
+    p.write_text("Primo messaggio.\n\nSecondo messaggio.\n\nTerzo.", encoding="utf-8")
+    assert wa_lib.load_messages(p) == ["Primo messaggio.", "Secondo messaggio.", "Terzo."]
+
+
+def test_load_messages_a_capo_interni_conservati(tmp_path):
+    """Un blocco multi-riga resta multi-riga: e' il percorso Shift+Enter di
+    human_type, non deve essere schiacciato su una riga sola."""
+    p = tmp_path / "messages.txt"
+    p.write_text("Ciao,\ncome stai?\nTutto bene?", encoding="utf-8")
+    assert wa_lib.load_messages(p) == ["Ciao,\ncome stai?\nTutto bene?"]
+
+
+def test_load_messages_righe_vuote_multiple_tra_blocchi(tmp_path):
+    p = tmp_path / "messages.txt"
+    p.write_text("Uno\n\n\n\nDue", encoding="utf-8")
+    assert wa_lib.load_messages(p) == ["Uno", "Due"]
+
+
+def test_load_messages_spazi_bordo_blocco_rimossi(tmp_path):
+    p = tmp_path / "messages.txt"
+    p.write_text("  \nCiao,\ncome va?  \n\n", encoding="utf-8")
+    assert wa_lib.load_messages(p) == ["Ciao,\ncome va?"]
+
+
+def test_load_messages_bom_notepad_non_finisce_nel_testo(tmp_path):
+    """Notepad salva con BOM in testa al file: i byte reali del BOM (EF BB BF)
+    devono sparire, non solo il carattere \\ufeff scritto a mano."""
+    p = tmp_path / "messages.txt"
+    p.write_bytes(b"\xef\xbb\xbf" + "Ciao a tutti".encode("utf-8"))
+    out = wa_lib.load_messages(p)
+    assert out == ["Ciao a tutti"]
+    assert "﻿" not in out[0]
+
+
+def test_load_messages_tab_rifiutato(tmp_path):
+    p = tmp_path / "messages.txt"
+    p.write_text("Ciao\ta tutti", encoding="utf-8")
+    with pytest.raises(wa_lib.MessagesFileError):
+        wa_lib.load_messages(p)
+
+
+def test_load_messages_tab_in_blocco_successivo_rifiutato(tmp_path):
+    p = tmp_path / "messages.txt"
+    p.write_text("Messaggio pulito\n\nMessaggio\tsporco", encoding="utf-8")
+    with pytest.raises(wa_lib.MessagesFileError):
+        wa_lib.load_messages(p)
+
+
+def test_load_messages_file_vuoto_errore_leggibile(tmp_path):
+    p = tmp_path / "messages.txt"
+    p.write_text("", encoding="utf-8")
+    with pytest.raises(wa_lib.MessagesFileError):
+        wa_lib.load_messages(p)
+
+
+def test_load_messages_file_solo_righe_vuote_errore_leggibile(tmp_path):
+    p = tmp_path / "messages.txt"
+    p.write_text("\n\n   \n\n", encoding="utf-8")
+    with pytest.raises(wa_lib.MessagesFileError):
+        wa_lib.load_messages(p)
+
+
+def test_load_messages_file_assente_errore_leggibile(tmp_path):
+    with pytest.raises(wa_lib.MessagesFileError):
+        wa_lib.load_messages(tmp_path / "non-esiste.txt")
