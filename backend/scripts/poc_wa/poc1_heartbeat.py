@@ -1,0 +1,81 @@
+# backend/scripts/poc_wa/poc1_heartbeat.py
+"""PoC-1b — la sessione e' ancora viva? e quanto costa tenerla aperta?
+
+Da lanciare almeno 1 volta al giorno per 14 giorni (Task 4, step 2). Ogni run:
+apre il profilo, guarda se c'e' la lista chat o il QR, campiona RAM/CPU dei
+processi Chromium di QUESTO profilo, scrive una riga nel CSV, chiude.
+
+Il criterio GO di PoC-1: 14 giorni senza re-scan, >= 5 riavvii browser e >= 2
+riavvii PC sopportati. Ogni riga di questo CSV e' un riavvio browser.
+
+Uso:  python poc1_heartbeat.py [--nota "riavviato il PC"]
+"""
+import argparse
+import asyncio
+import csv
+from datetime import datetime, timezone
+from pathlib import Path
+
+import psutil
+
+from _common import PROFILE_DIR, artifacts_dir, first_locator, log_event, snap, wa_context
+from poc1_login import CHATLIST_CANDIDATES, QR_CANDIDATES
+
+CSV_PATH = None  # impostato in main()
+
+
+def _sample_profile_processes() -> tuple[float, float]:
+    """RSS totale (MB) e CPU% dei processi Chromium legati a QUESTO profilo.
+
+    Il filtro sulla cmdline evita di contare il Chrome personale di Tommaso.
+    """
+    needle = str(PROFILE_DIR).lower()
+    rss = 0
+    cpu = 0.0
+    for proc in psutil.process_iter(["name", "cmdline"]):
+        try:
+            cmd = " ".join(proc.info.get("cmdline") or []).lower()
+            if needle in cmd:
+                rss += proc.memory_info().rss
+                cpu += proc.cpu_percent(interval=0.1)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return round(rss / (1024 * 1024), 1), round(cpu, 1)
+
+
+async def main(nota: str) -> None:
+    global CSV_PATH
+    CSV_PATH = artifacts_dir() / "heartbeat.csv"
+    marker = artifacts_dir() / "session_start.txt"
+    start = datetime.fromisoformat(marker.read_text(encoding="utf-8")) if marker.exists() else None
+
+    async with wa_context(headless=False) as (context, page):
+        alive = await first_locator(page, CHATLIST_CANDIDATES, timeout_ms=20000)
+        if alive:
+            viva, sel = True, alive[1]
+        else:
+            qr = await first_locator(page, QR_CANDIDATES, timeout_ms=5000)
+            viva, sel = False, (qr[1] if qr else "schermata-ignota")
+            await snap(page, "poc1-sessione-persa")
+        rss_mb, cpu_pct = _sample_profile_processes()
+        giorni = (datetime.now(timezone.utc) - start).days if start else -1
+
+        new_file = not CSV_PATH.exists()
+        with CSV_PATH.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(["ts", "giorni_da_login", "sessione_viva", "selettore", "rss_mb", "cpu_pct", "note"])
+            w.writerow([
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                giorni, int(viva), sel, rss_mb, cpu_pct, nota,
+            ])
+        log_event("heartbeat", giorni=giorni, viva=viva, rss_mb=rss_mb, cpu_pct=cpu_pct, nota=nota)
+        if not viva:
+            print("!! SESSIONE PERSA — annota cosa e' successo prima (aggiornamenti, riavvii, telefono offline).")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--nota", default="")
+    args = ap.parse_args()
+    asyncio.run(main(args.nota))
