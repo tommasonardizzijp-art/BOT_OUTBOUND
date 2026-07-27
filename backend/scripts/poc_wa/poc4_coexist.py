@@ -44,7 +44,7 @@ def _scrivi_riga_csv(scenario: str, esito: str, dettaglio: str) -> None:
         w.writerow([datetime.now(timezone.utc).isoformat(timespec="seconds"), scenario, esito, dettaglio])
 
 
-async def main(numero: str, messaggio: str, scenario: str) -> None:
+async def main(numero: str, messaggio: str, scenario: str, gia_pronto: bool = False) -> None:
     allow = AllowList.load()
     e164 = normalize_e164(numero)
     allow.assert_allowed(e164)
@@ -66,7 +66,19 @@ async def main(numero: str, messaggio: str, scenario: str) -> None:
         return
 
     print(f"\n=== {scenario} ===\n{ISTRUZIONI[scenario]}")
-    input("> ")
+    # --gia-pronto: la conferma "sono in posizione col telefono" e' gia' stata
+    # data FUORI dallo script (a voce, in chat) e lo scenario parte subito.
+    # Serve perche' lo script puo' essere lanciato da un agente senza terminale
+    # interattivo: li' input() non aspetta nessuno, riceve EOF e solleva
+    # EOFError a meta' protocollo.
+    # Il prompt NON viene tolto: resta il default. La sincronizzazione umana e'
+    # il senso di PoC-4 (S3 misura una finestra di 1-2 secondi), e un flag che
+    # salta l'attesa senza che nessuno sia in posizione produce un risultato
+    # che sembra valido e non lo e'. Chi passa il flag si assume quella conferma.
+    if gia_pronto:
+        print("(--gia-pronto: conferma gia' data fuori dallo script, non aspetto)")
+    else:
+        input("> ")
 
     async with wa_context(headless=False) as (context, page):
         # open_by_SEARCH, non piu' il deep-link (corretto il 27/07, dopo PoC-2a).
@@ -139,9 +151,11 @@ if __name__ == "__main__":
     ap.add_argument("--messaggio-file", default=str(MESSAGES_FILE),
                     help="default: %(default)s")
     ap.add_argument("--scenario", required=True, choices=["S1", "S2", "S3", "S4"])
+    ap.add_argument("--gia-pronto", action="store_true",
+                    help="salta l'attesa a schermo: sei GIA' in posizione col telefono")
     args = ap.parse_args()
     # A5/A7: parsing condiviso con poc2_send.py (wa_lib.load_messages), non piu'
     # riga-per-riga: solleva MessagesFileError leggibile se il file e' vuoto o
     # assente, invece di un IndexError su random.choice([]).
     messaggi = load_messages(args.messaggio_file)
-    asyncio.run(main(args.numero, random.choice(messaggi), args.scenario))
+    asyncio.run(main(args.numero, random.choice(messaggi), args.scenario, args.gia_pronto))
