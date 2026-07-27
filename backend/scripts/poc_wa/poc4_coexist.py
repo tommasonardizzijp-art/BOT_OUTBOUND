@@ -21,7 +21,7 @@ import random
 from datetime import datetime, timezone
 
 from _common import MESSAGES_FILE, artifacts_dir, first_locator, human_type, log_event, snap, wa_context
-from poc2_open import COMPOSER_SEL, open_by_deeplink
+from poc2_open import COMPOSER_SEL, open_by_search
 from poc2_send import guardia_pre_invio, leggi_spunta
 from poc_state import OptOutStore
 from wa_lib import AllowList, load_messages, normalize_e164
@@ -69,7 +69,16 @@ async def main(numero: str, messaggio: str, scenario: str) -> None:
     input("> ")
 
     async with wa_context(headless=False) as (context, page):
-        ok, _, segnale = await open_by_deeplink(page, e164)
+        # open_by_SEARCH, non piu' il deep-link (corretto il 27/07, dopo PoC-2a).
+        # Due motivi, nessuno dei due cosmetico:
+        #  1. su un numero SENZA chat il deep-link ne CREA una nuova (viola V2:
+        #     "solo contatti che ci hanno gia' scritto"). Qui i destinatari sono
+        #     chat controllate che esistono gia', quindi il danno non si sarebbe
+        #     visto — ed e' proprio questo il problema: PoC-4 avrebbe promosso
+        #     una strada che M3 non usera';
+        #  2. PoC-4 deve esercitare LO STESSO percorso di poc2_send.py, altrimenti
+        #     misura la coesistenza di un codice che non va in produzione.
+        ok, _, segnale = await open_by_search(page, e164)
         if not ok:
             raise SystemExit(f"Chat non aperta: {segnale}")
         tail, guardia_ms, stop = await guardia_pre_invio(page)
