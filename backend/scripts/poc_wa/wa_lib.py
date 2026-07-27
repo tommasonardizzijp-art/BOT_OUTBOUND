@@ -88,18 +88,33 @@ class AllowList:
     messaggio di prova mandato a un cliente vero di Primero.
     """
 
-    def __init__(self, numbers: set[str]):
-        self._numbers = numbers
+    def __init__(self, numbers):
+        # `ordinati` preserva l'ORDINE DEL FILE poc.env. Serve perche' Tommaso
+        # ragiona per posizione ("usa il primo della lista") e un set ordinato
+        # alfabeticamente dava un "primo" DIVERSO: il 27/07 `--indice 1` apriva
+        # il terzo numero del file. Su una lettura non succede niente; sulla
+        # scelta di quale contatto sacrificare al test STOP significa bruciare
+        # la persona sbagliata, in modo permanente.
+        self.ordinati = list(dict.fromkeys(numbers))   # dedup, ordine preservato
+        self._numbers = set(self.ordinati)
 
     @classmethod
     def load(cls, env_var: str = "POC_WA_ALLOWED_NUMBERS") -> "AllowList":
         raw = os.environ.get(env_var, "")
-        nums = set()
+        nums = []
         for chunk in raw.split(","):
             n = normalize_e164(chunk)
             if n:
-                nums.add(n)
+                nums.append(n)
         return cls(nums)
+
+    def per_indice(self, i: int) -> str:
+        """i e' 1-based e segue l'ordine del file, non l'alfabeto."""
+        if not (1 <= i <= len(self.ordinati)):
+            raise NotAllowed(
+                f"--indice {i} fuori range: l'allowlist ha {len(self.ordinati)} numeri."
+            )
+        return self.ordinati[i - 1]
 
     def is_allowed(self, e164: str) -> bool:
         return bool(e164) and e164 in self._numbers

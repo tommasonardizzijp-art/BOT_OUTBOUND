@@ -124,5 +124,6 @@ if __name__ == "__main__":
     g.add_argument("--numero")
     g.add_argument("--indice", type=int)
     args = ap.parse_args()
-    target = args.numero or sorted(AllowList.load()._numbers)[args.indice - 1]
+    # --indice segue l'ordine del file poc.env, non l'alfabeto.
+    target = args.numero or AllowList.load().per_indice(args.indice)
     asyncio.run(main(target))

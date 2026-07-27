@@ -292,16 +292,9 @@ if __name__ == "__main__":
     g.add_argument("--indice", type=int, help="n-esimo numero dell'allowlist (1-based)")
     args = ap.parse_args()
 
-    if args.numero:
-        target = args.numero
-    else:
-        # L'allowlist e' un set: l'ordine non e' quello del file. Si ordina per
-        # avere un "primo" riproducibile tra un run e l'altro.
-        numeri = sorted(AllowList.load()._numbers)
-        if not numeri:
-            raise SystemExit("Allowlist vuota: niente da aprire (fail-closed).")
-        if not (1 <= args.indice <= len(numeri)):
-            raise SystemExit(f"--indice fuori range: ce ne sono {len(numeri)}.")
-        target = numeri[args.indice - 1]
+    # --indice segue l'ORDINE DEL FILE poc.env (vedi AllowList.per_indice):
+    # "il primo della lista" deve voler dire la stessa cosa per Tommaso e per
+    # il codice.
+    target = args.numero or AllowList.load().per_indice(args.indice)
 
     asyncio.run(main(target))

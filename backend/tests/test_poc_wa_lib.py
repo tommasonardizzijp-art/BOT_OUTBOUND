@@ -169,6 +169,35 @@ def test_load_messages_file_assente_errore_leggibile(tmp_path):
         wa_lib.load_messages(tmp_path / "non-esiste.txt")
 
 
+# --- ordine dell'allowlist: "il primo della lista" deve essere UNO solo ----
+
+def test_allowlist_per_indice_segue_ordine_del_file(monkeypatch):
+    """Il 27/07 --indice 1 apriva il TERZO numero del file, perche' l'ordine
+    era alfabetico. Su una lettura non succede nulla; sulla scelta di quale
+    contatto sacrificare al test STOP significa bruciarne uno sbagliato, in
+    modo permanente."""
+    monkeypatch.setenv("POC_WA_ALLOWED_NUMBERS", "+393661376721,+393464200572,+393932977284")
+    al = wa_lib.AllowList.load()
+    assert al.per_indice(1) == "393661376721"      # il primo del FILE
+    assert al.per_indice(2) == "393464200572"
+    assert al.per_indice(3) == "393932977284"
+    # l'ordine alfabetico avrebbe messo 393464200572 al primo posto
+    assert al.ordinati[0] != sorted(al.ordinati)[0]
+
+
+def test_allowlist_per_indice_fuori_range(monkeypatch):
+    monkeypatch.setenv("POC_WA_ALLOWED_NUMBERS", "+393661376721")
+    with pytest.raises(wa_lib.NotAllowed):
+        wa_lib.AllowList.load().per_indice(2)
+
+
+def test_allowlist_duplicati_non_spostano_le_posizioni(monkeypatch):
+    monkeypatch.setenv("POC_WA_ALLOWED_NUMBERS", "+393661376721,+393464200572,+393661376721")
+    al = wa_lib.AllowList.load()
+    assert al.ordinati == ["393661376721", "393464200572"]
+    assert len(al) == 2
+
+
 # --- righe '#': il file arriva a Tommaso come template istruito ------------
 
 def test_load_messages_commenti_scartati(tmp_path):
