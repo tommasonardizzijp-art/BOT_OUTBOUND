@@ -101,18 +101,19 @@ Il canale usa la **strada A**: automazione browser **Patchright** su **WhatsApp 
 | V9 | **1 proxy mobile ↔ max 2 numeri, possibilmente stessa azienda.** Proxy forniti da Tommaso. | Evita correlazione multi-tenant su stesso IP; modello già usato su IG. |
 | V10 | **Opt-out per tipo campagna**: marketing → CTA "scrivi STOP" + gestione; follow-up → no. Togglabile, scoped per-canale. | Requisito ePrivacy + igiene anti-segnalazione. |
 
-### 3.2 Assunzioni (da verificare — rimando alle domande §17)
+### 3.2 Assunzioni — esiti M0 (aggiornato 27/07, dettaglio in [`poc-report.md`](poc-report.md))
 
-| # | Assunzione | Rischio se falsa | Verifica |
+| # | Assunzione | Rischio se falsa | Verifica → **esito M0** |
 |---|---|---|---|
-| A1 | La sessione WhatsApp Web su profilo Chromium persistente sopravvive giorni/settimane senza re-scan QR. | Ops onerosa: il cliente deve riscansionare spesso. | PoC-1 |
-| A2 | Si può aprire una chat esistente **per numero** in modo deterministico (search interna o deep-link), senza dipendere dall'ordine della lista chat. | L'invio diventa fragile. | PoC-2 |
-| A3 | La lista chat espone abbastanza informazione (titolo, badge unread, preview testo) per rilevare risposte **senza aprire la chat**. | Il reply-watcher marcherebbe "letto" → interferenza con l'umano. | PoC-3 |
-| A4 | Il DOM di WhatsApp Web è abbastanza stabile da reggere settimane con selettori robusti. | Manutenzione continua dei selettori. | PoC-1/3 (14 giorni) + monitor |
-| A5 | Un PC 16-32GB regge ~10 sessioni Chromium persistenti simultanee. | Serve seconda macchina / scaglionamento. | PoC-1 (campionamento RAM/CPU); M0-M3 girano sul PC attuale 7,4 GB (Q97) |
-| A6 | Volumi "qualche centinaio msg/giorno per numero" a contatti caldi non triggherano ban con timing umano. | Ridurre caps, rivedere pacing. | **Rampa M5** (ex PoC-5, spostato 24/07): resta non verificata fino al collaudo — rischio accettato, §13 |
-| A7 | WhatsApp Business (app) consente il numero di linked device necessario (≥1 slot libero per il bot). | Conflitto col WhatsApp Web che il cliente già usa. | PoC-1 + check per-cliente |
-| A8 | Il cliente accetta il modello "sessione scade → riscansiona QR" (a suo carico, guidato). | Serve remote-QR flow più sofisticato. | Contratto/onboarding |
+| A1 | La sessione WhatsApp Web su profilo Chromium persistente sopravvive giorni/settimane senza re-scan QR. | Ops onerosa: il cliente deve riscansionare spesso. | PoC-1 → ⏳ **in corso, giorno 0/14, verdetto 10/08**. Finora **nessun QR mai richiesto**. Il processo browser è morto una volta dopo 16 minuti, **la sessione no**: è la distinzione su cui regge tutto il resto |
+| A2 | Si può aprire una chat esistente **per numero** in modo deterministico (search interna o deep-link), senza dipendere dall'ordine della lista chat. | L'invio diventa fragile. | PoC-2 → ✅ **VERIFICATA, ma su una sola delle due strade**: 17/17 aperture con `open_by_search`. Il **deep-link è SCARTATO**: su un numero senza chat **ne crea una nuova**, violando V2 |
+| A3 | La lista chat espone abbastanza informazione (titolo, badge unread, preview testo) per rilevare risposte **senza aprire la chat**. | Il reply-watcher marcherebbe "letto" → interferenza con l'umano. | PoC-3 → ⚠️ **PARZIALE**. Titolo e badge sì; la **preview è vuota nel 68% delle righe** (46/68). Il rischio previsto non si materializza (il watcher non apre nulla per costruzione), ma **ne è emerso uno peggiore**: se è l'**umano** a leggere dal telefono, il badge sparisce e l'inbound diventa invisibile al watcher — osservato **4 volte il 27/07**. ⇒ il watcher **non può basarsi sul badge**: gli serve memoria propria |
+| A4 | Il DOM di WhatsApp Web è abbastanza stabile da reggere settimane con selettori robusti. | Manutenzione continua dei selettori. | PoC-1/3 (14 giorni) + monitor → ⚠️ **già smentita in partenza**: `div.message-in`/`message-out` **non esistono più** (0 nodi su 35 messaggi), `data-icon status-*` non è mai esistito. Fragilità nuova: spunte e un segnale di direzione su tre sono **testo localizzato in italiano** (`Consegnato`/`Letto`/`Tu:`) → un cliente con interfaccia in altra lingua li rompe |
+| A5 | Un PC 16-32GB regge ~10 sessioni Chromium persistenti simultanee. | Serve seconda macchina / scaglionamento. | PoC-1 → ✅ **MISURATA: ~1,2 GB per profilo** (1.186 e 1.135 MB). ⇒ 10 sessioni ≈ **12 GB di solo browser**: un 16 GB ne regge ~8 stretti, per starci comodi servono 32 GB. Sul PC attuale (7,4 GB, ~1,9 liberi) **una sola sessione**. ⇒ **domanda aperta a monte di M1: dove gira il browser** — PC di Tommaso, VPS, o macchina del cliente |
+| A6 | Volumi "qualche centinaio msg/giorno per numero" a contatti caldi non triggherano ban con timing umano. | Ridurre caps, rivedere pacing. | **Rampa M5** (ex PoC-5, spostato 24/07): resta non verificata fino al collaudo — rischio accettato, §13. M0 aggiunge però il **denominatore**: un invio completo costa **47 s di mediana**, quindi "qualche centinaio al giorno per numero" è un limite di **tempo macchina**, non solo di policy |
+| A7 | WhatsApp Business (app) consente il numero di linked device necessario (≥1 slot libero per il bot). | Conflitto col WhatsApp Web che il cliente già usa. | PoC-1 → ✅ **verificata sul campo**: lo slot c'era, sessione stabilita e coesistenza col telefono esercitata (uso umano in parallelo durante gli invii del 27/07) |
+| A8 | Il cliente accetta il modello "sessione scade → riscansiona QR" (a suo carico, guidato). | Serve remote-QR flow più sofisticato. | Contratto/onboarding → ⚠️ **il costo dell'assunzione è più alto di quanto sembrasse**: ogni riscansione fa ripartire la **sincronizzazione**, cioè la finestra in cui la guardia opt-out è cieca (A9). "Il cliente riscansiona" **non è un rimedio gratuito** |
+| **A9** | **(nuova, 27/07)** La cronologia visibile in una chat è **completa**: se non si vede uno STOP, non c'è. | **La guardia opt-out invia a chi aveva detto STOP.** | ❌ **SMENTITA.** WhatsApp Web sincronizza le chat progressivamente (485 su questo profilo) e riparte da capo dopo ogni riconnessione. Su una chat non ancora sincronizzata la guardia **non legge un silenzio: legge il vuoto**. `carica_cronologia` non distingue "chat finita" da "chat non ancora arrivata": entrambe smettono di produrre messaggi ⇒ serve la **quarta guardia fail-closed** sull'indicatore di sincronizzazione (§10) |
 
 ---
 
@@ -402,16 +403,42 @@ Tabella operativa (raffina quella del living doc con i moduli target):
 
 | Componente | Path proposto | Contenuto | Blueprint |
 |---|---|---|---|
-| POM WhatsApp Web | `browser/whatsapp_page.py` | Selettori + interazioni: stato sessione (QR? logged?), apertura chat per numero, invio con typing umano, lettura lista chat (titoli/badge/preview), screenshot diagnostici | `browser/instagram_page.py` (stile: selettori scoped, dismiss popup, no assumzioni layout) |
+| POM WhatsApp Web | `browser/whatsapp_page.py` | Selettori + interazioni: stato sessione (QR? logged?), apertura chat per numero, invio con typing umano, lettura lista chat (titoli/badge/preview), screenshot diagnostici. **Eredita il codice PoC di M0, non riparte da zero** (§6.4) | `browser/instagram_page.py` (stile: selettori scoped, dismiss popup, no assumzioni layout) + **script PoC M0 già misurati sul DOM reale** |
 | Worker invio | `workers/wa_worker.py` + `services/wa_sender.py` | Mini-sessioni per-numero: claim batch, browser, invio, `Retry(defer)` a fine sessione/budget | **`services/browser_bio.py`** (mini-sessione browser per-account + claim atomico + defer + escalation soft-block) — è il calco dichiarato |
 | Sequence engine | `services/wa_sequence_engine.py` | Valuta `next_action_at`, applica `send_condition`, accoda invii, avanza step, chiude contatti | pattern orchestratore IG |
-| Reply watcher | `services/wa_reply_watcher.py` + task cron | Scan periodico lista chat per numero attivo, produce `wa_inbound_events`, match contatto (§7.3) | `reply_checker.py` (solo pattern) |
-| Opt-out | dentro `wa_reply_watcher`/`wa_sequence_engine` | regex STOP-like su `preview_text` → `opted_out` + stop sequenza + evento | P2 |
+| Reply watcher | `services/wa_reply_watcher.py` + task cron | Scan periodico lista chat per numero attivo, produce `wa_inbound_events`, match contatto (§7.3). **Correzione M0:** non può dedurre "è arrivato qualcosa" dal **badge unread**, perché il badge sparisce quando l'**umano** legge dal telefono (osservato 4 volte il 27/07). Serve **memoria propria dello stato per riga** e confronto per **delta tra scan**, non lettura dell'istante | `reply_checker.py` (solo pattern) + `poc3_scan.py` (selettori già catalogati) |
+| Opt-out | dentro `wa_reply_watcher`/`wa_sequence_engine` | regex STOP-like su `preview_text` → `opted_out` + stop sequenza + evento. **Limiti misurati in M0:** la preview è **vuota nel 68% delle righe**, quindi la lista da sola non è una garanzia — la garanzia resta la **guardia pre-invio** sulla conversazione aperta. E finché i **vocali** non si trascrivono, l'opt-out copre **solo gli STOP scritti** (§sviluppi-futuri F9) | P2 |
 | Ingest CSV | `services/wa_ingest.py` + endpoint | parse, validazione E.164, dedup, HMAC, staging→contatti, report righe scartate | `import_resolver.py` / `ig_username.py` (parser difensivo) |
 | Pseudonymizer | `utils/phone_pseudonym.py` | `hmac_phone(e164) -> str` + helper masking log (`+39•••••077`) | P12 |
 | Session/QR flow | `services/wa_session.py` + endpoint admin | health-check sessione, stato `qr_required`, pagina admin che mostra il QR al cliente (screenshot/stream), conferma link | `manual_login.py` (login browser assistito IG) |
 | API REST | `api/wa_campaigns.py`, `api/wa_numbers.py`, `api/wa_contacts.py`, `api/tenants.py` | CRUD + start/pause/stop + ingest + KPI | `api/campaigns.py` |
 | Frontend | `frontend/src/app/wa/…` | **Mondo WA separato** (review 23/07): stessa shell e stesso login, **picker canale post-login** (scegli Instagram o WhatsApp), poi interfaccia WA costruita da zero con **tema dedicato verde WhatsApp scuro** (proposta #128C7E) mentre IG si sposta verso magenta/rosa brand IG — il colore dice a colpo d'occhio "dove sono". Nessuna vista mista: i due mondi non condividono pagine né dati. Pagine WA: campagne, numeri, ingest, KPI | pagine campaigns esistenti (solo come pattern) |
+
+### 6.4 Cosa il POM eredita da M0 (aggiunto 27/07)
+
+Gli script di M0 sono usa-e-getta, **la conoscenza che contengono no**. Ognuna di queste righe costa un errore già pagato: reintrodurla in `whatsapp_page.py` significa rifare lo stesso bug su codice di produzione, dove costa di più.
+
+| Cosa | Perché non si torna indietro | Dove sta oggi |
+|---|---|---|
+| **Apertura chat via ricerca** (`open_by_search`) | Il deep-link su un numero senza chat **ne crea una nuova** → viola V2 | `poc2_open.py` |
+| **Selezione del risultato per sezione**, mai con Enter né per posizione | Le intestazioni di sezione sono `[role='row']` come le chat, e sotto ci sono i **gruppi** — fuori perimetro, e aprirli li marca letti | `apri_chat_da_risultati()` |
+| **Svuotare la ricerca prima di digitare** | Senza, il secondo numero si accoda al primo e la ricerca fallisce | `svuota_ricerca()` |
+| **Caricare la cronologia È parte della guardia**, non un accessorio | Conversazione virtualizzata: senza scroll restano ~17 messaggi degli ultimi minuti, e uno STOP di 20 minuti prima **non esiste nel DOM** | `carica_cronologia()` |
+| **Direzione da 3 segnali combinati asimmetricamente** (`aria-label='Tu:'`, `data-icon tail-in/out`, forma del `data-id`) — in dubbio vale **inbound** | `div.message-in`/`message-out` non esistono più: 0 nodi su 35 messaggi. L'asimmetria è deliberata: leggere un messaggio in più costa nulla, saltarne uno costa un opt-out violato | `poc2_send.py` (`JS_TAIL`) |
+| **Guardia che legge gli ultimi 40 inbound ovunque siano**, senza fermarsi al primo messaggio nostro | Uno STOP seguito da una nostra risposta diventerebbe invisibile per sempre | `guardia_pre_invio()` |
+| **Sentinella "coda non agganciata" ⇒ non si invia** | Cecità ≠ silenzio. Senza, un selettore rotto farebbe concludere "nessuno STOP" e inviare **sempre** | `poc2_send.py` |
+| **Opt-out persistente: visto una volta, vale per sempre** | Il DOM può smettere di mostrarlo; la decisione no | `poc_state.py` (in M1 va a DB) |
+| **Spunte da `aria-label` `Consegnato`/`Letto`** | `data-icon status-*` non esiste. ⚠️ **localizzato in italiano**: da irrobustire prima di un cliente non italiano | `TICK_SEL` |
+| **Riga lista: `[role='row']` filtrate su `cell-frame-title`** | Le intestazioni di sezione sono righe identiche; `[role='listitem']` non esiste | `poc3_scan.py` |
+| **Rimozione dei marcatori di direzione Unicode** (`U+202A`-`U+202E`) dai `title` | Su console Windows cp1252 **uccidono lo script**; sporcano ogni confronto | `poc3_scan.py`, `_common.py` |
+| **Sessione persistente, non apri-e-chiudi per operazione** | 10 cicli in 45 minuti di sola diagnostica; a regime sarebbero decine al giorno. Nessun umano usa WhatsApp Web così, e ogni riapertura rifà l'handshake col telefono | `wa_daemon.py` |
+| **Scroll con la rotellina, non `scrollTop`** | Genera eventi di scroll veri, che una sessione automatizzata altrimenti non produce mai | `carica_cronologia()` |
+
+**Tre cose che M0 ha lasciato aperte e che M1 deve costruire, non ereditare:**
+
+1. **Quarta guardia sul risync** (A9) — indicatore di sincronizzazione presente ⇒ non si invia. Il selettore non è ancora catalogato: si cattura alla prima riconnessione.
+2. **Ri-lettura della coda subito prima di premere invio** — tra guardia e invio passano ~20 s misurati, ed è una finestra TOCTOU in cui uno STOP non viene visto. La seconda lettura costa poco: la cronologia è già caricata.
+3. **Memoria propria del watcher** — vedi `wa_reply_watcher` in §6.3.
 
 ---
 
@@ -765,6 +792,9 @@ I contatti sono caldi: chat esistenti, relazione reale col business. I vettori d
 | FM13 | DB/Supabase blip | `is_transient_db_error` | `Retry(defer=60)` (riuso db_resilience) | automatico |
 | FM14 | PC riavviato / blackout | profili e DB persistenti; Redis persiste i job | al riavvio: startup guard (pattern worker DM) sana i `sending` stale → `queued` | recovery cron (riuso pattern `recovery_checker`) |
 | FM15 | Kill-switch attivato | check interno in ogni job | tutto si ferma entro il job corrente | `/unhalt` riaccoda solo lavoro ancora attivo |
+| **FM16** | **Chat non ancora sincronizzata: la guardia legge il vuoto e lo scambia per silenzio** (A9, scoperto 27/07) | ⚠️ **oggi non rilevabile**: `carica_cronologia` non distingue "chat finita" da "chat non ancora arrivata". Serve il selettore dell'indicatore di sincronizzazione, **non ancora catalogato** | **quarta guardia fail-closed: indicatore presente ⇒ non si invia.** Contatto resta `queued`, non `failed` — è colpa nostra, non sua | attesa fine sincronizzazione; retry al giro dopo. Il selettore si cattura alla **prima riconnessione** che capita |
+| **FM17** | **Inbound letto dall'umano prima dello scan: sparisce dalla vista del watcher** (A3, osservato 4× il 27/07) | il badge unread è già a zero quando arriva lo scan: **non c'è niente da rilevare** | il watcher tiene **memoria propria per riga** e confronta i **delta tra scan**, invece di leggere lo stato dell'istante | nessun recupero possibile a posteriori: se conteneva uno STOP è perso. Da qui la regola: **la garanzia opt-out sta nella guardia pre-invio, non nel watcher** |
+| **FM18** | **Watcher morto senza saperlo** (osservato 27/07: browser caduto, accorto solo allo scan dopo, 15 min di cecità) | liveness check **più fitto dello scan**, non lo scan stesso | riavvio automatico del browser; la sessione WhatsApp sopravvive al processo, quindi non serve QR | automatico; alert solo se il riavvio fallisce |
 
 Principio trasversale (lezione IG): **distinguere sempre "colpa del contatto" (→ failed/DNC) da "colpa nostra/dell'infrastruttura" (→ pausa e retry, i contatti restano queued)**. Un selettore rotto non deve bruciare una lista.
 
@@ -938,7 +968,7 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 16. [S] Re-upload dello stesso CSV con attributi cambiati: aggiornare `attributes` dei contatti esistenti o ignorare? (Proposta: aggiornare, gap-fill come `global_contacts`.)
 17. [T] Il `nome` dal CSV vs il nome che il cliente ha in rubrica WhatsApp possono divergere: quale usare nei template? (Proposta: sempre quello CSV — è quello che il titolare conosce.)
 18. [S] Cancellare contatti da una campagna dopo l'ingest (rimozione manuale singola): serve in MVP?
-19. [PoC] `chat_title` è stabile nel tempo? (Se il cliente rinomina il contatto in rubrica, il matching del watcher si rompe → serve re-learn del title a ogni invio.)
+19. [PoC] `chat_title` è stabile nel tempo? (Se il cliente rinomina il contatto in rubrica, il matching del watcher si rompe → serve re-learn del title a ogni invio.) — ⚠️ **PARZIALE (M0).** Attenzione: M0 ha risposto a una domanda **diversa** da quella scritta qui. È catalogato *cosa* mostra il titolo — nome di rubrica, oppure il **numero** se il contatto non è in rubrica (**8 su 68**), distinti da `title_is_number` — ed è il segnale che decide cosa è PII da mascherare. La **stabilità nel tempo** non è verificata: servirebbe confrontare i titoli tra scan lungo i 14 giorni di PoC-1, cosa che gli artefatti già permettono di fare a costo zero. **Resta aperta.**
 20. [S] Dedup: due tenant con lo stesso numero contatto = due `wa_contacts` distinti (scoping per-tenant). Confermato dal modello — verificare che nessuna query rompa l'isolamento.
 21. [S] Import parziale fallito a metà (crash durante ingest): transazionalità — tutto-o-niente o riga-per-riga con resume? (Proposta: riga-per-riga idempotente, il re-upload sana.)
 22. [T] Massimo contatti per campagna in MVP? (Proposta: soft limit 5.000 — oltre, i tempi con cap 100-200/giorno diventano mesi: va detto al cliente.)
@@ -964,10 +994,10 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 
 37. [PoC] Metodo di apertura chat per numero: search interna vs deep-link `/send?phone=` — quale regge meglio? Il deep-link su numero SENZA chat esistente cosa mostra esattamente? (Serve per la guardia V2.)
 38. [PoC] Segnale DOM affidabile per "questa chat ha cronologia" (V2): quale?
-39. [PoC] Segnale DOM per spunte (orologio/1/2) sull'ultimo messaggio inviato: leggibile in modo stabile?
-40. [PoC] La lista chat virtualizza le righe (rendering solo visibili)? Quanto scroll serve per coprire le chat rilevanti del giorno?
-41. [PoC] Badge unread: esposto come testo/aria-label o solo classe CSS? Robustezza del selettore.
-42. [PoC] Direzione ultimo messaggio (inbound/outbound) leggibile dalla preview lista? (Serve a C4 e al miss-detection di 7.3.)
+39. [PoC] Segnale DOM per spunte (orologio/1/2) sull'ultimo messaggio inviato: leggibile in modo stabile? — ✅ **CHIUSA (M0).** Sì, ma **non dove ci si aspettava**: `data-icon status-*` **non esiste**. Le spunte sono `aria-label` **`Consegnato`** / **`Letto`**, lette su 13 invii su 13 (10 consegnato, 3 letto). ⚠️ **Sono testo localizzato in italiano**: da irrobustire prima di un cliente con interfaccia in altra lingua.
+40. [PoC] La lista chat virtualizza le righe (rendering solo visibili)? Quanto scroll serve per coprire le chat rilevanti del giorno? — ✅ **CHIUSA (M0), ed è più severa del previsto.** **485 chat dichiarate** (`aria-rowcount`), **67-70 nel DOM** (~14%). Il piano stimava 30-100 chat totali: l'ordine di grandezza reale è **5× più grande**. Per il watcher va bene comunque, perché WhatsApp ordina per attività recente e un inbound nuovo sale in cima da solo; **non** va bene per raggiungere una chat vecchia, che si apre solo per ricerca. **Resta da misurare** il costo di uno scan completo delle 485.
+41. [PoC] Badge unread: esposto come testo/aria-label o solo classe CSS? Robustezza del selettore. — ✅ **CHIUSA (M0).** `[data-testid='icon-unread-count']` (**non** `span[aria-label*='non lett']`, che era l'ipotesi e non aggancia nulla). ⚠️ Il badge è affidabile come selettore ma **inaffidabile come segnale**: sparisce quando l'umano legge dal telefono (A3).
+42. [PoC] Direzione ultimo messaggio (inbound/outbound) leggibile dalla preview lista? (Serve a C4 e al miss-detection di 7.3.) — ✅ **CHIUSA (M0).** Sì: la presenza di un `<svg><title>wds-ic-*` nella riga ⇒ **l'ultimo messaggio è nostro**. Misurato su 68 righe: 5 `read`, 1 `delivered`, 62 senza icona (ultimo messaggio dell'altro). Valori attesi ma non ancora osservati: `wds-ic-sent`, `wds-ic-pending`.
 43. [PoC] WhatsApp Web ha aggiornamenti forzati ("Aggiorna WhatsApp Web")/interstitial che bloccano la pagina? Come si presentano nel DOM?
 44. [PoC] Selettori: WhatsApp Web usa classi offuscate/instabili — puntare a `aria-*`/`data-testid`/ruoli? Catalogare in PoC la strategia meno fragile.
 45. [S] Lingua interfaccia WhatsApp Web: forzare l'account/browser a lingua fissa (en o it) per stabilità selettori testuali? (Lezione IG: pagina-morta solo-EN.)
@@ -975,7 +1005,7 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 47. [PoC] `web.whatsapp.com` su Chromium Patchright con profilo persistente: serve user-agent particolare o va liscio?
 48. [S] Screenshot diagnostici su failure: dove salvarli, quanta retention, contengono PII (schermata chat!) → cifrarli o mascherarli?
 49. [PoC] Typing nel box messaggi: newline con Shift+Enter come su IG? Incolla da clipboard rilevabile vs typing? (MVP: sempre typing umanizzato.)
-50. [PoC] Tempo medio di apertura chat + invio: quanto costa un messaggio in secondi? (Dimensiona i cap giornalieri realistici.)
+50. [PoC] Tempo medio di apertura chat + invio: quanto costa un messaggio in secondi? (Dimensiona i cap giornalieri realistici.) — ✅ **CHIUSA (M0), n=13.** Costo **pieno** di un invio (apertura + guardia + typing + verifica spunta): mediana **47,2 s**, p95 **59,6 s**, max 61,1 s. Scomposto: apertura 17,8 s · guardia 5,7 s · il resto typing e verifica. ⇒ **~75 invii/ora di puro tempo macchina per sessione**, prima ancora di applicare il pacing anti-ban. È questo — non `guardia_totale_ms` — il numero da cui escono i cap.
 51. [PoC] RAM/CPU per sessione Chromium con WhatsApp Web aperto stabile (verifica A5 con numeri veri).
 52. [S] Il watcher e il sender condividono lo stesso browser/pagina del numero (mutex) — o pagine separate stesso profilo? (Proposta: stessa pagina, un solo contesto per numero, azioni serializzate dal mutex.)
 
@@ -1007,9 +1037,9 @@ Domande aperte, raggruppate. **[T]** = decide Tommaso (prodotto/business) · **[
 
 ### G. Coesistenza
 
-73. [PoC] C3: aprire la chat per inviare quando c'è un unread — la rivalutazione pre-invio (§9) è implementabile in modo affidabile?
+73. [PoC] C3: aprire la chat per inviare quando c'è un unread — la rivalutazione pre-invio (§9) è implementabile in modo affidabile? — ✅ **CHIUSA (M0), con tre condizioni.** Sì: la guardia ha **bloccato un invio reale** su uno STOP vero e ha registrato l'opt-out; al tentativo successivo il numero è stato skippato **senza aprire la chat**. Costo: mediana **5,7 s**, p95 7,5 s, max 12,1 s — quindi il criterio originale "≤ 2 s" **va ritarato a ≤ 10 s / p95 ≤ 8 s**, perché caricare la cronologia virtualizzata è parte della guardia e non è aggirabile. Le tre condizioni senza cui la risposta torna "no": **(a)** sentinella coda-non-agganciata ⇒ non si invia; **(b)** opt-out persistito, perché il DOM può smettere di mostrarlo; **(c)** quarta guardia sul risync (A9), altrimenti la guardia legge il vuoto e lo scambia per silenzio.
 74. [S] C4: soglia "outbound umano recente" — quante ore? (Proposta: 4h.)
-75. [PoC] L'invio bot mentre l'umano ha la STESSA chat aperta sul telefono: effetti visibili? (Il messaggio appare "scritto da solo" sul suo schermo aperto.)
+75. [PoC] L'invio bot mentre l'umano ha la STESSA chat aperta sul telefono: effetti visibili? (Il messaggio appare "scritto da solo" sul suo schermo aperto.) — ⏭️ **NON CHIUSA — PoC-4 bypassato** (decisione Tommaso, 27/07). Motivo: durante il batch di invii stava già scrivendo a mano dal telefono sullo stesso numero senza problemi, e il multi-dispositivo è funzione nativa di WhatsApp Business. Resta formalmente aperta ma **declassata**: il rischio vero non è la convivenza umano/bot, è il riconoscimento dell'automazione.
 76. [T] Va detto al cliente di NON usare WhatsApp Web suo in parallelo sulla stessa chat mentre gira una campagna? (Regola operativa da runbook.)
 77. [S] L'umano cancella/archivia una chat che il bot deve toccare: comportamento? (Archiviata: il deep-link la riapre? PoC. Cancellata: cronologia persa → guardia V2 la skippa — corretto?)
 78. [T] Il cliente mette il numero in "away/absence message" automatico di WhatsApp Business: interferenze col watcher? (L'auto-reply del Business è outbound automatico non-bot… nostro. Da osservare in PoC-4.)
