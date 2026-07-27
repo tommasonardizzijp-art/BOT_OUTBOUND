@@ -257,6 +257,8 @@ Tommaso ha accettato il trade-off il 27/07 dopo averlo avuto per iscritto. La **
 | — | **Revoca dell'opt-out = override manuale di Tommaso**, nessun comando in M0 | 27/07 | evenienza rarissima. Diventa **requisito M1** quando l'opt-out passa a DB, non debito di M0 |
 | — | **Il messaggio che chiedeva "rispondi STOP" è stato RIMOSSO da `messages.txt`** | 27/07 | restava sorteggiabile da `poc2_send`: avrebbe messo in opt-out permanente altri contatti veri. Gli indici di `--messaggio-n` sono scalati di 1 |
 | — | **`poc4_coexist` passa da deep-link a `open_by_search`** | 27/07 | era rimasto sulla strategia scartata in PoC-2a: avrebbe misurato la coesistenza su codice che M3 non usa |
+| — | **PoC-1 dato per passato in anticipo**: la pianificazione di M1 parte senza aspettare il 10/08 | 27/07 | motivo di Tommaso: una sessione caduta si risolve facendo riscansionare il QR al cliente. **Ma** ogni riscansione riapre la finestra di risync (A9) ⇒ la quarta guardia diventa **obbligatoria**, non opzionale. La *frequenza* di caduta va misurata lo stesso: decide se M1 ha bisogno di riavvio automatico e alerting |
+| — | **Deployment: il browser gira sul PC di Tommaso.** In futuro possibile anche sui PC dei clienti, con credenziali e dati loro | 27/07 | **niente pagina admin per il QR da remoto in M1**: il login è assistito e locale (calco `manual_login.py`). Vincolo di progetto: sessione/QR **dietro un'interfaccia** e multi-tenant **nello schema fin da subito**, altrimenti il passaggio a "il cliente lo esegue in casa sua" è una riscrittura. Capienza misurata: **1 numero per volta** su questa macchina (1,2 GB per profilo su 7,4 GB) |
 
 ### Il criterio "guardia ≤ 2s" va ritarato, non dichiarato fallito
 
