@@ -269,6 +269,51 @@ INTESTAZIONI_RICERCA = {
 }
 
 
+MSG_SEL = "#main [data-id], #main [data-testid^='conv-msg-']"
+
+
+async def carica_cronologia(page, minimo: int = 60, max_giri: int = 20) -> dict:
+    """Scrolla la conversazione verso l'alto finche' non ha caricato abbastanza
+    messaggi (o finche' non ne arrivano piu').
+
+    PERCHE' SERVE (misurato il 27/07). La conversazione e' VIRTUALIZZATA: nel
+    DOM ci sono solo i messaggi della finestra visibile, gli altri vengono
+    scaricati dalla memoria. Su una chat attiva ne restavano 17, tutti degli
+    ultimi 3 minuti — e uno STOP di venti minuti prima semplicemente NON
+    ESISTEVA nel DOM. La guardia non l'aveva letto male: non aveva niente da
+    leggere. Senza questo caricamento, la garanzia opt-out vale solo per i
+    messaggi che stanno a schermo in quel momento.
+
+    Si scrolla con la ROTELLINA e non con scrollTop: genera eventi di scroll
+    veri, che una sessione automatizzata altrimenti non produce mai, ed e' anche
+    il modo in cui WhatsApp si aspetta di essere sfogliato.
+    """
+    n_prima = await page.locator(MSG_SEL).count()
+    box = await page.locator("#main").bounding_box()
+    if not box:
+        return {"ok": False, "motivo": "#main senza bounding box", "messaggi": n_prima}
+
+    cx = box["x"] + box["width"] / 2
+    cy = box["y"] + box["height"] / 2
+    await page.mouse.move(cx, cy)
+
+    giri, fermi = 0, 0
+    n = n_prima
+    while n < minimo and giri < max_giri and fermi < 3:
+        await page.mouse.wheel(0, -random.randint(700, 1400))
+        await asyncio.sleep(random.uniform(0.5, 1.1))   # tempo di caricare
+        nuovo = await page.locator(MSG_SEL).count()
+        # "fermi" conta i giri che non hanno portato nulla: la conversazione
+        # puo' semplicemente essere finita (inizio chat), e insistere per 20
+        # giri su una chat corta e' rumore inutile.
+        fermi = fermi + 1 if nuovo == n else 0
+        n = nuovo
+        giri += 1
+
+    return {"ok": True, "messaggi_prima": n_prima, "messaggi_dopo": n,
+            "giri": giri, "esaurita": fermi >= 3}
+
+
 async def svuota_ricerca(page, box) -> bool:
     """Svuota la casella di ricerca e conferma che sia VERAMENTE vuota.
 

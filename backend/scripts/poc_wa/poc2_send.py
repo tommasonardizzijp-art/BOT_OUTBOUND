@@ -32,7 +32,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _common import MESSAGES_FILE, artifacts_dir, first_locator, human_type, log_event, snap, wa_context
+from _common import (MESSAGES_FILE, artifacts_dir, carica_cronologia, first_locator,
+                     human_type, log_event, snap, wa_context)
 from poc2_open import COMPOSER_SEL, open_by_search
 from poc_state import OptOutStore, SentLog
 from wa_lib import AllowList, contains_stop, load_messages, mask_pii, normalize_e164
@@ -115,9 +116,19 @@ JS_TAIL = """
     return (out && !inn) ? 'out' : 'in';
   };
 
+  // NON ci si ferma piu' al primo messaggio nostro (cambiato il 27/07 su
+  // evidenza di una chat vera). Prima la regola era "leggi cio' che e' arrivato
+  // dopo di noi": bastava un messaggio nostro — anche scritto A MANO dal
+  // cliente — dopo uno STOP per renderlo invisibile alla guardia. Misurato:
+  // uno STOP pulito all'indice 69 non veniva letto perche' ai 3 messaggi
+  // successivi seguivano nostre risposte manuali.
+  // Ora si leggono gli ultimi N messaggi INBOUND della conversazione, ovunque
+  // siano. Costo accettato: uno STOP vecchio e gia' gestito blocca un invio.
+  // E' il verso giusto in cui sbagliare — stessa asimmetria della direzione:
+  // un invio bloccato di troppo si recupera, un messaggio a chi ha detto STOP no.
   const tail = [];
-  for (let i = rows.length - 1; i >= 0 && tail.length < 30; i--) {
-    if (direzione(rows[i]) === 'out') break;   // fermati al nostro ultimo
+  for (let i = rows.length - 1; i >= 0 && tail.length < 40; i--) {
+    if (direzione(rows[i]) === 'out') continue;   // i nostri non fermano piu'
     tail.push((rows[i].innerText || '').slice(0, 300));
   }
   return tail.reverse();
@@ -203,16 +214,24 @@ def _ts() -> str:
 
 
 async def guardia_pre_invio(page) -> tuple[list[str] | None, float, bool]:
-    """Ritorna (inbound_dopo_ultimo_nostro, millisecondi, stop_trovato).
+    """Ritorna (ultimi_inbound, millisecondi, stop_trovato).
 
-    `inbound_dopo_ultimo_nostro` e' None quando JS_TAIL non ha agganciato
-    NESSUNA bolla nel DOM (sentinella A2): distinto da lista vuota, che
-    significa "nessun inbound dopo il nostro ultimo messaggio" (caso normale).
+    `ultimi_inbound` e' None quando JS_TAIL non ha agganciato NESSUNA bolla nel
+    DOM (sentinella A2): distinto da lista vuota, che significa "nessun inbound
+    da leggere" (caso normale su una chat senza risposte).
+
+    PRIMA di leggere si CARICA la cronologia. La conversazione e' virtualizzata:
+    senza scroll nel DOM restano solo i messaggi visibili — misurato il 27/07,
+    17 messaggi tutti degli ultimi 3 minuti — e uno STOP di venti minuti prima
+    non esiste proprio. La guardia non lo leggeva male: non aveva niente da
+    leggere. Il caricamento e' parte della guardia, non un accessorio.
     """
     t0 = time.perf_counter()
+    info = await carica_cronologia(page, minimo=80)
     tail = await page.evaluate(JS_TAIL)
     ms = (time.perf_counter() - t0) * 1000
     stop = any(contains_stop(t) for t in tail) if tail is not None else False
+    log_event("guardia_cronologia", **info)
     return tail, ms, stop
 
 
