@@ -186,11 +186,22 @@ async def wa_context(headless: bool = False):
         except OSError:
             pass
 
-    args = ["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+    # --window-size + no_viewport invece di viewport={...}: con una finestra
+    # visibile, `viewport` fa aprire Chromium alla dimensione di default e POI
+    # la ridimensiona. Tommaso lo vedeva come un glitch (27/07), e la pagina lo
+    # vede come un evento `resize` identico al pixel a ogni singolo avvio, per
+    # 14 giorni. Un resize all'apertura e' innocuo; una firma perfettamente
+    # ripetuta e' gratis da evitare. Cosi' la finestra nasce gia' giusta e
+    # l'evento non si genera affatto.
+    args = [
+        "--no-sandbox",
+        "--disable-blink-features=AutomationControlled",
+        "--window-size=1440,900",
+    ]
     kwargs = dict(
         user_data_dir=str(PROFILE_DIR),
         headless=headless,
-        viewport={"width": 1440, "height": 900},
+        no_viewport=True,
         locale="it-IT",
         timezone_id="Europe/Rome",
         args=args,

@@ -47,21 +47,95 @@ from wa_lib import AllowList, contains_stop, load_messages, mask_pii, normalize_
 # invierebbe SEMPRE, sembrando funzionare. Prima di usare questo script con
 # --send, controlla nel catalogo (docs/whatsapp/wa-dom-catalog.md) che i
 # conteggi delle bolle siano > 0.
+# RISCRITTO il 27/07 sul DOM reale (probe_conversazione + probe_direzione).
+#
+# La versione precedente cercava `div.message-in` / `div.message-out`: quelle
+# classi NON ESISTONO PIU'. Misurato su una chat vera con 35 messaggi: 0 nodi
+# agganciati, su tutte e quattro le varianti provate. La guardia sarebbe
+# ritornata `null` a ogni invio -> la sentinella avrebbe bloccato tutto, quindi
+# fail-safe, ma inutilizzabile.
+#
+# Cosa esiste davvero: ogni messaggio e' `#main [data-testid='msg-container']`,
+# che porta anche `data-id` (35/35). La DIREZIONE non e' piu' una classe, e le
+# classi rimaste sono offuscate (`xa0aww2`, `xscbp6u`) e NON discriminano —
+# verificato incrociando i campioni, la prima analisi le aveva indicate per un
+# artefatto di campione piccolo.
+#
+# Tre segnali di direzione, misurati:
+#   1. <span aria-label="Tu:"> dentro il messaggio  -> nostro. Semantico e
+#      chiaro, ma ITALIANO: se l'interfaccia cambia lingua smette di funzionare.
+#      Assente su ~20% dei messaggi (blocchi consecutivi).
+#   2. data-icon 'tail-out' / 'tail-in' -> la coda grafica della bolla. Sicuro
+#      ma presente solo sul primo messaggio di ogni blocco (15/35).
+#   3. `data-id`: 20 caratteri con prefisso "3A" -> IN, 32 caratteri con
+#      prefisso "A5" -> OUT. Copertura 100%, coerente 12/12 con i tail.
+#      NON documentato da WhatsApp: usato come segnale, mai da solo.
+#
+# REGOLA DI COMBINAZIONE, deliberatamente asimmetrica: un messaggio e' "nostro"
+# solo se ALMENO UN segnale dice OUT e NESSUNO dice IN. In ogni altro caso —
+# discordanza, o nessun segnale — vale INBOUND, quindi lo si legge.
+# Il motivo e' che i due errori non costano uguale:
+#   - trattare un nostro messaggio come inbound = si legge qualche messaggio in
+#     piu' del necessario; al peggio si trova uno STOP vecchio e NON si invia.
+#   - trattare un inbound come nostro = ci si ferma prima di leggerlo, e uno
+#     STOP appena arrivato non viene visto. Si scrive a chi ha chiesto di
+#     smettere. Inaccettabile.
+# In dubbio, quindi, si legge.
 JS_TAIL = """
 () => {
-  const rows = Array.from(document.querySelectorAll('div.message-in, div.message-out'));
-  if (rows.length === 0) return null;   // nessuna bolla agganciata: sentinella, non "coda vuota"
+  // Un solo nodo per messaggio. `msg-container` e `[data-id]` sono due nodi
+  // ANNIDATI, non lo stesso: cercarli insieme raddoppiava la lista (misurato
+  // il 27/07 — ogni messaggio compariva due volte, e il duplicato senza
+  // data-id aveva un segnale di direzione in meno). Il nodo che porta il
+  // data-id porta anche data-testid="conv-msg-<id>": i due selettori qui
+  // sotto individuano quindi lo STESSO elemento, e querySelectorAll lo
+  // restituisce una volta sola.
+  const rows = Array.from(document.querySelectorAll(
+    "#main [data-id], #main [data-testid^='conv-msg-']"));
+  if (rows.length === 0) return null;   // sentinella: cecita', non "coda vuota"
+
+  const direzione = (el) => {
+    let out = false, inn = false;
+
+    // 1. etichetta semantica del mittente (it)
+    if (el.querySelector("span[aria-label='Tu:']")) out = true;
+    const lab = el.querySelector("span[aria-label$=':']");
+    if (lab && lab.getAttribute('aria-label') !== 'Tu:') inn = true;
+
+    // 2. coda grafica della bolla
+    if (el.querySelector("[data-icon='tail-out']")) out = true;
+    if (el.querySelector("[data-icon='tail-in']")) inn = true;
+
+    // 3. forma del data-id
+    const id = el.getAttribute('data-id') || '';
+    if (/^3A/.test(id) && id.length <= 24) inn = true;
+    else if (/^A5/.test(id) || id.length >= 30) out = true;
+
+    // asimmetrica di proposito: OUT solo se nessun segnale dice IN
+    return (out && !inn) ? 'out' : 'in';
+  };
+
   const tail = [];
   for (let i = rows.length - 1; i >= 0 && tail.length < 30; i--) {
-    const el = rows[i];
-    const isOut = el.classList.contains('message-out');
-    if (isOut) break;                     // fermati al nostro ultimo messaggio
-    tail.push((el.innerText || '').slice(0, 300));
+    if (direzione(rows[i]) === 'out') break;   // fermati al nostro ultimo
+    tail.push((rows[i].innerText || '').slice(0, 300));
   }
   return tail.reverse();
 }
 """
-TICK_SEL = ["[data-icon='status-dblcheck']", "[data-icon='status-check']", "[data-icon='status-time']"]
+# Spunte di consegna — Q39 RISOLTA il 27/07, ma non come previsto.
+# Nessuno dei `data-icon='status-*'` esiste piu' (0 nodi su una chat con 35
+# messaggi). Lo stato e' esposto come ARIA: `aria-label` " Consegnato " /
+# " Letto " / " In attesa ". Verificato con probe_guardia: aggancia
+# `[aria-label*='Consegnato']` su un messaggio inviato davvero.
+# I `data-icon` restano in coda come fallback per versioni piu' vecchie.
+# ATTENZIONE: e' testo LOCALIZZATO. Su interfaccia non italiana smette di
+# funzionare — accettabile in MVP (Q6: solo italiano), da rivedere in M1 se
+# il cliente cambia lingua.
+TICK_SEL = [
+    "[aria-label*='Consegnato']", "[aria-label*='Letto']", "[aria-label*='In attesa']",
+    "[data-icon='status-dblcheck']", "[data-icon='status-check']", "[data-icon='status-time']",
+]
 
 # Colonne del CSV di audit (A6): una riga "invio" viene scritta SUBITO dopo
 # l'Enter (prima di leggere la spunta, che puo' impiegare secondi ed eccepire),

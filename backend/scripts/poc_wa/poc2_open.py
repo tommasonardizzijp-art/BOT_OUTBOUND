@@ -19,7 +19,7 @@ import csv
 import time
 from datetime import datetime, timezone
 
-from _common import artifacts_dir, first_locator, log_event, snap, wa_context
+from _common import artifacts_dir, first_locator, human_type, log_event, snap, wa_context
 from wa_lib import AllowList, normalize_e164
 
 SEARCH_SEL = ["[data-testid='chat-list-search']", "div[contenteditable='true'][data-tab='3']",
@@ -56,8 +56,11 @@ async def open_by_search(page, e164: str) -> tuple[bool, float, str]:
         # A3: il ramo di fallimento deve contenere il marcatore 'nessuna-cronologia',
         # altrimenti il Task 8 lo legge come "ha cronologia, procedi".
         return False, (time.perf_counter() - t0) * 1000, "nessuna-cronologia:casella-ricerca-non-trovata"
-    await box[0].click()
-    await page.keyboard.type(e164, delay=60)
+    # human_type e NON keyboard.type(delay=60): un ritardo fisso e' varianza
+    # ZERO su dodici cifre consecutive, la firma robotica piu' banale da
+    # misurare. Coerente con la regola gia' adottata su Instagram: struttura e
+    # header rigidi, timing rumoroso. (Corretto il 27/07 su domanda di Tommaso.)
+    await human_type(page, box[0], e164)
     await page.wait_for_timeout(2500)
     # A4: verifica che il focus sia ANCORA sulla casella di ricerca subito prima
     # di premere Enter. In --strategia both questa funzione gira appena dopo il

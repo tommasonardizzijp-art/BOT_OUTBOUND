@@ -31,35 +31,80 @@
 **`aria-label` reale del pannello: `"Lista delle chat"`.** Il candidato originale cercava
 `"Elenco chat"` — vicino e inutile. È la ragione per cui questo catalogo esiste.
 
-## Pannello conversazione — NON VERIFICATO (base della guardia pre-invio, Task 8)
+## Pannello conversazione — VERIFICATO (Step 1b, chat reale con 35 messaggi)
 
-Il probe ha misurato **0** per tutti questi selettori, ma **senza alcuna chat aperta**:
-il risultato è privo di significato in entrambe le direzioni. Va rifatto con lo Step 1b.
-
-| Elemento | Ipotesi corrente | Conteggio a chat CHIUSA | Stato |
+| Elemento | Selettore VERO | Copertura | Note |
 |---|---|---|---|
-| Contenitore conversazione | `#main` | 0 | NON VERIFICATO |
-| Bolla inbound | `div.message-in` | 0 | NON VERIFICATO |
-| Bolla outbound | `div.message-out` | 0 | NON VERIFICATO |
-| Identificativo messaggio | `[data-id]` | 0 | NON VERIFICATO |
-| Icone di stato | `[data-icon='status-*']` | 0 | **contraddetto**, vedi sotto |
+| Contenitore conversazione | `#main` | presente | |
+| Messaggio (nodo canonico) | `#main [data-id]` | 35/35 | porta anche `data-testid="conv-msg-<id>"`: stesso nodo, due modi |
+| ~~Bolla inbound~~ | ~~`div.message-in`~~ | **0** | **classe rimossa da WhatsApp** |
+| ~~Bolla outbound~~ | ~~`div.message-out`~~ | **0** | idem, su qualsiasi tag |
+| Testo con metadati | `[data-pre-plain-text]` | 17/35 | contiene `[ora, data] Nome:` — solo messaggi di testo |
+| Composer | `[contenteditable='true'][data-lexical-editor]` | 1 | `aria-label="Digita un messaggio per <nome>"` |
+| Virtualizzazione conversazione | `data-virtualized` | 35/35 | **anche la conversazione è virtualizzata** |
 
-**Verdetto su `JS_TAIL` del Task 8: ancora ignoto.** È il rischio principale aperto:
-se non aggancia, ritorna lista vuota, la guardia non trova mai uno STOP e **lascia
-passare tutto sembrando funzionare**. La sentinella `null` in `poc2_send.py` protegge
-da questo, ma va provata sul campo prima di fidarsene.
+**WhatsApp Web usa ora l'editor Lexical** (`data-lexical-editor`, `data-lexical-managed-linebreak`).
+Rilevante per `human_type`: Lexical intercetta l'input, quindi il comportamento di
+Shift+Enter per gli a-capo **va confermato su un invio vero**, non dato per scontato.
 
-## `data-icon`: 7 valori, nessuna spunta — SEGNALE DA APPROFONDIRE
+### Direzione inbound/outbound — il problema centrale, risolto con 3 segnali
 
-Valori presenti a chat chiusa: `storefront`, `settings-refreshed`, `wa-wordmark`,
-`new-chat-outline`, `x`, `wds-smb-ill-start-a-chat`, `lock-outline`.
+`message-in`/`message-out` non esistono più e **le classi rimaste sono offuscate e non
+discriminano**: `xa0aww2` compare sia su inbound sia su outbound. Una prima analisi
+automatica l'aveva indicata come discriminante — era un artefatto di campione piccolo
+(4 OUT contro 2 IN). Verificata e scartata.
 
-Nessuno `status-check` / `status-dblcheck` / `status-time`, **eppure lo screenshot
-mostra doppie spunte blu su più righe della sidebar**. Conclusione: in questa versione
-le spunte della sidebar sono rese in altro modo (SVG inline senza `data-icon`, o
-pseudo-elemento CSS). `TICK_SEL` del Task 8 va ricavato dal pannello conversazione
-nello Step 1b — e se anche lì manca, Q39 (lettura della spunta di consegna) **non è
-risolvibile via DOM** e va dichiarata NO nel report invece che aggirata.
+| # | Segnale | Copertura | Robustezza |
+|---|---|---|---|
+| 1 | `span[aria-label='Tu:']` presente → nostro; altro `aria-label$=':'` → loro | ~80% | semantico ma **localizzato IT**; assente sui blocchi consecutivi |
+| 2 | `[data-icon='tail-out']` / `[data-icon='tail-in']` | 15/35 | sicuro ma solo sul primo messaggio di ogni blocco |
+| 3 | `data-id`: `3A…` (20 char) → IN · `A5…` (32 char) → OUT | 35/35 | **non documentato**; coerente 12/12 coi tail. Mai da solo |
+
+**Regola di combinazione, volutamente asimmetrica**: un messaggio è "nostro" solo se
+almeno un segnale dice OUT **e nessuno** dice IN. Discordanza o assenza totale di
+segnali ⇒ vale **inbound**, quindi si legge.
+
+Il motivo è che i due errori non costano uguale: classificare un nostro messaggio come
+inbound fa leggere qualche messaggio in più (al peggio si trova uno STOP vecchio e non
+si invia); classificare un inbound come nostro fa **fermare la lettura prima di uno STOP
+appena arrivato**, e si scrive a chi ha chiesto di smettere. In dubbio si legge.
+
+Misurato su chat reale: **0 messaggi con segnali discordanti**.
+
+### Trappola: `msg-container` e `[data-id]` sono nodi ANNIDATI
+
+Cercarli insieme (`"[data-testid='msg-container'], [data-id]"`) restituisce **due nodi
+per messaggio**: la lista raddoppia e il duplicato senza `data-id` decide con un segnale
+in meno. Il selettore corretto usa due alias dello **stesso** nodo:
+`"#main [data-id], #main [data-testid^='conv-msg-']"`.
+
+## Spunte di consegna (Q39) — RISOLTA, ma non come previsto
+
+Nessuno dei `data-icon='status-check' / 'status-dblcheck' / 'status-time'` esiste più
+(0 nodi su 35 messaggi). Lo stato è esposto come **ARIA testuale**:
+`aria-label` ` Consegnato ` / ` Letto ` / ` In attesa `.
+
+Verificato: `[aria-label*='Consegnato']` aggancia su un messaggio inviato davvero.
+**È testo localizzato**: su interfaccia non italiana smette di funzionare. Accettabile
+in MVP (Q6: solo italiano), da rivedere in M1 se il cliente cambia lingua.
+
+Gli unici `data-icon` nel pannello sono `tail-in`, `tail-out`, `ptt-status` (stato dei
+vocali), più icone di interfaccia.
+
+## Ricerca e apertura chat — VERIFICATO, con una trappola grave
+
+Casella di ricerca: `[role='textbox']` (`[data-testid='chat-list-search']` **non esiste**).
+
+**Le intestazioni di sezione sono `[role='row']` esattamente come le chat.** Nei risultati
+di ricerca la riga 0 è l'intestazione `"Chat"`, la riga 2 è `"Gruppi in comune"`. Cliccare
+`righe[0]` non apre nulla — è successo davvero al primo tentativo.
+
+Peggio: le righe sotto `"Gruppi in comune"` sono **gruppi**, fuori perimetro. Una selezione
+per posizione poteva aprirne uno. La navigazione corretta è **per sezione**: trovare
+l'intestazione `"Chat"` e prendere la riga successiva, verificando che non sia a sua volta
+un'intestazione (`Chat`, `Gruppi in comune`, `Contatti`, `Messaggi`).
+
+Vale anche per lo scan di PoC-3: iterare `[role='row']` conta le intestazioni come chat.
 
 ## Virtualizzazione della lista (Q40) — VERIFICATO, e più severa del previsto
 
