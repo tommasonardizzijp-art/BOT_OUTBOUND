@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _common import MESSAGES_FILE, artifacts_dir, first_locator, human_type, log_event, snap, wa_context
-from poc2_open import COMPOSER_SEL, open_by_deeplink
+from poc2_open import COMPOSER_SEL, open_by_search
 from poc_state import OptOutStore, SentLog
 from wa_lib import AllowList, contains_stop, load_messages, mask_pii, normalize_e164
 
@@ -247,7 +247,13 @@ async def main(numero: str, testi: list[str], send: bool) -> None:
 
     async with wa_context(headless=False) as (context, page):
         t_start = time.perf_counter()
-        ok, open_ms, segnale = await open_by_deeplink(page, e164)
+        # RICERCA, non deep-link (corretto il 27/07). Il deep-link su un numero
+        # senza chat ne APRE UNA NUOVA: la guardia V2 la bloccherebbe prima
+        # dell'invio, ma la conversazione sarebbe gia' stata creata. La ricerca
+        # trova solo cio' che esiste gia', quindi il caso non si presenta
+        # affatto — ed e' l'unica delle due strategie verificata sul DOM vero
+        # (poc2_open, 3 chat aperte, 8-16s).
+        ok, open_ms, segnale = await open_by_search(page, e164)
         # Gate su `ok`, non sulla sola stringa del segnale (A3): un segnale che
         # non contiene 'nessuna-cronologia' NON significa "ha cronologia, procedi"
         # se l'apertura stessa (ok) e' fallita.
@@ -260,7 +266,15 @@ async def main(numero: str, testi: list[str], send: bool) -> None:
         tail, guardia_dom_ms, stop = await guardia_pre_invio(page)
         coda_non_agganciata = tail is None
         inbound_letti = len(tail) if tail is not None else 0
-        guardia_totale_ms = open_ms + guardia_dom_ms  # costo vero del controllo opt-out (A6)
+        # ATTENZIONE alla lettura di questo numero (chiarito il 27/07 su misura
+        # reale). `guardia_totale_ms` somma l'APERTURA della chat, che con un
+        # profilo freddo vale ~17s ed e' dominata da rete e rendering. Ma la
+        # chat andrebbe aperta comunque per inviare: non e' costo del controllo
+        # opt-out. Il numero da confrontare col criterio GO "guardia <= 2s" e'
+        # `guardia_dom_ms`, che misura la lettura della coda inbound: 6 ms sulla
+        # prima misura reale. Il totale resta in CSV perche' dice quanto costa
+        # un invio END-TO-END, che serve a dimensionare la rampa di M5.
+        guardia_totale_ms = open_ms + guardia_dom_ms
 
         inviato, spunta, note, testo_scelto = False, "", "", None
         if coda_non_agganciata:

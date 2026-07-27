@@ -260,6 +260,89 @@ async def first_locator(page, candidates: list[str], timeout_ms: int = 4000):
     return None
 
 
+# Etichette delle intestazioni di sezione nei risultati di ricerca. Sono
+# [role='row'] IDENTICHE alle chat: senza filtrarle, "la prima riga" e'
+# l'intestazione "Chat" e cliccarla non apre niente (successo il 27/07).
+INTESTAZIONI_RICERCA = {
+    "chat", "chats", "gruppi in comune", "groups in common",
+    "contatti", "contacts", "messaggi", "messages", "altri contatti",
+}
+
+
+async def svuota_ricerca(page, box) -> bool:
+    """Svuota la casella di ricerca e conferma che sia VERAMENTE vuota.
+
+    Senza questo, il secondo numero di un ciclo si accoda al primo: la ricerca
+    diventa "393661376721393464200572" e WhatsApp risponde "Nessuna chat
+    trovata" (visto il 27/07). PoC-2 e' 20 invii su 6 chat, cioe' tutto
+    iterazione: sarebbe fallito 19 volte su 20, e i fallimenti sarebbero
+    sembrati un problema di WhatsApp invece che nostro.
+
+    Si esce anche dalla chat eventualmente aperta al giro precedente (Escape):
+    con una conversazione aperta il focus puo' finire sul composer, e li'
+    Ctrl+A + Delete cancellerebbe una bozza invece della ricerca.
+    """
+    await page.keyboard.press("Escape")
+    await asyncio.sleep(random.uniform(0.2, 0.5))
+    await box.click()
+    await asyncio.sleep(random.uniform(0.15, 0.35))
+    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Delete")
+    await asyncio.sleep(random.uniform(0.2, 0.4))
+    try:
+        residuo = (await box.inner_text()).strip()
+    except Exception:
+        residuo = ""
+    if residuo:
+        # Fallback: cancella carattere per carattere. Meglio lento che cercare
+        # una stringa sbagliata e archiviare un falso "chat inesistente".
+        for _ in range(len(residuo) + 5):
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(random.uniform(0.03, 0.09))
+        try:
+            residuo = (await box.inner_text()).strip()
+        except Exception:
+            residuo = ""
+    return residuo == ""
+
+
+async def apri_chat_da_risultati(page, timeout_ms: int = 8000):
+    """Apre la chat 1:1 dai risultati di ricerca, navigando PER SEZIONE.
+
+    Perche' non si preme Enter e non si clicca la prima riga:
+    - la prima riga e' l'intestazione "Chat", non una chat;
+    - sotto "Gruppi in comune" ci sono GRUPPI, fuori perimetro dell'MVP: se il
+      contatto non ha una chat 1:1, il primo risultato utile e' un gruppo, e
+      sia Enter sia "la prima riga" ne aprirebbero uno;
+    - una chat aperta per sbaglio viene anche marcata come letta.
+
+    Ritorna (True, nota) se ha aperto qualcosa, (False, motivo) altrimenti.
+    Non solleva: il chiamante decide se fermarsi.
+    """
+    righe = page.locator("[role='row']")
+    try:
+        await righe.first.wait_for(state="visible", timeout=timeout_ms)
+    except Exception:
+        return False, "nessun-risultato-di-ricerca"
+
+    n = await righe.count()
+    testi = []
+    for i in range(n):
+        try:
+            testi.append((await righe.nth(i).inner_text()).strip())
+        except Exception:
+            testi.append("")
+
+    idx = next((i for i, t in enumerate(testi) if t.lower() in ("chat", "chats")), None)
+    if idx is None:
+        return False, "nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione"
+    if idx + 1 >= n or testi[idx + 1].lower() in INTESTAZIONI_RICERCA:
+        return False, "sezione-chat-vuota:nessuna-conversazione-esistente"
+
+    await righe.nth(idx + 1).click()
+    return True, f"aperta-riga-{idx + 1}"
+
+
 def _typo_char(char: str) -> str | None:
     """Vicino di tastiera QWERTY, per il typo simulato."""
     neighbors = {

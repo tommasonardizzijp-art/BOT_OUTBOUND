@@ -19,15 +19,30 @@ import csv
 import time
 from datetime import datetime, timezone
 
-from _common import artifacts_dir, first_locator, human_type, log_event, snap, wa_context
+from _common import (apri_chat_da_risultati, artifacts_dir, first_locator, human_type,
+                     log_event, snap, svuota_ricerca, wa_context)
 from wa_lib import AllowList, normalize_e164
 
-SEARCH_SEL = ["[data-testid='chat-list-search']", "div[contenteditable='true'][data-tab='3']",
+# ALLINEATI AL CATALOGO il 27/07. I precedenti erano ipotesi:
+# [data-testid='chat-list-search'] non esiste, data-tab='3'/'10' non verificati.
+SEARCH_SEL = ["[role='textbox']", "[data-testid='chat-list-search']",
               "div[aria-label*='Cerca']", "div[aria-label*='Search']"]
-COMPOSER_SEL = ["div[contenteditable='true'][data-tab='10']", "div[aria-label*='Scrivi un messaggio']",
-                "div[aria-label*='Type a message']", "footer div[contenteditable='true']"]
-# Messaggi gia' presenti nella conversazione = la chat ha cronologia (guardia V2).
-HISTORY_SEL = ["div.message-in", "div.message-out", "[data-testid='msg-container']", "[role='row']"]
+# WhatsApp Web usa ora l'editor Lexical; l'aria-label del composer e'
+# "Digita un messaggio per <nome>", non "Scrivi un messaggio".
+COMPOSER_SEL = ["[contenteditable='true'][data-lexical-editor='true']",
+                "div[aria-label^='Digita un messaggio']",
+                "div[aria-label*='Type a message']",
+                "footer [contenteditable='true']"]
+
+# Cronologia = messaggi nel PANNELLO CONVERSAZIONE (guardia V2).
+# ATTENZIONE, bug corretto il 27/07: la lista precedente conteneva
+# `[role='row']` SENZA SCOPE. Nella sidebar le righe ci sono sempre, quindi il
+# segnale sarebbe stato "ha cronologia" SEMPRE — anche su una chat inesistente,
+# che e' esattamente il caso che questa guardia deve intercettare. Tutti i
+# selettori sono ora ancorati a #main, e div.message-in/out sono stati tolti
+# perche' misurati a 0 (non esistono piu').
+HISTORY_SEL = ["#main [data-id]", "#main [data-testid^='conv-msg-']",
+               "#main [data-testid='msg-container']"]
 NO_CHAT_SEL = ["text=Il numero di telefono condiviso tramite url non è valido",
                "text=Phone number shared via url is invalid", "[data-testid='popup-contents']"]
 
@@ -56,24 +71,36 @@ async def open_by_search(page, e164: str) -> tuple[bool, float, str]:
         # A3: il ramo di fallimento deve contenere il marcatore 'nessuna-cronologia',
         # altrimenti il Task 8 lo legge come "ha cronologia, procedi".
         return False, (time.perf_counter() - t0) * 1000, "nessuna-cronologia:casella-ricerca-non-trovata"
+
+    # Svuota PRIMA di digitare: senza, il numero si accoda a quello del giro
+    # precedente e la ricerca cerca una stringa inesistente (27/07).
+    if not await svuota_ricerca(page, box[0]):
+        await snap(page, "poc2-open-ricerca-non-svuotata")
+        return False, (time.perf_counter() - t0) * 1000, "nessuna-cronologia:ricerca-non-svuotata"
     # human_type e NON keyboard.type(delay=60): un ritardo fisso e' varianza
     # ZERO su dodici cifre consecutive, la firma robotica piu' banale da
     # misurare. Coerente con la regola gia' adottata su Instagram: struttura e
     # header rigidi, timing rumoroso. (Corretto il 27/07 su domanda di Tommaso.)
     await human_type(page, box[0], e164)
     await page.wait_for_timeout(2500)
-    # A4: verifica che il focus sia ANCORA sulla casella di ricerca subito prima
-    # di premere Enter. In --strategia both questa funzione gira appena dopo il
-    # deep-link, che ha gia' aperto una chat col suo composer: se il focus e'
-    # finito li' (per qualunque motivo), quell'Enter invia un messaggio vero da
-    # uno script che dichiara "zero invii". Se il focus non torna verificabile,
-    # si abortisce invece di premere.
+    # A4: verifica che il focus sia ANCORA sulla casella di ricerca. In
+    # --strategia both questa funzione gira appena dopo il deep-link, che ha
+    # gia' aperto una chat col suo composer: se il focus e' finito li', un
+    # tasto qualsiasi finirebbe dentro un messaggio da uno script che dichiara
+    # "zero invii". Se il focus non e' verificabile, si abortisce.
     focused = await box[0].evaluate("el => el === document.activeElement")
     if not focused:
         await snap(page, "poc2-open-search-focus-perso")
         ms = (time.perf_counter() - t0) * 1000
         return False, ms, "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio"
-    await page.keyboard.press("Enter")
+
+    # Selezione PER SEZIONE invece di Enter (corretto il 27/07). Enter apre il
+    # primo risultato: se il contatto non ha una chat 1:1, quel risultato e' un
+    # GRUPPO — fuori perimetro, e aprirlo lo marca pure come letto.
+    aperto, nota = await apri_chat_da_risultati(page)
+    if not aperto:
+        ms = (time.perf_counter() - t0) * 1000
+        return False, ms, f"nessuna-cronologia:{nota}"
     ok = await first_locator(page, COMPOSER_SEL, timeout_ms=15000)
     ms = (time.perf_counter() - t0) * 1000
     return bool(ok), ms, await _history_signal(page)
