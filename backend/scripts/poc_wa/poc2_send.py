@@ -353,6 +353,16 @@ if __name__ == "__main__":
     ap.add_argument("--messaggio-file", default=str(MESSAGES_FILE),
                     help="file con i messaggi veri scritti da Tommaso (default: %(default)s)")
     ap.add_argument("--send", action="store_true", help="senza questo flag e' dry-run")
+    # Il messaggio si sceglie a caso tra quelli non ancora mandati a quel
+    # destinatario (rotazione anti-ripetizione). Il TEST NEGATIVO DELLO STOP
+    # fa eccezione: richiede il messaggio che chiede "rispondi STOP", quindi
+    # deve essere selezionabile. 1-based, come lo si legge in messages.txt.
+    ap.add_argument("--messaggio-n", type=int, default=None,
+                    help="manda il messaggio n-esimo invece di sceglierlo a caso (1-based)")
     args = ap.parse_args()
     testi = load_messages(args.messaggio_file)   # solleva MessagesFileError se vuoto/malformato (A7)
+    if args.messaggio_n is not None:
+        if not (1 <= args.messaggio_n <= len(testi)):
+            raise SystemExit(f"--messaggio-n fuori range: il file ne ha {len(testi)}.")
+        testi = [testi[args.messaggio_n - 1]]
     asyncio.run(main(args.numero, testi, args.send))
