@@ -16,30 +16,63 @@ from datetime import datetime
 from _common import artifacts_dir, log_event, snap, wa_context
 from wa_lib import contains_stop, mask_pii
 
-# <<< DA COMPILARE DAL CATALOGO (Task 5) >>>
+# COMPILATO DAL CATALOGO il 27/07 (probe_riga + probe_riga2, DOM reale).
+# I selettori precedenti erano ipotesi e sbagliavano quasi tutti:
+#   [role='listitem']            -> NON ESISTE (le righe sono [role='row'])
+#   span[aria-label*='non lett'] -> il badge e' [data-testid='icon-unread-count']
+#   data-icon='status-*'         -> NON ESISTONO: le spunte sono <svg><title>
 PANE_SEL = "#pane-side"
-ROW_SEL = "[role='listitem']"
-TITLE_SEL = "span[title]"
-UNREAD_SEL = "span[aria-label*='non lett']"
-PREVIEW_SEL = "[data-testid='last-msg-status'], span[dir='ltr']"
-OUTBOUND_ICON_SEL = "[data-icon='status-dblcheck'], [data-icon='status-check'], [data-icon='status-time']"
+ROW_SEL = "[role='row']"
+# Il titolo e' uno span[title] dentro cell-frame-title: l'attributo `title`
+# porta il nome COMPLETO, l'innerText e' troncato con i puntini dal CSS.
+TITLE_SEL = "[data-testid='cell-frame-title'] span[title], [data-testid='cell-frame-title'] span[dir='auto']"
+UNREAD_SEL = "[data-testid='icon-unread-count']"
+# Anche qui l'attributo `title` contiene l'anteprima INTERA, non troncata.
+PREVIEW_SEL = "[data-testid='last-msg-status']"
+MUTED_SEL = "[data-testid='mute-notifications-refreshed']"
 
 JS_SCAN = """
 (sels) => {
   const pane = document.querySelector(sels.pane);
   if (!pane) return {error: 'pane non trovato'};
-  const rows = Array.from(pane.querySelectorAll(sels.row));
+
+  // WhatsApp inserisce marcatori di direzione del testo (U+202A/U+202C) dentro
+  // i `title`. Restano invisibili a schermo ma sporcano confronti e ricerche —
+  // e su console cp1252 hanno gia' ucciso uno script (27/07).
+  const pulisci = (s) => (s || '').replace(/[\\u202a-\\u202e\\u2066-\\u2069]/g, '').trim();
+
+  const rows = Array.from(pane.querySelectorAll(sels.row))
+    // Le INTESTAZIONI di sezione sono [role='row'] come le chat: una riga vera
+    // ha sempre un contenitore cell-frame (o e' la chat con se stessi).
+    .filter(r => r.querySelector("[data-testid='cell-frame-title']")
+              || r.matches("[data-testid='message-yourself-row']"));
+
   return rows.map((r, i) => {
     const t = r.querySelector(sels.title);
     const u = r.querySelector(sels.unread);
     const p = r.querySelector(sels.preview);
-    const o = r.querySelector(sels.outIcon);
+
+    // Direzione: se l'ultimo messaggio e' NOSTRO, WhatsApp disegna l'icona di
+    // stato (inviato/consegnato/letto) come <svg> con un <title> 'wds-ic-*'.
+    // Nessun data-icon: erano invisibili ai probe che filtravano per attributi.
+    let statoUscita = null;
+    for (const svg of r.querySelectorAll('svg')) {
+      const ti = svg.querySelector('title');
+      const nome = ti ? ti.textContent : '';
+      if (nome && /^wds-ic-(read|delivered|sent|pending|check)/.test(nome)) {
+        statoUscita = nome;
+        break;
+      }
+    }
+
     return {
       position: i,
-      title: t ? (t.getAttribute('title') || t.innerText || '') : '',
-      unread_raw: u ? (u.getAttribute('aria-label') || u.innerText || '') : '',
-      preview: p ? (p.innerText || '') : '',
-      last_is_outbound: !!o,
+      title: pulisci(t ? (t.getAttribute('title') || t.innerText) : ''),
+      unread_raw: u ? (u.innerText || u.getAttribute('aria-label') || '') : '',
+      preview: pulisci(p ? (p.getAttribute('title') || p.innerText) : ''),
+      last_is_outbound: statoUscita !== null,
+      stato_uscita: statoUscita,          // wds-ic-read | wds-ic-delivered | ...
+      muted: !!r.querySelector(sels.muted),
     };
   });
 }
@@ -62,7 +95,7 @@ def _parse_unread(raw: str) -> int:
 async def scan_once(page) -> list[dict]:
     rows = await page.evaluate(JS_SCAN, {
         "pane": PANE_SEL, "row": ROW_SEL, "title": TITLE_SEL,
-        "unread": UNREAD_SEL, "preview": PREVIEW_SEL, "outIcon": OUTBOUND_ICON_SEL,
+        "unread": UNREAD_SEL, "preview": PREVIEW_SEL, "muted": MUTED_SEL,
     })
     if isinstance(rows, dict) and rows.get("error"):
         raise SystemExit(f"Scan fallito: {rows['error']} — ricontrolla i selettori del catalogo.")
@@ -74,8 +107,14 @@ async def scan_once(page) -> list[dict]:
             "title_is_number": r["title"].replace(" ", "").replace("+", "").isdigit(),
             "unread_count": _parse_unread(r["unread_raw"]),
             "preview_masked": mask_pii(r["preview"], keep=60),
+            # NB: has_stop sull'anteprima NON e' una garanzia di opt-out — la
+            # preview mostra solo l'ULTIMO messaggio, e uno STOP piu' vecchio
+            # sparisce. Serve a scoprire i candidati; l'unica garanzia resta la
+            # guardia pre-invio a chat aperta (poc2_send).
             "has_stop": contains_stop(r["preview"]),
             "last_is_outbound": r["last_is_outbound"],
+            "stato_uscita": r["stato_uscita"],
+            "muted": r["muted"],
         })
     return out
 
@@ -83,8 +122,21 @@ async def scan_once(page) -> list[dict]:
 async def main(loop_minutes: int) -> None:
     consecutive_failures = 0
     async with wa_context(headless=False) as (context, page):
+        # Si aspetta L'ELEMENTO, non un tempo. `wait_for_timeout(4000)` faceva
+        # fallire il primo scan con "pane non trovato" su un profilo freddo, che
+        # impiega 20s abbondanti a costruire l'app: stesso errore che aveva
+        # ucciso poc1_login, in un punto diverso. Un numero magico piu' grande
+        # non e' un fix, e' lo stesso bug rimandato.
+        try:
+            await page.wait_for_selector(PANE_SEL, timeout=90000)
+        except Exception as e:
+            await snap(page, "poc3-pane-mai-comparso")
+            raise SystemExit(
+                f"{PANE_SEL} non e' comparso in 90s: sessione scaduta, QR da rifare "
+                f"o schermata inattesa. Guarda lo screenshot in artifacts/."
+            ) from e
+
         while True:
-            await page.wait_for_timeout(4000)
             try:
                 # scan_once solleva SystemExit se il pane non si aggancia: in
                 # loop lo trattiamo come un ciclo fallito (potrebbe essere un

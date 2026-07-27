@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,19 @@ from urllib.parse import urlparse
 import psutil
 
 from wa_lib import mask_pii  # type: ignore  # eseguito come script dalla sua cartella
+
+# La console Windows di Tommaso e' cp1252 e SOLLEVA su qualunque carattere che
+# non sappia codificare: uno script muore con UnicodeEncodeError solo per aver
+# stampato il nome di una chat. Non e' teorico — successo il 27/07 su un
+# marcatore di direzione (‪) che WhatsApp mette nelle anteprime, e i nomi
+# delle chat sono pieni di emoji. Senza questo, poc3_scan e poc2_send sarebbero
+# morti in mezzo al PoC per un problema di sola visualizzazione.
+# errors='replace': un carattere illeggibile diventa '?', lo script continua.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass   # stream rediretto o non riconfigurabile: non e' un motivo per morire
 
 WA_URL = "https://web.whatsapp.com/"
 

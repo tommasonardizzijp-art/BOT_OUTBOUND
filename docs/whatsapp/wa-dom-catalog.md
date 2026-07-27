@@ -18,10 +18,12 @@
 | Pannello lista chat | `#pane-side` (1) | `[data-testid='chat-list']` (1), `[role='grid']` (1) | tre selettori indipendenti agganciano lo stesso pannello: robusto |
 | Riga chat | `[role='row']` (67-70) | `div[data-testid='cell-frame-container']` (stesso conteggio) | `[role='listitem']` **non esiste**: era un candidato sbagliato |
 | Cella dentro la riga | `[role='gridcell']` (201) | — | ~3 gridcell per riga |
-| Titolo chat (nome o numero) | NON VERIFICATO | | Q19 aperta: serve leggere una riga |
-| Badge non letti | NON VERIFICATO | | Q41 aperta |
-| Preview ultimo messaggio | NON VERIFICATO | | |
-| Direzione ultimo messaggio (in/out) | NON VERIFICATO | | Q42: **le spunte in sidebar NON usano `data-icon`** — vedi sotto |
+| Titolo chat (nome o numero) | `[data-testid='cell-frame-title'] span[title]` | `span[dir='auto']` | l'attributo `title` ha il nome **intero**; l'innerText è troncato dal CSS |
+| Badge non letti | `[data-testid='icon-unread-count']` | testo riga `"N messaggi non letti"` | **Q41 RISOLTA** |
+| Preview ultimo messaggio | `[data-testid='last-msg-status']` | | l'attributo `title` ha l'anteprima **intera**, non troncata |
+| Direzione ultimo messaggio (in/out) | `<svg><title>wds-ic-*` | | **Q42 RISOLTA** — vedi sotto |
+| Chat silenziata | `[data-testid='mute-notifications-refreshed']` | | |
+| Chat con se stessi | `[data-testid='message-yourself-row']` | | riga speciale: **non** ha `cell-frame-container` |
 | Casella di ricerca | `[role='textbox']` (1) | | `[data-testid='chat-list-search']` **non esiste**; `div[contenteditable='true']` **non aggancia** (0) |
 | Composer messaggio | NON VERIFICATO | | serve una chat aperta |
 | Pulsante invio | NON VERIFICATO | | idem |
@@ -139,6 +141,39 @@ naturale davanti a quell'errore era "i selettori sono sbagliati, WhatsApp ha cam
 il DOM" — falsa, e avrebbe portato a riscrivere selettori che funzionavano benissimo.
 Timeout portati a 90s/30s, e il messaggio d'errore ora dice esplicitamente di
 controllare lo screenshot prima di incolpare i selettori.
+
+## Q42 — direzione dell'ultimo messaggio in sidebar: `<svg><title>`, non `data-icon`
+
+Le doppie spunte si vedono a schermo ma **nessuna riga ha un `data-icon`**: sono
+`<svg>` con un `<title>` interno. Ecco perché due probe di fila le hanno mancate —
+filtravano i nodi per attributo, e quegli `<svg>` non ne hanno di utili.
+
+Valori osservati: `wds-ic-read` (letto), `wds-ic-delivered` (consegnato). Attesi per
+simmetria ma non ancora visti: `wds-ic-sent`, `wds-ic-pending`.
+
+**Presenza di un `wds-ic-*` nella riga ⇒ l'ultimo messaggio è NOSTRO.** Misurato su
+68 righe: 5 `read`, 1 `delivered`, 62 senza icona (ultimo messaggio dell'altro).
+
+## Q19 — nome vs numero: RISOLTA
+
+Su 68 chat, **8 hanno il titolo numerico** (contatto non in rubrica → WhatsApp mostra il
+numero). Il resto mostra il nome della rubrica. `title_is_number` nello scan lo distingue,
+ed è il segnale che in M1 servirà a decidere se un `chat_title` è PII da mascherare.
+
+## Marcatori di direzione del testo nei `title` — sporcano i confronti
+
+WhatsApp inserisce `U+202A`/`U+202C` (e simili) dentro gli attributi `title`. Invisibili
+a schermo, ma rompono confronti, ricerche e — su console Windows cp1252 — **uccidono lo
+script** con `UnicodeEncodeError`. Lo scanner li rimuove; `_common` riconfigura stdout con
+`errors='replace'`. Non è teorico: è successo il 27/07, e sarebbe successo comunque in
+mezzo al PoC, visto che i nomi delle chat sono pieni di emoji.
+
+## Limite noto dello scan: 46 anteprime vuote su 68
+
+Il 68% delle righe scansionate non espone l'anteprima. Non blocca (l'anteprima serve solo
+a individuare candidati, e non è mai stata una garanzia di opt-out), ma **va nel report**
+come limite misurato, non nascosto. Da capire in M1 se dipende dal tipo di ultimo messaggio
+(media, vocali, eventi di sistema) o dalla virtualizzazione.
 
 ## Prossimo passo obbligato
 
