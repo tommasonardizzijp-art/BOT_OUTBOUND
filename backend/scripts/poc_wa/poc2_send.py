@@ -20,8 +20,16 @@ QUATTRO GUARDIE prima di scrivere a qualcuno:
     sempre, anche quando il DOM non lo mostra piu');
   - coda inbound non agganciata = stop per prudenza (non e' silenzio, e' cecita').
 
-Uso:  python poc2_send.py --numero "+39..." [--messaggio-file D:\\dev\\wa-poc\\messages.txt] [--send]
-      (senza --messaggio-file usa POC_WA_MESSAGES / D:\\dev\\wa-poc\\messages.txt)
+UNA SESSIONE, N DESTINATARI. `--numeri` apre WhatsApp Web una volta sola e
+scorre la lista con le pause DENTRO la sessione. Non lanciare questo script in
+un ciclo esterno: aprire e chiudere il browser per ogni messaggio non assomiglia
+a nessun uso umano, e su qualche centinaio di contatti e' il modo piu' rapido
+per farsi bloccare (correzione del 27/07 su osservazione di Tommaso).
+
+Uso:  python poc2_send.py --numeri "+39...,+39...,+39..." --send
+      python poc2_send.py --numero "+39..." [--send]         (un solo contatto)
+      opzioni: --messaggio-n N · --pausa-min/--pausa-max (secondi tra invii)
+      senza --messaggio-file usa POC_WA_MESSAGES / D:\\dev\\wa-poc\\messages.txt
 """
 import argparse
 import asyncio
@@ -240,19 +248,61 @@ async def leggi_spunta(page) -> str:
     return found[1] if found else "nessuna-spunta-letta"
 
 
-async def main(numero: str, testi: list[str], send: bool) -> None:
+async def main(numeri: list[str], testi: list[str], send: bool,
+               pausa_min: float = 45, pausa_max: float = 120) -> None:
+    """UNA sessione browser, N destinatari.
+
+    PERCHE' (osservazione di Tommaso, 27/07). Prima questa funzione prendeva UN
+    numero e apriva il proprio `wa_context`: mandare a 6 contatti significava
+    aprire e chiudere WhatsApp Web 6 volte, e a 500 contatti 500 volte. Nessun
+    umano usa WhatsApp cosi', ogni riapertura rifa' l'handshake col telefono, e
+    a quel ritmo il blocco di WhatsApp sarebbe legittimo. Le pause tra un invio
+    e l'altro devono stare DENTRO la sessione, non tra un processo e l'altro.
+
+    Vale anche come forma per il sender di M3: e' esattamente questo il loop che
+    dovra' girare in produzione.
+    """
     allow = AllowList.load()
     if not len(allow):
         raise SystemExit("POC_WA_ALLOWED_NUMBERS non configurata: mi fermo (fail-closed).")
-    e164 = normalize_e164(numero)
-    if not e164:
-        raise SystemExit(f"Numero non normalizzabile: {numero!r}")
-    allow.assert_allowed(e164)   # fail-closed: solleva se non e' una chat controllata
+
+    # Normalizzazione e allowlist PRIMA di aprire il browser: se un numero e'
+    # sbagliato si scopre subito, non a meta' lista con la sessione gia' aperta.
+    e164s = []
+    for raw in numeri:
+        e = normalize_e164(raw)
+        if not e:
+            raise SystemExit(f"Numero non normalizzabile: {raw!r}")
+        allow.assert_allowed(e)   # fail-closed: solleva se non e' una chat controllata
+        e164s.append(e)
 
     optout = OptOutStore.load()
     sentlog = SentLog.load()
-    masked = f"…{e164[-4:]}"
     path = artifacts_dir() / "send_results.csv"
+
+    async with wa_context(headless=False) as (context, page):
+        for idx, e164 in enumerate(e164s):
+            if idx:
+                # Pausa DENTRO la sessione. Randomizzata: un invio esatto ogni
+                # N secondi e' una firma quanto la raffica.
+                attesa = random.uniform(pausa_min, pausa_max)
+                log_event("pausa_tra_invii", secondi=round(attesa), prossimo=f"…{e164[-4:]}")
+                print(f"[pausa {attesa:.0f}s prima del prossimo invio]", flush=True)
+                await asyncio.sleep(attesa)
+            try:
+                await _invia_a(page, e164, testi, send, optout, sentlog, path)
+            except Exception as exc:
+                # Un destinatario che fallisce non deve portarsi via la sessione
+                # ne' i destinatari successivi.
+                log_event("invio_fallito", numero_masked=f"…{e164[-4:]}",
+                          errore=f"{type(exc).__name__}: {exc}"[:200])
+                print(f"[…{e164[-4:]}] FALLITO: {type(exc).__name__}: {exc}", flush=True)
+
+
+async def _invia_a(page, e164: str, testi: list[str], send: bool,
+                   optout, sentlog, path) -> None:
+    """Un destinatario, dentro una sessione gia' aperta."""
+    masked = f"…{e164[-4:]}"
 
     # Guardia 0 (A1 punto 1): numero gia' in opt-out -> non si apre nemmeno la
     # chat di chi ha chiesto di smettere.
@@ -264,111 +314,116 @@ async def main(numero: str, testi: list[str], send: bool) -> None:
         log_event("send_skip_optout", numero_masked=masked)
         return
 
-    async with wa_context(headless=False) as (context, page):
-        t_start = time.perf_counter()
-        # RICERCA, non deep-link (corretto il 27/07). Il deep-link su un numero
-        # senza chat ne APRE UNA NUOVA: la guardia V2 la bloccherebbe prima
-        # dell'invio, ma la conversazione sarebbe gia' stata creata. La ricerca
-        # trova solo cio' che esiste gia', quindi il caso non si presenta
-        # affatto — ed e' l'unica delle due strategie verificata sul DOM vero
-        # (poc2_open, 3 chat aperte, 8-16s).
-        ok, open_ms, segnale = await open_by_search(page, e164)
-        # Gate su `ok`, non sulla sola stringa del segnale (A3): un segnale che
-        # non contiene 'nessuna-cronologia' NON significa "ha cronologia, procedi"
-        # se l'apertura stessa (ok) e' fallita.
-        if not ok:
-            await snap(page, "poc2-send-apertura-fallita")
-            raise SystemExit(f"Chat non aperta ({segnale}): niente invio.")
-        if "nessuna-cronologia" in segnale:
-            raise SystemExit("Chat senza cronologia: V2 vieta di scrivere. Stop.")
+    t_start = time.perf_counter()
+    # RICERCA, non deep-link (corretto il 27/07). Il deep-link su un numero
+    # senza chat ne APRE UNA NUOVA: la guardia V2 la bloccherebbe prima
+    # dell'invio, ma la conversazione sarebbe gia' stata creata. La ricerca
+    # trova solo cio' che esiste gia', quindi il caso non si presenta
+    # affatto — ed e' l'unica delle due strategie verificata sul DOM vero
+    # (poc2_open, 3 chat aperte, 8-16s).
+    ok, open_ms, segnale = await open_by_search(page, e164)
+    # Gate su `ok`, non sulla sola stringa del segnale (A3): un segnale che
+    # non contiene 'nessuna-cronologia' NON significa "ha cronologia, procedi"
+    # se l'apertura stessa (ok) e' fallita.
+    if not ok:
+        await snap(page, "poc2-send-apertura-fallita")
+        raise SystemExit(f"Chat non aperta ({segnale}): niente invio.")
+    if "nessuna-cronologia" in segnale:
+        raise SystemExit("Chat senza cronologia: V2 vieta di scrivere. Stop.")
 
-        tail, guardia_dom_ms, stop = await guardia_pre_invio(page)
-        coda_non_agganciata = tail is None
-        inbound_letti = len(tail) if tail is not None else 0
-        # ATTENZIONE alla lettura di questo numero (chiarito il 27/07 su misura
-        # reale). `guardia_totale_ms` somma l'APERTURA della chat, che con un
-        # profilo freddo vale ~17s ed e' dominata da rete e rendering. Ma la
-        # chat andrebbe aperta comunque per inviare: non e' costo del controllo
-        # opt-out. Il numero da confrontare col criterio GO "guardia <= 2s" e'
-        # `guardia_dom_ms`, che misura la lettura della coda inbound: 6 ms sulla
-        # prima misura reale. Il totale resta in CSV perche' dice quanto costa
-        # un invio END-TO-END, che serve a dimensionare la rampa di M5.
-        guardia_totale_ms = open_ms + guardia_dom_ms
+    tail, guardia_dom_ms, stop = await guardia_pre_invio(page)
+    coda_non_agganciata = tail is None
+    inbound_letti = len(tail) if tail is not None else 0
+    # ATTENZIONE alla lettura di questo numero (chiarito il 27/07 su misura
+    # reale). `guardia_totale_ms` somma l'APERTURA della chat, che con un
+    # profilo freddo vale ~17s ed e' dominata da rete e rendering. Ma la
+    # chat andrebbe aperta comunque per inviare: non e' costo del controllo
+    # opt-out. Il numero da confrontare col criterio GO "guardia <= 2s" e'
+    # `guardia_dom_ms`, che misura la lettura della coda inbound: 6 ms sulla
+    # prima misura reale. Il totale resta in CSV perche' dice quanto costa
+    # un invio END-TO-END, che serve a dimensionare la rampa di M5.
+    guardia_totale_ms = open_ms + guardia_dom_ms
 
-        inviato, spunta, note, testo_scelto = False, "", "", None
-        if coda_non_agganciata:
-            # Sentinella A2: non sappiamo se c'e' uno STOP nascosto, non si invia.
-            note = "coda inbound non agganciata (JS_TAIL=null): invio abortito per prudenza"
-        elif stop:
-            optout.add(e164, motivo="STOP rilevato nella coda inbound pre-invio")
-            note = "STOP trovato nella coda inbound: invio annullato, opt-out registrato"
-        elif not send:
-            note = "dry-run (nessun --send)"
+    inviato, spunta, note, testo_scelto = False, "", "", None
+    if coda_non_agganciata:
+        # Sentinella A2: non sappiamo se c'e' uno STOP nascosto, non si invia.
+        note = "coda inbound non agganciata (JS_TAIL=null): invio abortito per prudenza"
+    elif stop:
+        optout.add(e164, motivo="STOP rilevato nella coda inbound pre-invio")
+        note = "STOP trovato nella coda inbound: invio annullato, opt-out registrato"
+    elif not send:
+        note = "dry-run (nessun --send)"
+    else:
+        candidati = [t for t in testi if not sentlog.already_sent(e164, t)]
+        if not candidati:
+            note = "tutti i testi disponibili gia' mandati a questo destinatario: invio abortito"
         else:
-            candidati = [t for t in testi if not sentlog.already_sent(e164, t)]
-            if not candidati:
-                note = "tutti i testi disponibili gia' mandati a questo destinatario: invio abortito"
-            else:
-                testo_scelto = random.choice(candidati)
-                comp = await first_locator(page, COMPOSER_SEL, timeout_ms=10000)
-                if not comp:
-                    await snap(page, "poc2-composer-non-trovato")
-                    raise SystemExit("Composer non trovato: catalogare il selettore prima di riprovare.")
-                await human_type(page, comp[0], testo_scelto)
-                await asyncio.sleep(random.uniform(0.4, 1.2))
-                await page.keyboard.press("Enter")
-                inviato = True
+            testo_scelto = random.choice(candidati)
+            comp = await first_locator(page, COMPOSER_SEL, timeout_ms=10000)
+            if not comp:
+                await snap(page, "poc2-composer-non-trovato")
+                raise SystemExit("Composer non trovato: catalogare il selettore prima di riprovare.")
+            await human_type(page, comp[0], testo_scelto)
+            await asyncio.sleep(random.uniform(0.4, 1.2))
+            await page.keyboard.press("Enter")
+            inviato = True
 
-                # A6: la riga di audit va scritta SUBITO dopo l'Enter (irreversibile),
-                # non in fondo al percorso felice. Se leggi_spunta eccepisce dopo
-                # questo punto, la traccia dell'invio esiste comunque.
-                invio_id = _ts()
-                totale_parziale_ms = (time.perf_counter() - t_start) * 1000
-                _scrivi_riga_csv(
-                    path, ts=invio_id, numero_masked=masked, invio_id=invio_id, evento="invio",
-                    open_ms=round(open_ms), guardia_dom_ms=round(guardia_dom_ms),
-                    guardia_totale_ms=round(guardia_totale_ms), inbound_letti=inbound_letti,
-                    coda_non_agganciata=int(coda_non_agganciata), stop_trovato=int(stop),
-                    inviato=1, spunta="", totale_ms=round(totale_parziale_ms),
-                    note="inviato, in attesa lettura spunta",
-                )
-                sentlog.record(e164, testo_scelto)
+            # A6: la riga di audit va scritta SUBITO dopo l'Enter (irreversibile),
+            # non in fondo al percorso felice. Se leggi_spunta eccepisce dopo
+            # questo punto, la traccia dell'invio esiste comunque.
+            invio_id = _ts()
+            totale_parziale_ms = (time.perf_counter() - t_start) * 1000
+            _scrivi_riga_csv(
+                path, ts=invio_id, numero_masked=masked, invio_id=invio_id, evento="invio",
+                open_ms=round(open_ms), guardia_dom_ms=round(guardia_dom_ms),
+                guardia_totale_ms=round(guardia_totale_ms), inbound_letti=inbound_letti,
+                coda_non_agganciata=int(coda_non_agganciata), stop_trovato=int(stop),
+                inviato=1, spunta="", totale_ms=round(totale_parziale_ms),
+                note="inviato, in attesa lettura spunta",
+            )
+            sentlog.record(e164, testo_scelto)
 
-                await page.wait_for_timeout(2500)
-                spunta = await leggi_spunta(page)
-                note = "invio completato, spunta letta"
-                totale_ms = (time.perf_counter() - t_start) * 1000
-                _scrivi_riga_csv(
-                    path, ts=_ts(), numero_masked=masked, invio_id=invio_id, evento="spunta",
-                    open_ms=round(open_ms), guardia_dom_ms=round(guardia_dom_ms),
-                    guardia_totale_ms=round(guardia_totale_ms), inbound_letti=inbound_letti,
-                    coda_non_agganciata=int(coda_non_agganciata), stop_trovato=int(stop),
-                    inviato=1, spunta=spunta, totale_ms=round(totale_ms), note=note,
-                )
-                log_event("send_attempt", guardia_totale_ms=round(guardia_totale_ms),
-                           inbound=inbound_letti, stop=stop, inviato=inviato, spunta=spunta,
-                           totale_ms=round(totale_ms),
-                           ultimo_inbound=mask_pii(tail[-1] if tail else "", keep=60))
-                return
+            await page.wait_for_timeout(2500)
+            spunta = await leggi_spunta(page)
+            note = "invio completato, spunta letta"
+            totale_ms = (time.perf_counter() - t_start) * 1000
+            _scrivi_riga_csv(
+                path, ts=_ts(), numero_masked=masked, invio_id=invio_id, evento="spunta",
+                open_ms=round(open_ms), guardia_dom_ms=round(guardia_dom_ms),
+                guardia_totale_ms=round(guardia_totale_ms), inbound_letti=inbound_letti,
+                coda_non_agganciata=int(coda_non_agganciata), stop_trovato=int(stop),
+                inviato=1, spunta=spunta, totale_ms=round(totale_ms), note=note,
+            )
+            log_event("send_attempt", guardia_totale_ms=round(guardia_totale_ms),
+                       inbound=inbound_letti, stop=stop, inviato=inviato, spunta=spunta,
+                       totale_ms=round(totale_ms),
+                       ultimo_inbound=mask_pii(tail[-1] if tail else "", keep=60))
+            return
 
-        # Rami che NON hanno inviato (coda non agganciata / stop / dry-run / niente testo nuovo):
-        # una riga sola basta, non c'e' nulla di irreversibile da tracciare in due tempi.
-        totale_ms = (time.perf_counter() - t_start) * 1000
-        _scrivi_riga_csv(
-            path, ts=_ts(), numero_masked=masked, evento="esito", open_ms=round(open_ms),
-            guardia_dom_ms=round(guardia_dom_ms), guardia_totale_ms=round(guardia_totale_ms),
-            inbound_letti=inbound_letti, coda_non_agganciata=int(coda_non_agganciata),
-            stop_trovato=int(stop), inviato=int(inviato), spunta=spunta,
-            totale_ms=round(totale_ms), note=note,
-        )
-        log_event("send_attempt", guardia_totale_ms=round(guardia_totale_ms), inbound=inbound_letti,
-                   stop=stop, inviato=inviato, spunta=spunta, totale_ms=round(totale_ms), note=note,
-                   ultimo_inbound=mask_pii(tail[-1] if tail else "", keep=60))
+    # Rami che NON hanno inviato (coda non agganciata / stop / dry-run / niente testo nuovo):
+    # una riga sola basta, non c'e' nulla di irreversibile da tracciare in due tempi.
+    totale_ms = (time.perf_counter() - t_start) * 1000
+    _scrivi_riga_csv(
+        path, ts=_ts(), numero_masked=masked, evento="esito", open_ms=round(open_ms),
+        guardia_dom_ms=round(guardia_dom_ms), guardia_totale_ms=round(guardia_totale_ms),
+        inbound_letti=inbound_letti, coda_non_agganciata=int(coda_non_agganciata),
+        stop_trovato=int(stop), inviato=int(inviato), spunta=spunta,
+        totale_ms=round(totale_ms), note=note,
+    )
+    log_event("send_attempt", guardia_totale_ms=round(guardia_totale_ms), inbound=inbound_letti,
+               stop=stop, inviato=inviato, spunta=spunta, totale_ms=round(totale_ms), note=note,
+               ultimo_inbound=mask_pii(tail[-1] if tail else "", keep=60))
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--numero", required=True)
+    # --numeri accetta una lista separata da virgole: UNA sessione, N invii,
+    # con le pause DENTRO. --numero resta per comodita' su un destinatario solo.
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--numero", help="un solo destinatario")
+    g.add_argument("--numeri", help="piu' destinatari separati da virgola, in una sola sessione")
+    ap.add_argument("--pausa-min", type=float, default=45, help="secondi minimi tra due invii")
+    ap.add_argument("--pausa-max", type=float, default=120, help="secondi massimi tra due invii")
     ap.add_argument("--messaggio-file", default=str(MESSAGES_FILE),
                     help="file con i messaggi veri scritti da Tommaso (default: %(default)s)")
     ap.add_argument("--send", action="store_true", help="senza questo flag e' dry-run")
@@ -384,4 +439,6 @@ if __name__ == "__main__":
         if not (1 <= args.messaggio_n <= len(testi)):
             raise SystemExit(f"--messaggio-n fuori range: il file ne ha {len(testi)}.")
         testi = [testi[args.messaggio_n - 1]]
-    asyncio.run(main(args.numero, testi, args.send))
+    destinatari = ([n.strip() for n in args.numeri.split(",") if n.strip()]
+                   if args.numeri else [args.numero])
+    asyncio.run(main(destinatari, testi, args.send, args.pausa_min, args.pausa_max))
