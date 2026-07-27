@@ -25,8 +25,47 @@ import psutil
 from wa_lib import mask_pii  # type: ignore  # eseguito come script dalla sua cartella
 
 WA_URL = "https://web.whatsapp.com/"
-PROFILE_DIR = Path(os.environ.get("POC_WA_PROFILE_DIR", r"D:\wa-poc\profile"))
-ARTIFACTS_DIR = Path(os.environ.get("POC_WA_ARTIFACTS", r"D:\wa-poc\artifacts"))
+
+# Radice degli artefatti PoC, FUORI da qualunque repo git (D:\dev non e' un
+# repository: verificato). Contiene numeri reali in chiaro (poc.env) e la
+# sessione WhatsApp: non deve poter finire in un commit per sbaglio, e deve
+# sopravvivere alla cancellazione del worktree.
+POC_ROOT = Path(os.environ.get("POC_WA_ROOT", r"D:\dev\wa-poc"))
+ENV_FILE = Path(os.environ.get("POC_WA_ENV_FILE", POC_ROOT / "poc.env"))
+
+
+def _load_env_file(path: Path) -> None:
+    """Carica KEY=VALUE da `poc.env` in os.environ, senza dipendenze esterne.
+
+    Esiste perche' l'allowlist e' l'unica guardia tra questo PoC e un messaggio
+    mandato alla persona sbagliata: passarla a mano con `set` a ogni terminale
+    e' il modo piu' facile per ritrovarsi con una allowlist vuota (fail-closed,
+    quindi si blocca) o peggio con quella di ieri.
+
+    Le variabili gia' presenti nell'ambiente VINCONO sul file: un override
+    puntuale da riga di comando resta possibile e non viene silenziosamente
+    sovrascritto.
+    """
+    if not path.is_file():
+        return
+    for riga in path.read_text(encoding="utf-8-sig").splitlines():
+        riga = riga.strip()
+        if not riga or riga.startswith("#") or "=" not in riga:
+            continue
+        chiave, _, valore = riga.partition("=")
+        chiave = chiave.strip()
+        # Niente commenti a fine riga: un numero non contiene '#', ma un
+        # commento tagliato male mangerebbe l'ultimo numero della lista.
+        valore = valore.strip().strip('"').strip("'")
+        if chiave and chiave not in os.environ:
+            os.environ[chiave] = valore
+
+
+_load_env_file(ENV_FILE)
+
+PROFILE_DIR = Path(os.environ.get("POC_WA_PROFILE_DIR", POC_ROOT / "profile"))
+ARTIFACTS_DIR = Path(os.environ.get("POC_WA_ARTIFACTS", POC_ROOT / "artifacts"))
+MESSAGES_FILE = Path(os.environ.get("POC_WA_MESSAGES", POC_ROOT / "messages.txt"))
 PROXY_URL = os.environ.get("POC_WA_PROXY") or None
 
 

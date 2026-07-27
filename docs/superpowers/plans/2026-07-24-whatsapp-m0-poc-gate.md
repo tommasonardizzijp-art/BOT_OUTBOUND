@@ -57,11 +57,23 @@ docs/whatsapp/wa-dom-catalog.md         catalogo selettori/segnali (output di Po
 docs/whatsapp/poc-report.md             report finale + verdetto GO/NO-GO
 ```
 
-Artefatti runtime (**fuori dal repo**, mai committati):
+Artefatti runtime (**fuori dal repo**, mai committati). Radice spostata il 27/07 da
+`D:\wa-poc` a `D:\dev\wa-poc` (decisione Tommaso: sta accanto agli altri progetti di
+sviluppo invece che alla radice di `D:`). Verificato che `D:\dev` **non** è una repo git:
+i numeri in chiaro non possono finire tracciati per sbaglio.
 ```
-D:\wa-poc\profile\        profilo Chromium persistente (= la sessione WhatsApp)
-D:\wa-poc\artifacts\      screenshot, dump JSON, CSV heartbeat, log
+D:\dev\wa-poc\poc.env       config locale: POC_WA_ALLOWED_NUMBERS (numeri REALI in chiaro)
+D:\dev\wa-poc\messages.txt  i 3 messaggi veri (Task 0 step 6)
+D:\dev\wa-poc\profile\      profilo Chromium persistente (= la sessione WhatsApp)
+D:\dev\wa-poc\artifacts\    screenshot, dump JSON, CSV heartbeat, log
+D:\dev\wa-poc\optout.json   opt-out permanenti · sent_log.json  memoria invii
 ```
+
+`_common.py` carica `poc.env` in `os.environ` all'import (loader senza dipendenze:
+le variabili già presenti nell'ambiente vincono). Motivo: l'allowlist è l'unica guardia
+tra il PoC e un messaggio alla persona sbagliata, e passarla a mano con `set` a ogni
+terminale è il modo più facile per ritrovarsi con quella di ieri. Override della radice:
+`POC_WA_ROOT`; del file: `POC_WA_ENV_FILE`.
 
 ---
 
@@ -75,9 +87,21 @@ Nessun codice. Se una di queste voci manca, i task successivi non sono eseguibil
 
 Il numero secondario di Primero: SIM attiva, telefono acceso, **WhatsApp Business** installato e funzionante su quel telefono. Annotare il numero in E.164 (`+39…`).
 
+> **DECISO da Tommaso il 27/07: il mittente è il suo numero PERSONALE su WhatsApp Business, non il secondario Primero.** Motivo: non ha accesso al numero Primero ora né nei prossimi giorni, e M0 è il cammino critico. I destinatari sono suoi contatti personali, **avvisati** che riceveranno messaggi di prova.
+>
+> **Cosa migliora.** Cade il rischio peggiore del disegno originale: uno script che sbaglia chat e scrive a un cliente vero di Primero. Qui le chat sono di Tommaso. Cade anche il rischio "report per spam", che è il vero driver dei ban su WhatsApp: i destinatari sanno cosa arriva.
+>
+> **Cosa peggiora, e va detto chiaro.** Se WhatsApp banna, il numero perso è quello **personale** di Tommaso, non uno di servizio. Rischio valutato basso (protocollo ufficiale linked-device, nessun proxy, 20 invii in 14 giorni, destinatari consenzienti) ma **non nullo**: l'automazione resta contro i ToS e nessuno fuori da Meta conosce il modello di detection. Tommaso ha accettato il trade-off il 27/07 dopo averlo avuto scritto. La verifica di detection a vuoto (leggere `navigator.webdriver` / artefatti CDP prima del login) è stata **proposta e declinata**: se emergono anomalie in PoC-1, questa è la prima cosa da riprendere.
+>
+> **Cosa cambia nell'esecuzione:** niente. Allowlist fail-closed, watcher che non apre chat, messaggi veri, guardia pre-invio: tutto resta identico. La sola differenza è **quali** numeri stanno in `POC_WA_ALLOWED_NUMBERS`.
+>
+> **Cosa NON eredita M1:** questa è una deroga di M0. La produzione gira su numeri di servizio, non su quello personale di Tommaso.
+
 - [ ] **Step 2: Contare le chat e censire le chat controllate**
 
 Dal telefono: quante chat totali (serve per calibrare PoC-3, atteso 30-100) e **quali chat sono controllate** — cioè numeri di Tommaso o di conoscenti con cui è lecito scambiare messaggi di prova. **Servono ≥ 6 chat controllate distinte**, possibilmente in posizioni diverse della lista (una recente in cima, una vecchia raggiungibile solo con la ricerca).
+
+I numeri vanno in `POC_WA_ALLOWED_NUMBERS` dentro `D:\dev\wa-poc\poc.env`, in E.164 separati da virgola. **Il numero mittente non va in allowlist** (è chi manda). L'allowlist vuota blocca tutto: è fail-closed di proposito.
 
 Se sono meno di 6: aprire le chat mancanti **dal telefono, a mano**, scrivendo un messaggio vero a un conoscente. Il bot non deve mai creare una chat nuova (V2).
 
@@ -89,13 +113,19 @@ Sul telefono: *Dispositivi collegati* → contare quanti slot sono occupati e li
 
 PC di Tommaso. Per la durata di PoC-1 (14 giorni) **non va spento la notte** — o, se lo si spegne, i riavvii vanno annotati (fanno parte del criterio: ≥ 2 riavvii PC sopportati). Disattivare la sospensione automatica.
 
+> **DECISO da Tommaso il 26/07: il PC si spegne di notte.** PoC-1 gira comunque, con il protocollo adattato al Task 4 step 2: heartbeat con `--nota "dopo riavvio PC"` a ogni riaccensione. I riavvii **non sono un guasto del test**: il criterio ne chiede ≥ 2, qui ce ne saranno ~14. Se la sessione muore per questo, è la risposta vera alla domanda "quanto dura una sessione WhatsApp Web in uso normale" — e va scritta nel report come tale, non come incidente.
+
 - [ ] **Step 5: Decisione proxy (registrarla, non subirla)**
 
 Default M0: **nessun proxy**, si esce dall'IP residenziale di Tommaso. Motivo: WhatsApp Web da IP residenziale è il caso d'uso normale, mentre un proxy mal configurato è esso stesso un'anomalia; e V9 (1 proxy ↔ 2 numeri) serve alla correlazione multi-tenant, che in M0 non esiste. **Conseguenza dichiarata:** M0 non valida il layer proxy — resta aperto per M1/M3 (Q98). Se Tommaso preferisce testarlo subito, si passa `POC_WA_PROXY` e si annota nel report.
 
+> **DECISO da Tommaso il 26/07: nessun proxy.** `POC_WA_PROXY` resta non impostata per tutto M0. Il layer proxy esce da M0 come **non validato**: va provato in M1/M3 prima di qualunque campagna pagante.
+
 - [ ] **Step 6: Scrivere i messaggi**
 
-Q4: i testi li scrive Tommaso. Servono **3 messaggi brevi, veri e sensati** da mandare alle chat controllate (PoC-2/4). Non "test 1 2 3": messaggi che una persona manderebbe davvero. Salvarli in `D:\wa-poc\messages.txt`, una riga per messaggio.
+Q4: i testi li scrive Tommaso. Servono **3 messaggi brevi, veri e sensati** da mandare alle chat controllate (PoC-2/4). Non "test 1 2 3": messaggi che una persona manderebbe davvero — anche se i destinatari sono avvisati, PoC-3 ha bisogno di **risposte spontanee**, e a un "test 1" non risponde nessuno.
+
+Salvarli in `D:\dev\wa-poc\messages.txt`: **un messaggio per blocco, blocchi separati da una riga vuota**, un messaggio può occupare più righe (gli a-capo interni escono come Shift+Enter, ed è l'unico modo in cui M0 esercita quel percorso di `human_type`). Le righe che iniziano con `#` sono commenti e vengono scartate — il file consegnato è un template istruito, e senza quella regola le istruzioni stesse partirebbero come messaggio.
 
 ---
 
@@ -221,8 +251,13 @@ _STOP_PATTERNS = [
 ]
 _STOP_RE = re.compile("|".join(_STOP_PATTERNS), re.IGNORECASE)
 
-# 6+ cifre consecutive = quasi certamente un numero di telefono in un dump.
-_NUM_RE = re.compile(r"\d{6,}")
+# Numero di telefono in un dump: 6+ cifre, tollerando UN separatore
+# (spazio, punto, trattino, slash) tra le cifre — WhatsApp mostra
+# "342 146 0077", non "3421460077". Falso positivo accettato: date e
+# prezzi lunghi finiscono in <num>, su artefatti di debug va bene.
+# (Corretto il 26/07 su finding del reviewer: la versione precedente
+# `\d{6,}` lasciava in chiaro tutti i numeri formattati con separatori.)
+_NUM_RE = re.compile(r"\d(?:[\s.\-/]?\d){5,}")
 
 
 class NotAllowed(Exception):
@@ -754,7 +789,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Protocollo di esecuzione (14 giorni, in parallelo ai task 5-9)**
 
 - 1 run al giorno minimo: `python poc1_heartbeat.py`
-- dopo ogni riavvio del PC: `python poc1_heartbeat.py --nota "dopo riavvio PC"`
+- **il PC si spegne ogni notte (decisione 26/07)**: il primo heartbeat della giornata si lancia sempre con `--nota "dopo riavvio PC"`. Sono ~14 riavvii PC nella finestra, non 2: il criterio è superato di molto per costruzione, e in cambio si misura il caso d'uso più ostile
 - almeno **2 riavvii PC** e **5 riavvii browser** nella finestra (ogni run è un riavvio browser)
 - se in un giorno il telefono resta spento/offline a lungo, annotarlo (`--nota "telefono offline 6h"`) → risponde a Q55
 - **PoC-1 non blocca i task 5-9**: quelli girano dentro questa finestra e sono anche l'"uso quotidiano" che il criterio richiede
@@ -874,6 +909,93 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+- [ ] **Step 1b: Discovery del DOM del PANNELLO CONVERSAZIONE (aggiunto il 26/07)**
+
+**Perché esiste questo step.** Il resto del Task 5 cataloga la sidebar. Ma la **guardia pre-invio** del Task 8 — la garanzia strutturale su cui poggia tutto il disegno opt-out/GDPR — dipende da tre famiglie di selettori del pannello conversazione che nessuno step del piano verificava: `div.message-in` / `div.message-out` (`JS_TAIL`), `TICK_SEL` (spunte), `HISTORY_SEL` (cronologia sì/no). Il fail-mode che questo step previene è il peggiore possibile per M0: se `JS_TAIL` non aggancia nulla restituisce **lista vuota** → `stop=False` → la guardia **passa sempre e sembra funzionare**, e M0 darebbe GO a una garanzia inesistente.
+
+**Vincolo.** Si apre **una sola chat, controllata** (di Tommaso o di un conoscente, presente in `POC_WA_ALLOWED_NUMBERS`). Il divieto "non aprire le chat" protegge le chat dei **clienti Primero**: aprire la propria non marca letto niente che appartenga al cliente. L'allowlist è la guardia anche qui.
+
+Aggiungere a `poc3_dump_dom.py` il dump della conversazione, attivato da `--chat`:
+
+```python
+# --- aggiunte a backend/scripts/poc_wa/poc3_dump_dom.py ---
+import argparse
+
+from wa_lib import AllowList, mask_pii, normalize_e164
+
+# Descrive le ultime bolle di messaggio e le icone di stato: da qui nascono
+# JS_TAIL, TICK_SEL e HISTORY_SEL del Task 8. `class` e' inclusa di proposito:
+# 'message-in'/'message-out' sono classi, non data-attribute.
+JS_DUMP_CONV = """
+() => {
+  const describe = (el) => {
+    const attrs = {};
+    for (const a of el.attributes) {
+      if (a.name.startsWith('data-') || a.name.startsWith('aria-')
+          || a.name === 'role' || a.name === 'class' || a.name === 'title') {
+        attrs[a.name] = a.value;
+      }
+    }
+    return {tag: el.tagName.toLowerCase(), attrs, text: (el.innerText || '').slice(0, 120)};
+  };
+  const main = document.querySelector('#main')
+            || document.querySelector("[role='application']")
+            || document.body;
+  const bubbles = Array.from(main.querySelectorAll(
+      "div.message-in, div.message-out, [data-id], [role='row']")).slice(-14);
+  return {
+    mainSel: main.id ? '#' + main.id : main.tagName.toLowerCase(),
+    counts: {
+      'div.message-in': main.querySelectorAll('div.message-in').length,
+      'div.message-out': main.querySelectorAll('div.message-out').length,
+      '[data-id]': main.querySelectorAll('[data-id]').length,
+      "[role='row']": main.querySelectorAll("[role='row']").length,
+    },
+    bubbles: bubbles.map(describe),
+    dataIcons: Array.from(main.querySelectorAll('[data-icon]'))
+                    .slice(-30).map(e => e.getAttribute('data-icon')),
+    composers: Array.from(main.querySelectorAll("div[contenteditable='true']")).map(describe),
+  };
+}
+"""
+
+
+async def dump_conversazione(page, raw_numero: str) -> dict:
+    """Apre UNA chat controllata e descrive il pannello conversazione."""
+    e164 = normalize_e164(raw_numero)
+    if not e164:
+        raise SystemExit(f"Numero non normalizzabile: {raw_numero!r}")
+    AllowList.load().assert_allowed(e164)   # fail-closed anche in sola lettura
+    await page.goto(f"https://web.whatsapp.com/send?phone={e164}",
+                    wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(8000)
+    dump = await page.evaluate(JS_DUMP_CONV)
+    for b in dump["bubbles"] + dump["composers"]:
+        b["text"] = mask_pii(b.get("text", ""), keep=60)
+        for k in list(b.get("attrs", {})):
+            b["attrs"][k] = mask_pii(b["attrs"][k], keep=80)
+    out = artifacts_dir() / f"conv_dump_{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    out.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")
+    log_event("conv_dump", main=dump["mainSel"], counts=json.dumps(dump["counts"]),
+              icone=",".join(sorted(set(dump["dataIcons"]))), file=str(out))
+    return dump
+```
+
+e nel `main()` far scegliere la modalità: senza `--chat` si fa il dump della sidebar come prima, con `--chat "+39…"` si fa **solo** il dump della conversazione.
+
+```bash
+cd backend/scripts/poc_wa
+set POC_WA_ALLOWED_NUMBERS=+39...        # la tua chat controllata
+python poc3_dump_dom.py --chat "+39..."
+```
+
+**Cosa deve uscire, e cosa significa se non esce:**
+- `counts['div.message-in'] + counts['div.message-out'] > 0` → `JS_TAIL` del Task 8 funzionerà. **Se sono 0**, `JS_TAIL` va riscritto sui selettori veri (`[data-id]`, `[role='row']` + come si distingue in da out) **prima** di eseguire il Task 8: altrimenti la guardia è finta.
+- `dataIcons` deve contenere gli identificativi delle spunte (attesi `status-time` / `status-check` / `status-dblcheck` o simili) → è `TICK_SEL` (Q39).
+- il conteggio delle bolle > 0 su una chat con cronologia → è `HISTORY_SEL` (Q37/Q38).
+
+Registrare tutto nella sezione *Pannello conversazione* del catalogo (Step 3).
+
 - [ ] **Step 2: Eseguire e leggere il dump**
 
 ```bash
@@ -907,6 +1029,19 @@ Creare `docs/whatsapp/wa-dom-catalog.md` con questa struttura, riempita **dai da
 | Spunte messaggio inviato (orologio/1/2) | | | Q39 |
 | Interstitial "aggiorna WhatsApp Web" | | | Q43 |
 | Popup/promo dismissibili | | | Q46 |
+
+## Pannello conversazione (dallo Step 1b — base della guardia pre-invio del Task 8)
+
+| Elemento | Selettore rilevato | Conteggio nel dump | Note |
+|---|---|---|---|
+| Contenitore conversazione | | | `#main`? |
+| Bolla inbound | | | `div.message-in` regge o va sostituito? |
+| Bolla outbound | | | come si distingue da inbound |
+| Icone di stato viste (`data-icon`) | | | → `TICK_SEL`, Q39 |
+| Composer | | | |
+| Segnale "chat con cronologia" | | | → `HISTORY_SEL`, Q37/Q38 |
+
+**Verdetto su `JS_TAIL` del Task 8:** <regge come scritto / va riscritto così: …>
 
 ## Virtualizzazione della lista (Q40)
 Righe nel DOM a riposo: <n> · chat totali sul numero: <n> · scroll necessario per vederle tutte: <sì/no, quanto>
@@ -1347,7 +1482,12 @@ if __name__ == "__main__":
 cd backend/scripts/poc_wa
 python poc2_send.py --numero "+39..." --messaggio-file D:\wa-poc\messages.txt
 ```
-Atteso: `inviato=0`, `guardia_ms` valorizzato. **Verificare subito il numero chiave: `guardia_ms` ≤ 2000.** Se sfora sistematicamente, la strategia opt-out va rivista prima di M3 (è scritto nell'SDD §13) — segnalarlo, non nasconderlo in una media.
+Atteso: `inviato=0`, le colonne dei tempi valorizzate.
+
+> **CRITERIO RITARATO il 26/07** (su finding della review: il vecchio "guardia ≤ 2s" passava sempre perché cronometrava solo una lettura DOM sincrona, cioè decine di ms — un criterio che si autoconvalida). Ora le colonne sono due e vanno lette insieme:
+> - **`guardia_dom_ms` ≤ 2000** — il costo della sola lettura della coda inbound. È il numero che il vecchio criterio intendeva.
+> - **`guardia_totale_ms`** = apertura + lettura — è il costo **reale** del controllo opt-out per contatto, quello da cui si stimano i cap giornalieri (Q50). Nessuna apertura di deep-link WhatsApp sta sotto i 2s: qui non c'è una soglia da superare, c'è un numero da **misurare e riportare**. Trattarlo come una soglia darebbe un NO-GO falso.
+> - Nota per il Task 10: `guardia_totale_ms` **sottostima** comunque, perché `open_by_deeplink` calcola i suoi ms prima di `_history_signal`, che può costare fino a ~7s ed è anch'esso tra "apri" e "puoi decidere se scrivere". Il costo vero per contatto è più vicino a `totale_ms`.
 
 - [ ] **Step 3: Test negativo della guardia (il più importante)**
 
@@ -1516,7 +1656,8 @@ git commit -m "poc(wa): PoC-4 scenari di coesistenza bot/umano con protocollo ma
 | PoC-1 sessione | 14gg, ≥5 riavvii browser, ≥2 riavvii PC, nessun re-scan | | GO / NO-GO |
 | PoC-2 apertura | ≥90% aperture OK su una strategia | | |
 | PoC-2 invio | 20/20 su ≥6 chat controllate | | |
-| PoC-2 guardia | ≤ 2s per invio | | |
+| PoC-2 guardia (lettura) | `guardia_dom_ms` ≤ 2s | | |
+| PoC-2 guardia (costo reale) | `guardia_totale_ms` misurato e riportato, nessuna soglia | | non è un gate: è il numero da cui escono i cap giornalieri |
 | PoC-2 STOP | invio bloccato dallo STOP in coda | | |
 | PoC-3 rilevamento | 20/20 inbound entro 1 ciclo, ≥5 spontanei reali | | |
 | PoC-3 non-lettura | nessuna chat marcata letta dal watcher | | |

@@ -2,7 +2,7 @@
 """PoC-2b — guardia pre-invio + invio reale + verifica spunte.
 
 Sequenza per ogni destinatario (identica a quella che il sender di M3 dovra' fare):
-  0. numero gia' in opt-out (D:\\wa-poc\\optout.json) -> NON si apre nemmeno la chat;
+  0. numero gia' in opt-out (D:\\dev\\wa-poc\\optout.json) -> NON si apre nemmeno la chat;
   1. apre la chat con la strategia vincente di PoC-2a;
   2. GUARDIA PRE-INVIO: legge i messaggi inbound successivi all'ultimo messaggio
      nostro e cerca uno STOP -> cronometrata, target <= 2s (SDD 13, PoC-2);
@@ -20,17 +20,19 @@ QUATTRO GUARDIE prima di scrivere a qualcuno:
     sempre, anche quando il DOM non lo mostra piu');
   - coda inbound non agganciata = stop per prudenza (non e' silenzio, e' cecita').
 
-Uso:  python poc2_send.py --numero "+39..." --messaggio-file D:\\wa-poc\\messages.txt [--send]
+Uso:  python poc2_send.py --numero "+39..." [--messaggio-file D:\\dev\\wa-poc\\messages.txt] [--send]
+      (senza --messaggio-file usa POC_WA_MESSAGES / D:\\dev\\wa-poc\\messages.txt)
 """
 import argparse
 import asyncio
 import csv
 import random
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _common import artifacts_dir, first_locator, human_type, log_event, snap, wa_context
+from _common import MESSAGES_FILE, artifacts_dir, first_locator, human_type, log_event, snap, wa_context
 from poc2_open import COMPOSER_SEL, open_by_deeplink
 from poc_state import OptOutStore, SentLog
 from wa_lib import AllowList, contains_stop, load_messages, mask_pii, normalize_e164
@@ -66,6 +68,8 @@ TICK_SEL = ["[data-icon='status-dblcheck']", "[data-icon='status-check']", "[dat
 # poi se la lettura della spunta riesce si scrive una seconda riga di
 # aggiornamento con lo stesso invio_id. Append-only di proposito: mai riscrivere
 # una riga gia' scritta, e' un log di audit su invii reali.
+# `inviato` e' 1 SOLO sulla riga evento=invio: la riga evento=spunta la lascia
+# vuota, altrimenti un sum() sulla colonna conta due volte lo stesso messaggio (F5).
 _CSV_HEADER = [
     "ts", "numero_masked", "invio_id", "evento",
     "open_ms", "guardia_dom_ms", "guardia_totale_ms",
@@ -74,14 +78,50 @@ _CSV_HEADER = [
 ]
 
 
+class CsvSchemaError(Exception):
+    """`send_results.csv` esiste gia' ma il suo header non combacia con lo
+    schema atteso (F4): appendere righe nuove sotto un header vecchio le
+    disallinea in silenzio. Non riscriviamo/ruotiamo da soli un file di audit:
+    ci si ferma e si chiede una decisione umana (rinominare/archiviare il
+    file esistente prima di rilanciare)."""
+
+
 def _scrivi_riga_csv(path: Path, **campi) -> None:
-    """Append di una riga; scrive l'header alla primissima riga (file assente)."""
+    """Append di una riga; scrive l'header alla primissima riga (file assente
+    o presente-ma-vuoto). Se il file esiste gia' CON contenuto, il suo header
+    deve combaciare esattamente con `_CSV_HEADER` (F4): 9->14 colonne e' gia'
+    successo una volta in questo cantiere."""
+    header_atteso = ",".join(_CSV_HEADER)
     new = not path.exists()
+    if not new:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            prima_riga = f.readline().rstrip("\r\n")
+        if prima_riga == "":
+            new = True   # file esiste ma e' vuoto: l'header non e' mai stato scritto
+        elif prima_riga != header_atteso:
+            raise CsvSchemaError(
+                f"{path} ha un header diverso da quello atteso "
+                f"({prima_riga!r} vs {header_atteso!r}). Schema cambiato: "
+                f"archivia/rinomina il file esistente prima di rilanciare."
+            )
     with path.open("a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new:
             w.writerow(_CSV_HEADER)
         w.writerow([campi.get(c, "") for c in _CSV_HEADER])
+
+
+def _scrivi_riga_csv_protetta(path: Path, evento_fallback: str, **campi) -> None:
+    """SOLO per righe scritte dopo un invio reale (Enter gia' premuto): un
+    fallimento qui non deve MAI propagare, altrimenti si perde la traccia di
+    un messaggio gia' arrivato a una persona vera (F1) — basta che qualcuno
+    apra `send_results.csv` in Excel mentre il run gira (lock esclusivo su
+    Windows) o che il disco sia pieno. Il fallback va su events.jsonl, file
+    indipendente dal CSV: un lock sul CSV non lo tocca."""
+    try:
+        _scrivi_riga_csv(path, **campi)
+    except Exception as exc:
+        log_event(evento_fallback, errore=f"{type(exc).__name__}: {exc}"[:200], **campi)
 
 
 def _ts() -> str:
@@ -222,7 +262,8 @@ async def main(numero: str, testi: list[str], send: bool) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--numero", required=True)
-    ap.add_argument("--messaggio-file", required=True, help="file con i messaggi veri scritti da Tommaso")
+    ap.add_argument("--messaggio-file", default=str(MESSAGES_FILE),
+                    help="file con i messaggi veri scritti da Tommaso (default: %(default)s)")
     ap.add_argument("--send", action="store_true", help="senza questo flag e' dry-run")
     args = ap.parse_args()
     testi = load_messages(args.messaggio_file)   # solleva MessagesFileError se vuoto/malformato (A7)

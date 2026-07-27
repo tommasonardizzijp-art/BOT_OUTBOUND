@@ -27,7 +27,10 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-STATE_DIR = Path(os.environ.get("POC_WA_STATE_DIR", r"D:\wa-poc"))
+# Stesso default di _common.POC_ROOT, ripetuto invece che importato: questo
+# modulo resta puro (niente _common, niente psutil) per poter girare nei test
+# senza browser. Se cambia il default, vanno cambiati entrambi.
+STATE_DIR = Path(os.environ.get("POC_WA_STATE_DIR") or os.environ.get("POC_WA_ROOT") or r"D:\dev\wa-poc")
 OPTOUT_PATH = Path(os.environ.get("POC_WA_OPTOUT_PATH", str(STATE_DIR / "optout.json")))
 SENTLOG_PATH = Path(os.environ.get("POC_WA_SENTLOG_PATH", str(STATE_DIR / "sent_log.json")))
 

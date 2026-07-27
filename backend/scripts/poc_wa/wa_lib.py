@@ -127,6 +127,10 @@ def load_messages(path: str | Path) -> list[str]:
 
     - encoding="utf-8-sig": un file salvato da Notepad lascia un BOM che
       .strip() non toglie, e finirebbe nel primo messaggio;
+    - le righe che iniziano con '#' sono COMMENTI e vengono scartate: il file
+      viene consegnato a Tommaso come template istruito, e senza questa regola
+      un template non ripulito manderebbe le istruzioni stesse a una persona
+      vera. Costo accettato: un messaggio non puo' iniziare una riga con '#';
     - spazi in eccesso rimossi solo ai BORDI del blocco: gli a-capo interni
       restano intatti (sono il contenuto, non whitespace accidentale);
     - un TAB dentro un messaggio e' rifiutato: keyboard.type("\\t") sposta il
@@ -143,6 +147,8 @@ def load_messages(path: str | Path) -> list[str]:
     blocks: list[str] = []
     current: list[str] = []
     for line in raw.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
         if line.strip() == "":
             if current:
                 blocks.append("\n".join(current).strip())

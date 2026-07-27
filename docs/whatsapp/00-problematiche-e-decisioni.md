@@ -218,5 +218,35 @@ Sciolte le domande di §17 che bloccavano il PoC gate:
 
 ---
 
-## 13. Prossimo passo
-SDD scritto (v1.1 23/07) e aggiornato a **v1.2** (24/07, [T] bloccanti sciolte). Prossimo: **spec/plan di M0 (PoC gate)** — script PoC usa-e-getta, non codice di produzione. Gate duro: PoC-1/2/3 falliti ⇒ strada A rimessa in discussione prima di costruire M1+.
+## 13. Decisioni di esecuzione M0 (26-27/07)
+
+Prese durante l'avvio operativo del PoC. **Modificano** decisioni prese sopra.
+
+| Q | Decisione | Data | Impatto |
+|---|---|---|---|
+| Q98 | **Nessun proxy in M0.** `POC_WA_PROXY` resta vuota | 26/07 | M0 esce col layer proxy **non validato**: va provato in M1/M3 prima di qualunque campagna pagante |
+| Q97 | **Il PC si spegne di notte.** Heartbeat con `--nota "dopo riavvio PC"` a ogni riaccensione | 26/07 | ~14 riavvii invece dei ≥2 richiesti: criterio superato per costruzione, e in cambio si misura il caso d'uso più ostile. Se la sessione muore, **è un risultato**, non un incidente |
+| **Q60 (sostituita)** | **Mittente = numero PERSONALE di Tommaso su WhatsApp Business**, non il secondario Primero. Destinatari = suoi contatti personali **avvisati** | **27/07** | vedi sotto |
+| Q105 | Confermato nessun seed: le ≥6 chat controllate escono dalle chat reali del numero personale | 27/07 | — |
+| — | Radice artefatti da `D:\wa-poc` a **`D:\dev\wa-poc`**; numeri reali in `poc.env`, caricato da `_common.py` | 27/07 | `D:\dev` verificato **non** repo git: i numeri non possono finire in un commit |
+
+### Perché Q60 è cambiata, e cosa costa
+
+**Causa:** Tommaso non ha accesso al numero secondario di Primero, né lo avrà nei prossimi giorni. M0 è il cammino critico (PoC-1 dura 14 giorni): aspettare fermava tutto.
+
+**Cosa migliora.** Il vincolo originale *"solo messaggi reali, mai messaggi di test"* nasceva per non bruciare i contatti di un cliente vero. Su un numero personale con destinatari avvisati quel rischio **sparisce**, e con esso il vero driver dei ban WhatsApp: i report per spam dei destinatari. Un errore dello script ora colpisce chat di Tommaso, non di Primero.
+
+**Cosa costa.** Se WhatsApp banna, il numero perso è **quello personale**. Rischio valutato **basso ma non nullo**:
+- a favore: protocollo linked-device **ufficiale** (non Baileys/protocollo reimplementato — è la differenza che pesa di più), IP residenziale senza proxy, una sola sessione, nessuna iniezione di fingerprint, 20 invii in 14 giorni, destinatari consenzienti;
+- contro: l'automazione **resta contro i ToS** a prescindere dall'indistinguibilità, ed esistono vettori di detection browser (`navigator.webdriver`, artefatti CDP) che Patchright neutralizza ma che nessuno ha mai verificato *contro WhatsApp nello specifico*.
+
+Tommaso ha accettato il trade-off il 27/07 dopo averlo avuto per iscritto. La **verifica di detection a vuoto** (aprire WhatsApp Web col profilo Patchright *senza* login e leggere cosa la pagina vede dell'ambiente) è stata proposta e **declinata**: se PoC-1 mostra anomalie — logout ripetuti, re-scan richiesti, schermate insolite — è la prima cosa da riprendere prima di proseguire.
+
+**Cosa NON cambia:** allowlist fail-closed, watcher che non apre le chat, guardia pre-invio, messaggi veri. Cambia solo *quali* numeri stanno in `POC_WA_ALLOWED_NUMBERS`.
+
+**Cosa NON eredita M1:** è una deroga di M0. La produzione gira su numeri di servizio.
+
+---
+
+## 14. Prossimo passo
+SDD **v1.2** (24/07). Piano M0 scritto (24/07) ed **eseguito lato codice** (26/07: task 1-9, script PoC + helper testati, 71 test verdi). Restano: **Task 0 fisico** (numeri in allowlist, 3 messaggi, slot linked device) → **login QR** → i 14 giorni di PoC-1, con gli altri PoC dentro la finestra. Gate duro invariato: PoC-1/2/3 falliti ⇒ strada A rimessa in discussione prima di costruire M1+.

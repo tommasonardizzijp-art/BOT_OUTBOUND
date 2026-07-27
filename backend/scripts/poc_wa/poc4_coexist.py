@@ -2,7 +2,7 @@
 """PoC-4 — il bot e l'umano sullo stesso numero, contemporaneamente.
 
 Quattro scenari, tutti su chat controllate. Tommaso tiene in mano il telefono del
-numero secondario (fa l'umano-business); il "contatto" e' un suo secondo numero.
+numero mittente (fa l'umano-business); il "contatto" e' una delle chat in allowlist.
 
   S1  bot invia mentre l'umano ha WhatsApp aperto sul telefono (chat diversa)
   S2  bot invia mentre l'umano ha APERTA LA STESSA chat            -> Q75
@@ -12,7 +12,7 @@ numero secondario (fa l'umano-business); il "contatto" e' un suo secondo numero.
 Non automatizza l'umano: e' un cronometro con protocollo. Lo script chiede
 conferma a schermo tra uno scenario e l'altro.
 
-Uso:  python poc4_coexist.py --numero "+39..." --messaggio-file D:\\wa-poc\\messages.txt --scenario S1
+Uso:  python poc4_coexist.py --numero "+39..." [--messaggio-file D:\\dev\\wa-poc\\messages.txt] --scenario S1
 """
 import argparse
 import asyncio
@@ -20,7 +20,7 @@ import csv
 import random
 from datetime import datetime, timezone
 
-from _common import artifacts_dir, first_locator, human_type, log_event, snap, wa_context
+from _common import MESSAGES_FILE, artifacts_dir, first_locator, human_type, log_event, snap, wa_context
 from poc2_open import COMPOSER_SEL, open_by_deeplink
 from poc2_send import guardia_pre_invio, leggi_spunta
 from poc_state import OptOutStore
@@ -127,7 +127,8 @@ async def main(numero: str, messaggio: str, scenario: str) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--numero", required=True)
-    ap.add_argument("--messaggio-file", required=True)
+    ap.add_argument("--messaggio-file", default=str(MESSAGES_FILE),
+                    help="default: %(default)s")
     ap.add_argument("--scenario", required=True, choices=["S1", "S2", "S3", "S4"])
     args = ap.parse_args()
     # A5/A7: parsing condiviso con poc2_send.py (wa_lib.load_messages), non piu'

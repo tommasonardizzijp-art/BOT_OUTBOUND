@@ -167,3 +167,37 @@ def test_load_messages_file_solo_righe_vuote_errore_leggibile(tmp_path):
 def test_load_messages_file_assente_errore_leggibile(tmp_path):
     with pytest.raises(wa_lib.MessagesFileError):
         wa_lib.load_messages(tmp_path / "non-esiste.txt")
+
+
+# --- righe '#': il file arriva a Tommaso come template istruito ------------
+
+def test_load_messages_commenti_scartati(tmp_path):
+    """Il template consegnato ha 20 righe di istruzioni in testa. Senza lo
+    scarto dei '#', il primo "messaggio" sarebbe il testo delle istruzioni —
+    mandato a una persona vera."""
+    p = tmp_path / "messages.txt"
+    p.write_text(
+        "# istruzioni da cancellare\n"
+        "# seconda riga di istruzioni\n"
+        "\n"
+        "Ciao! Ti scrivo al volo.\n"
+        "\n"
+        "Ehi, tutto bene?\n",
+        encoding="utf-8",
+    )
+    assert wa_lib.load_messages(p) == ["Ciao! Ti scrivo al volo.", "Ehi, tutto bene?"]
+
+
+def test_load_messages_commenti_dentro_un_blocco_non_spezzano(tmp_path):
+    p = tmp_path / "messages.txt"
+    p.write_text("Ciao,\n# nota per me\ncome stai?\n", encoding="utf-8")
+    assert wa_lib.load_messages(p) == ["Ciao,\ncome stai?"]
+
+
+def test_load_messages_template_non_compilato_errore_leggibile(tmp_path):
+    """Template consegnato ma mai riempito: solo commenti. Deve fermarsi con
+    l'errore che spiega cosa fare, non partire con una lista vuota."""
+    p = tmp_path / "messages.txt"
+    p.write_text("# scrivi qui i tuoi 3 messaggi\n#\n# separati da riga vuota\n", encoding="utf-8")
+    with pytest.raises(wa_lib.MessagesFileError):
+        wa_lib.load_messages(p)
