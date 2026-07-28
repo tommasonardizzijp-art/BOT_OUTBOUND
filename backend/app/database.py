@@ -10,10 +10,35 @@ if sys.platform.startswith("win"):
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 from loguru import logger
 from app.config import settings
 from app.utils.db_dialect import is_postgres, is_sqlite, to_async_database_url
+
+
+@event.listens_for(Engine, "connect")
+def _sqlite_enforce_foreign_keys(dbapi_connection, connection_record) -> None:
+    """Attiva PRAGMA foreign_keys=ON su OGNI connessione SQLite, qualunque
+    engine l'abbia aperta. Registrato sulla classe Engine (non su una singola
+    istanza) perche' i test si creano engine propri (tests/conftest.py) mai
+    derivati dall'`engine` qui sotto: un listener sulla sola istanza modulo
+    non li coprirebbe.
+
+    No-op per Postgres (produzione): il modulo del DBAPI adapter non contiene
+    "sqlite" (asyncpg), quindi la PRAGMA non viene mai eseguita li'. Il canale
+    Instagram gira solo su Postgres in produzione -- zero rischio.
+
+    Decisione 27/07 (qa-wa-m1-adversarial.md SS K): senza questo, SQLite non
+    applica MAI le foreign key. Un insert con tenant_id/campaign_id inesistente
+    passava nei test e sarebbe stato rifiutato da Postgres in produzione --
+    qualunque test di integrita' referenziale era cieco.
+    """
+    if "sqlite" not in type(dbapi_connection).__module__:
+        return
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
 
 
 def _connect_args() -> dict:
