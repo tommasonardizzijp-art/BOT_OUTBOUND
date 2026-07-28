@@ -132,7 +132,7 @@ class _LaunchProbe:
     asyncio non farebbe mai girare l'altra coroutine e il test passerebbe
     per finta anche con un lock rotto)."""
 
-    def __init__(self, launch_delay: float = 0.05):
+    def __init__(self, launch_delay: float = 0.05, real_lock_file: Path | None = None):
         self.current = 0
         self.max_concurrent = 0
         self.launch_delay = launch_delay
@@ -141,6 +141,12 @@ class _LaunchProbe:
         self.launch_kwargs: list[dict] = []
         self.init_scripts: list[str] = []
         self.should_raise: Exception | None = None
+        # adv24b: se impostato, il finto scrive un lock-file VERO su disco
+        # (come farebbe Chromium mentre e' vivo) e lo tiene finche' non
+        # chiude -- serve a esercitare la pulizia REALE di _open_wa_browser
+        # (quella che tocca il filesystem), non solo il conteggio delle
+        # sovrapposizioni sul launcher finto.
+        self.real_lock_file = real_lock_file
 
     async def launch(self, **kwargs):
         if self.should_raise is not None:
@@ -149,6 +155,9 @@ class _LaunchProbe:
         self.current += 1
         self.max_concurrent = max(self.max_concurrent, self.current)
         self.launch_kwargs.append(kwargs)
+        if self.real_lock_file is not None:
+            self.real_lock_file.parent.mkdir(parents=True, exist_ok=True)
+            self.real_lock_file.write_bytes(b"fake-chromium-active-lock")
         await asyncio.sleep(self.launch_delay)
         return _FakeContext(self)
 
@@ -174,6 +183,8 @@ class _FakeContext:
     async def close(self):
         self._probe.close_count += 1
         self._probe.current -= 1
+        if self._probe.real_lock_file is not None:
+            self._probe.real_lock_file.unlink(missing_ok=True)
 
 
 class _FakePlaywrightCM:
@@ -464,6 +475,56 @@ async def test_adv24_due_assisted_login_stesso_numero_mai_due_browser_aperti(wa_
     assert probe.max_concurrent == 1
     assert probe.launch_count == 2  # entrambi hanno aperto, ma mai insieme
     assert probe.close_count == 2
+
+
+@pytest.mark.asyncio
+async def test_adv24b_pulizia_lock_file_non_cancella_un_profilo_in_uso(wa_number_factory, monkeypatch):
+    """CRITICAL della review whole-branch 28/07, mancato dai batch 1-4: mkdir
+    + pulizia dei lock-file di Chromium (SingletonLock/Cookie/Socket) girava
+    FUORI dal lock. Se un browser e' gia' vivo su questo profilo, il suo
+    SingletonLock e' VERO (non stale) -- una seconda chiamata concorrente che
+    lo pulisce senza aspettare il lock lo cancella MENTRE il primo browser lo
+    sta usando, la stessa corruzione del profilo che il lock esiste per
+    impedire.
+
+    adv24/25/26 misurano solo le sovrapposizioni di launch_persistent_context
+    sul launcher finto, che non scrive mai lock-file veri: non potevano
+    vedere questo difetto. Qui il finto scrive un SingletonLock VERO su disco
+    quando "apre" e lo rimuove quando "chiude" (real_lock_file), cosi' la
+    pulizia REALE di _open_wa_browser (quella che tocca il filesystem, non
+    mockata) ha qualcosa di vero su cui agire.
+
+    Con la pulizia FUORI dal lock (bug): la seconda chiamata puo' pulire
+    mentre la prima e' nella sua sezione critica -> il file della prima
+    sparisce prima che la prima abbia finito di usarlo.
+    Con la pulizia DENTRO il lock (fix): la seconda chiamata non puo' nemmeno
+    iniziare la sua pulizia finche' la prima non ha rilasciato il lock (cioe'
+    finche' non ha gia' chiuso il context e rimosso da sola il proprio file)
+    -> il file di ciascuna chiamata esiste sempre quando quella chiamata lo
+    usa (session_state, dentro il context)."""
+    number_id = await wa_number_factory()
+    lock_path = profile_dir_for(number_id) / "SingletonLock"
+    probe = _LaunchProbe(launch_delay=0.06, real_lock_file=lock_path)
+    _patch_launcher(monkeypatch, probe)
+
+    file_esisteva_durante_uso: list[bool] = []
+
+    async def _osserva_file_durante_uso(_chiamata):
+        file_esisteva_durante_uso.append(lock_path.exists())
+
+    _patch_wa_page(monkeypatch, segnali=["qr_required"], delay=0.02,
+                    on_call=_osserva_file_durante_uso)
+
+    await asyncio.gather(
+        assisted_login(number_id, timeout_s=0),
+        assisted_login(number_id, timeout_s=0),
+    )
+
+    assert len(file_esisteva_durante_uso) == 2
+    assert all(file_esisteva_durante_uso), (
+        "il lock-file di una chiamata e' sparito mentre quella chiamata lo "
+        "stava ancora usando -- la pulizia dell'altra e' girata fuori dal lock"
+    )
 
 
 @pytest.mark.asyncio

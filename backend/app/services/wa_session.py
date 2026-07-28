@@ -50,7 +50,13 @@ WHATSAPP_WEB_URL = "https://web.whatsapp.com/"
 # Non e' un errore di classificazione -- cio' che viene letto e persistito e'
 # comunque vero -- ma se servira' un login davvero reattivo la leva e' una
 # lettura DOM piu' snella della session_state() generica, non questa costante.
-# Rilevato in review il 28/07, da affrontare nella chiusura del modulo.
+#
+# DECISIONE DI CHIUSURA MODULO (team lead, 28/07): si lascia com'e' in M1.
+# Non c'e' nessun invio e nessun operatore esposto al login assistito su
+# scala (e' una persona che inquadra un QR, non un flusso automatizzato che
+# deve essere reattivo). Se in futuro servira' un login davvero reattivo, la
+# leva resta quella sopra -- una lettura DOM piu' snella di session_state()
+# -- non abbassare questa costante.
 ASSISTED_LOGIN_POLL_INTERVAL_S = 2.0
 
 
@@ -147,20 +153,15 @@ async def _open_wa_browser(number_id: str, *, headless: bool, proxy_url: str | N
     from app.browser.fingerprint import get_fingerprint
 
     profile_dir = profile_dir_for(number_id)
-    profile_dir.mkdir(parents=True, exist_ok=True)
 
-    # Lock file di Chromium lasciati da una sessione precedente crashata/killata
-    # (stessa causa in context_manager._prepare_launch): senza questa pulizia
-    # Chrome vede "sessione esistente", inoltra il launch al PID fantasma ed
-    # esce subito -- TargetClosedError prima che Patchright si connetta.
-    for lock_file in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-        lock_path = profile_dir / lock_file
-        try:
-            if lock_path.exists():
-                os.remove(lock_path)
-        except OSError as e:
-            logger.warning(f"wa_session: impossibile rimuovere {lock_file} per {number_id}: {e}")
-
+    # La validazione del proxy resta QUI, fuori dal lock: e' pura (non tocca
+    # il disco del profilo) e deve sollevare PRIMA di prendere il lock e
+    # prima di toccare il profilo (test_adv38/39). Diverso da
+    # context_manager.get_browser_context, dove tutto _prepare_launch -- proxy
+    # compresa -- sta dentro il lock: li' il proxy arriva da una query DB
+    # fatta dentro la sezione critica; qui arriva gia' risolto dal chiamante,
+    # quindi non c'e' motivo di tenere una validazione pura dietro un lock
+    # che non le serve.
     fingerprint = get_fingerprint(number_id)
     proxy_cfg = parse_proxy_url(proxy_url)
     if proxy_url and not proxy_cfg:
@@ -168,7 +169,16 @@ async def _open_wa_browser(number_id: str, *, headless: bool, proxy_url: str | N
             f"Proxy malformato per numero WA {number_id}: {_mask_proxy_url(proxy_url)!r}"
         )
 
-    chromium_args = ["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+    # Chromium_args tenuti ALLINEATI a context_manager._prepare_launch di
+    # proposito (stesso schema, docstring del modulo): se in futuro
+    # divergono da li', deve essere una scelta motivata con un commento qui
+    # accanto, non una deriva silenziosa (--js-flags=--harmony mancava per
+    # deriva, non per scelta -- review 28/07).
+    chromium_args = [
+        "--no-sandbox",
+        "--disable-blink-features=AutomationControlled",
+        "--js-flags=--harmony",
+    ]
     launch_kwargs = dict(
         user_data_dir=str(profile_dir),
         headless=headless,
@@ -195,6 +205,27 @@ async def _open_wa_browser(number_id: str, *, headless: bool, proxy_url: str | N
 
     lock = _get_wa_lock(number_id)
     async with lock:
+        # mkdir + pulizia lock-file DENTRO la sezione critica (CRITICAL,
+        # review whole-branch 28/07): se un altro browser e' vivo su questo
+        # profilo, il suo SingletonLock e' VERO, non stale -- cancellarlo
+        # fuori da un lock gli toglie l'esclusivita' sul proprio
+        # user_data_dir MENTRE lo sta usando, esattamente la corruzione del
+        # profilo che il lock esiste per impedire (docstring del modulo,
+        # punto 2). Stesso ordine di context_manager.get_browser_context:
+        # li' il lock viene preso PRIMA di chiamare _prepare_launch, che
+        # contiene la stessa pulizia (context_manager.py:97-104). Qui la
+        # pulizia era rimasta fuori dal lock per errore, non per scelta:
+        # nessun commento la giustificava, ed e' la stessa causa del re-scan
+        # del QR che M1 esiste per evitare.
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        for lock_file in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            lock_path = profile_dir / lock_file
+            try:
+                if lock_path.exists():
+                    os.remove(lock_path)
+            except OSError as e:
+                logger.warning(f"wa_session: impossibile rimuovere {lock_file} per {number_id}: {e}")
+
         async with async_playwright() as pw:
             context = await pw.chromium.launch_persistent_context(**launch_kwargs)
             await context.add_init_script(_build_fingerprint_script(fingerprint))
