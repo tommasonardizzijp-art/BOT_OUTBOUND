@@ -10,6 +10,16 @@ from app.models.anomaly import Anomaly
 from app.models.user import User
 from app.models.bot_state import BotState
 from app.models.imported_profile import ImportedProfile
+from app.models.tenant import Tenant
+from app.models.wa import (
+    WaCampaign,
+    WaCampaignContact,
+    WaContact,
+    WaInboundEvent,
+    WaMessage,
+    WaNumber,
+    WaSequenceStep,
+)
 
 __all__ = [
     "InstagramAccount",
@@ -24,4 +34,12 @@ __all__ = [
     "User",
     "BotState",
     "ImportedProfile",
+    "Tenant",
+    "WaNumber",
+    "WaContact",
+    "WaCampaign",
+    "WaSequenceStep",
+    "WaCampaignContact",
+    "WaMessage",
+    "WaInboundEvent",
 ]
