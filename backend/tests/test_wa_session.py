@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+import os
 import re
 import shutil
 import sys
@@ -61,10 +62,23 @@ def test_profile_dir_e_per_numero():
 
 _numero_counter = itertools.count(1)
 
+# Suffisso casuale per SESSIONE pytest, non solo per test. Il contatore da
+# solo non basta: wa_numbers.phone_hmac e' UNIQUE GLOBALE e il DB sqlite di
+# test e' un file CONDIVISO, quindi due suite lanciate insieme ripartono
+# entrambe dal contatore 1, generano lo stesso numero e la seconda si prende
+# un "UNIQUE constraint failed: wa_numbers.phone_hmac".
+#
+# Costato un'ora il 28/07: 22 test rossi che sembravano una regressione del
+# modulo ed erano due pytest sovrapposti sullo stesso file. La regola resta
+# "una suite alla volta", ma un fixture che si rompe solo quando qualcuno la
+# viola in un altro processo produce un rosso che non nomina la propria causa.
+_SESSIONE = f"{os.getpid() % 100:02d}"
+
 
 def _numero_test() -> str:
-    """Numero di test con prefisso dedicato (mai un numero reale a DB)."""
-    return f"3990000{next(_numero_counter):04d}"
+    """Numero di test con prefisso dedicato (mai un numero reale a DB), unico
+    anche fra sessioni pytest concorrenti sullo stesso file sqlite."""
+    return f"39900{_SESSIONE}{next(_numero_counter):04d}"
 
 
 async def _reload(number_id: str) -> WaNumber:
