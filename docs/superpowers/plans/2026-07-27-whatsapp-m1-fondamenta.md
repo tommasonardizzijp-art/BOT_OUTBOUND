@@ -21,6 +21,7 @@
 - **Migrazioni:** additive. Si migra **prima** di far girare codice che dichiara colonne nuove (Postgres `42703` altrimenti).
 - **Worktree isolato + branch dedicato + PR.** Mai push diretto su `master`.
 - **RAM:** 1,2 GB per profilo browser misurati in M0, su una macchina da 7,4 GB. **Un numero WhatsApp alla volta** su questo PC: i test E2E non aprono due profili insieme.
+- **Monkeypatch che si autoriferiscono — corretto il 28/07 dopo tre PC congelati.** Scrivere `monkeypatch.setattr(asyncio, "sleep", lambda *a, **k: asyncio.sleep(0))` sembra azzerare le pause, e invece dentro il corpo della lambda `asyncio.sleep` viene risolto **a ogni chiamata**, quando è già la lambda stessa: ricorsione infinita che alloca senza fermarsi. Misurato **22 MB → 1350 MB in 5 secondi**, abbastanza da saturare la macchina e congelare il desktop (la GPU integrata condivide la stessa RAM: il sintomo è lo schermo che sfarfalla, non un errore di Python). La regola vale per **qualunque** `setattr(mod, "f", lambda: mod.f(...))`: catturare il riferimento originale **prima** del patch, e usare quello. Rete di sicurezza attiva sulla macchina: `D:\dev\tools\ram-guard\guard.ps1` abbatte i python oltre 1000 MB e ne registra la riga di comando.
 
 ---
 
@@ -110,7 +111,8 @@ async def test_instagram_human_type_ancora_digita_il_testo(monkeypatch):
     """Non-regressione IG: la digitazione resta corretta al netto dei typo."""
     from app.browser.instagram_page import InstagramPage
 
-    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: asyncio.sleep(0))
+    _sleep_reale = asyncio.sleep   # catturare PRIMA del patch: vedi Global Constraints
+    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: _sleep_reale(0))
     page, element = FakePage(), FakeElement()
     ig = InstagramPage.__new__(InstagramPage)
     ig._page = page
@@ -144,7 +146,8 @@ Expected: **PASS**. Se fallisce qui, il test è sbagliato — non il codice. Cor
 async def test_human_type_batte_il_testo_e_corregge_i_typo(monkeypatch):
     from app.browser import human_input
 
-    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: asyncio.sleep(0))
+    _sleep_reale = asyncio.sleep   # catturare PRIMA del patch: vedi Global Constraints
+    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: _sleep_reale(0))
     page, element = FakePage(), FakeElement()
 
     await human_input.human_type(page, element, "ciao mondo")
@@ -160,7 +163,8 @@ async def test_human_type_usa_shift_enter_per_gli_a_capo(monkeypatch):
     """Un a-capo battuto come Enter INVIA il messaggio a meta'. Su entrambi i siti."""
     from app.browser import human_input
 
-    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: asyncio.sleep(0))
+    _sleep_reale = asyncio.sleep   # catturare PRIMA del patch: vedi Global Constraints
+    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: _sleep_reale(0))
     page, element = FakePage(), FakeElement()
 
     await human_input.human_type(page, element, "riga uno\nriga due")
