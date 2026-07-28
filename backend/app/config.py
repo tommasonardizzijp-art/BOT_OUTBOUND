@@ -273,6 +273,13 @@ class Settings(BaseSettings):
     browser_profiles_dir: str = "./data/browser_profiles"
     headless: bool = True
 
+    # Chiave HMAC per gli pseudonimi dei numeri di telefono (P12).
+    # DEDICATA, non SECRET_KEY: ruotare SECRET_KEY e' un'operazione normale,
+    # ruotare questa significa perdere l'aggancio a TUTTI i phone_hmac gia'
+    # scritti a DB. Vanno tenute separate proprio per poter ruotare l'una
+    # senza distruggere l'altra.
+    phone_hmac_key: str = ""
+
     # JWT auth (multi-user). Generate jwt_secret with `secrets.token_urlsafe(32)`.
     # Empty disables the auth router and route guards (legacy single-user mode).
     jwt_secret: str = ""
