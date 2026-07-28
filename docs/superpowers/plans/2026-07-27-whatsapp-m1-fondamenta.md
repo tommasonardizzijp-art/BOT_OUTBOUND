@@ -1041,15 +1041,32 @@ TRE COSE CHE NON ESISTONO, e che sono state cercate a lungo:
 """
 
 CHATLIST = ["#pane-side"]
-QR = ["canvas[aria-label*='scan']", "div[data-ref]"]
-SEARCH = ["div[contenteditable='true'][data-tab='3']"]
-COMPOSER = ["div[contenteditable='true'][data-tab='10']"]
+QR = ["canvas[aria-label*='scan']", "div[data-ref]"]   # IPOTESI: mai osservata
+
+# CORRETTI IL 28/07. La prima stesura di questo piano riportava qui
+#     SEARCH   = ["div[contenteditable='true'][data-tab='3']"]
+#     COMPOSER = ["div[contenteditable='true'][data-tab='10']"]
+# che erano IPOTESI gia' smentite dal PoC il 27/07 (vedi la testa di
+# poc2_open.py: "data-tab='3'/'10' non verificati"). WhatsApp Web usa ora
+# l'editor Lexical. Chi copia il blocco qui sotto invece degli script PoC si
+# ritrova un POM che non trova la casella di ricerca.
+SEARCH = ["[role='textbox']", "div[aria-label*='Cerca']", "div[aria-label*='Search']"]
+COMPOSER = ["[contenteditable='true'][data-lexical-editor='true']",
+            "div[aria-label^='Digita un messaggio']",
+            "footer [contenteditable='true']"]
 
 # Spunte: aria-label LOCALIZZATO IN ITALIANO. Rompere su un cliente non
 # italiano e' un quando, non un se (SDD A4).
 TICKS = ["[aria-label*='Consegnato']", "[aria-label*='Letto']"]
 
-MSG_CONTAINER = "#main [data-testid='msg-container']"
+# CORRETTO IL 28/07. Qui c'era
+#     MSG_CONTAINER = "#main [data-testid='msg-container']"
+# usato da solo: e' il nodo ANNIDATO dentro quello che porta data-id, quindi
+# selezionarlo da solo PERDE il segnale di direzione piu' forte (data_id,
+# copertura 100%, l'unico verificato 12/12 contro i tail). Vedi la sezione
+# "trappola" di wa-dom-catalog.md. I due alias sotto individuano lo STESSO
+# nodo, quindi l'OR non duplica la lista.
+MSG_ROW = "#main [data-id], #main [data-testid^='conv-msg-']"
 ROW = "[role='row']"
 # Le INTESTAZIONI di sezione ('Chat', 'Gruppi in comune') sono [role='row']
 # identiche alle chat: si filtrano su questo.
