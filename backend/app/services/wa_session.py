@@ -189,6 +189,16 @@ async def _wa_number_or_raise(db, number_id: str):
     return numero
 
 
+
+# Stati che un HEALTH-CHECK non deve mai poter cancellare (adversarial 34,
+# decisione presa dal team lead 28/07): retired/suspended li mette un
+# operatore o la piattaforma, non sono deducibili da una lettura del DOM.
+# Vedere 'logged_in' nel browser dice "la sessione e' viva", non "questo
+# numero e' di nuovo operativo" -- quella e' una scelta esplicita, non un
+# effetto collaterale di check_session/assisted_login che leggono un segnale.
+_STATI_PROTETTI_DA_RESURREZIONE = frozenset({WaNumberStatus.retired, WaNumberStatus.suspended})
+
+
 async def _persist_status(number_id: str, stato: WaNumberStatus) -> None:
     from datetime import datetime
 
@@ -196,7 +206,17 @@ async def _persist_status(number_id: str, stato: WaNumberStatus) -> None:
 
     async with AsyncSessionLocal() as db:
         numero = await _wa_number_or_raise(db, number_id)
-        numero.status = stato
+        if numero.status in _STATI_PROTETTI_DA_RESURREZIONE and stato != numero.status:
+            # Diagnostica comunque valida (un check_session su un numero
+            # ritirato resta legittimo per capire se la sessione e' ancora
+            # viva), ma NON e' la resurrezione: quella richiede un'azione
+            # esplicita di un operatore, non un side-effect di una lettura.
+            logger.warning(
+                f"wa_session({number_id}): segnale={stato.value} letto ma stato "
+                f"resta {numero.status.value} (protetto da resurrezione automatica)"
+            )
+        else:
+            numero.status = stato
         numero.session_checked_at = datetime.utcnow()
         numero.browser_profile = str(profile_dir_for(number_id))
         await db.commit()

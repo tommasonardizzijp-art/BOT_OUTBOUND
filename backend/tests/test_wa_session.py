@@ -510,19 +510,12 @@ def test_adv33_segnali_sconosciuti_non_diventano_active(segnale):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DIFETTO NOTO (non corretto in questo batch): _persist_status "
-        "sovrascrive numero.status senza guardare lo stato di partenza, "
-        "quindi un numero 'retired' torna 'active' dopo un semplice "
-        "health-check. La correzione tocca codice condiviso con "
-        "assisted_login (dove un operatore PUO' voler far ripartire un "
-        "numero retired di proposito) -- decisione di design, non presa "
-        "qui. Vedi report QA batch 1."
-    ),
-)
 async def test_adv34_check_session_su_numero_retired_non_torna_active(wa_number_factory, monkeypatch):
+    """Decisione del team lead 28/07: retired e' messo da un operatore/dalla
+    piattaforma, non e' deducibile dal DOM. Un health-check che vede
+    'logged_in' dice 'la sessione browser e' viva', non 'questo numero e' di
+    nuovo operativo' -- lo status NON deve muoversi, ma la diagnostica
+    (session_checked_at, browser_profile) resta valida e aggiornata."""
     number_id = await wa_number_factory(status=WaNumberStatus.retired)
     probe = _LaunchProbe(launch_delay=0.0)
     _patch_launcher(monkeypatch, probe)
@@ -532,6 +525,48 @@ async def test_adv34_check_session_su_numero_retired_non_torna_active(wa_number_
 
     numero = await _reload(number_id)
     assert numero.status == WaNumberStatus.retired
+    # La resurrezione e' bloccata, ma il check ha comunque fatto il suo
+    # lavoro di diagnostica: non deve sembrare che check_session sia stato
+    # no-op o abbia fallito silenziosamente.
+    assert numero.session_checked_at is not None
+    assert numero.browser_profile == str(profile_dir_for(number_id))
+
+
+@pytest.mark.asyncio
+async def test_adv34b_assisted_login_su_numero_suspended_non_torna_active(wa_number_factory, monkeypatch):
+    """Gemello del 34 per assisted_login e per lo stato 'suspended': stessa
+    regola, stesso motivo -- un login assistito vede 'logged_in' (la
+    sessione browser e' viva) ma questo non e' un'azione esplicita
+    dell'operatore per far ripartire il numero."""
+    number_id = await wa_number_factory(status=WaNumberStatus.suspended)
+    probe = _LaunchProbe(launch_delay=0.0)
+    _patch_launcher(monkeypatch, probe)
+    _patch_wa_page(monkeypatch, segnali=["logged_in"])
+
+    await assisted_login(number_id, timeout_s=0)
+
+    numero = await _reload(number_id)
+    assert numero.status == WaNumberStatus.suspended
+    assert numero.session_checked_at is not None
+    assert numero.browser_profile == str(profile_dir_for(number_id))
+
+
+@pytest.mark.asyncio
+async def test_adv34c_transizioni_normali_non_bloccate_dalla_guardia(wa_number_factory, monkeypatch):
+    """La guardia contro la resurrezione automatica riguarda SOLO
+    retired/suspended: un numero in qr_required che vede 'logged_in' deve
+    ancora diventare active normalmente -- altrimenti la guardia sarebbe
+    troppo larga e romperebbe il flusso normale del canale."""
+    number_id = await wa_number_factory(status=WaNumberStatus.qr_required)
+    probe = _LaunchProbe(launch_delay=0.0)
+    _patch_launcher(monkeypatch, probe)
+    _patch_wa_page(monkeypatch, segnali=["logged_in"])
+
+    stato = await check_session(number_id)
+
+    assert stato == WaNumberStatus.active
+    numero = await _reload(number_id)
+    assert numero.status == WaNumberStatus.active
 
 
 @pytest.mark.asyncio
