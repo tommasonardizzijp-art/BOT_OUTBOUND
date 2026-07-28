@@ -9,16 +9,23 @@ Leggi questo file prima di qualsiasi altro.
 
 ```
 1. INDEX.md          ← sei qui — panoramica e stato globale
-2. CLAUDE.md         ← architettura completa, stack, schema DB, principi anti-detection
-3. docs/project/PROGRESS.md       ← storia cronologica: cosa è stato fatto, quando, e perché
-4. docs/audits/AUDIT.md           ← ultimo audit codice (sempre aggiornato — storico in PROGRESS.md)
-5. docs/architecture/FUTURE_IMPROVEMENTS.md ← miglioramenti proposti, pronti per sviluppo
-6. docs/architecture/AI_MESSAGES.md         ← tutti i parametri per migliorare la qualità dei messaggi AI
-7. docs/architecture/ANTI_DETECTION.md      ← guida permanente: vettori detection IG, proxy, ban, sicurezza operativa
-8. docs/guides/GUIDA.md           ← guida operativa per l'utente finale (non rilevante per sviluppo)
+2. CLAUDE.md         ← panoramica breve + regole always-on + rimandi (NON contiene più l'architettura estesa)
+3. docs/architecture/OVERVIEW.md  ← descrizione, stack, struttura directory, convenzioni codice
+4. docs/architecture/DATABASE.md  ← schema DB: tabelle, colonne, enum di stato, migrazioni
+5. docs/project/PROGRESS.md       ← storia cronologica: cosa è stato fatto, quando, e perché + stato fasi
+6. docs/audits/AUDIT.md           ← ultimo audit codice (sempre aggiornato — storico in PROGRESS.md)
+7. docs/architecture/FUTURE_IMPROVEMENTS.md ← miglioramenti proposti, pronti per sviluppo
+8. docs/architecture/AI_ARCHITECTURE.md     ← template mode vs AI, provider, flusso generazione
+9. docs/architecture/AI_MESSAGES.md         ← tutti i parametri per migliorare la qualità dei messaggi AI
+10. docs/architecture/PRINCIPI_ANTI_DETECTION.md ← regole di comportamento del bot + valori di timing
+11. docs/architecture/ANTI_DETECTION.md     ← guida permanente: vettori detection IG, proxy, ban, sicurezza operativa
+12. docs/architecture/SCALA_E_PARALLELISMO.md ← multi-account, two-phase scraping, import, control-plane
+13. docs/architecture/BROWSER.md  ← layer Patchright e flusso send_dm
+14. docs/setup/CONFIGURAZIONE.md  ← variabili .env, migrazioni, avvio locale
+15. docs/guides/GUIDA.md          ← guida operativa per l'utente finale (non rilevante per sviluppo)
 ```
 
-**Regola**: se devi fare una modifica al codice, leggi sempre CLAUDE.md (architettura) + la sezione più recente di `docs/project/PROGRESS.md` prima di toccare qualsiasi file.
+**Regola**: se devi fare una modifica al codice, leggi sempre CLAUDE.md (regole) + il file `docs/architecture/` del sottosistema che tocchi + la sezione più recente di `docs/project/PROGRESS.md` prima di toccare qualsiasi file.
 Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispetto al codice verificato, preserva i guardrail esistenti e aggiorna i documenti rilevanti nello stesso task.
 
 ---
@@ -128,9 +135,16 @@ Rileggi anche il codice del flusso coinvolto: se il contesto e' indietro rispett
 
 | File | Scopo | Aggiornato |
 |---|---|---|
-| `INDEX.md` | Navigazione, stato globale, ordine lettura | 2026-06-08 |
-| `CLAUDE.md` | Architettura completa, stack, schema DB, anti-detection | 2026-06-08 |
-| `docs/project/PROGRESS.md` | Log cronologico implementazioni + riferimento audit | 2026-06-08 |
+| `INDEX.md` | Navigazione, stato globale, ordine lettura | 2026-07-29 |
+| `CLAUDE.md` | Panoramica, regole always-on, tabella dei rimandi | 2026-07-29 |
+| `docs/architecture/OVERVIEW.md` | Descrizione, stack, struttura directory, dipendenze, convenzioni | 2026-07-29 |
+| `docs/architecture/DATABASE.md` | Schema DB completo (tabelle, colonne, enum, migrazioni) | 2026-07-29 |
+| `docs/architecture/AI_ARCHITECTURE.md` | Template mode vs AI, provider, flusso generazione messaggi | 2026-07-29 |
+| `docs/architecture/BROWSER.md` | Layer Patchright, flusso `send_dm` | 2026-07-29 |
+| `docs/architecture/SCALA_E_PARALLELISMO.md` | Multi-account, two-phase scraping, import, control-plane, IP | 2026-07-29 |
+| `docs/architecture/PRINCIPI_ANTI_DETECTION.md` | 12 principi di comportamento + valori di timing | 2026-07-29 |
+| `docs/setup/CONFIGURAZIONE.md` | Variabili `.env`, migrazioni, avvio locale dei 5 processi | 2026-07-29 |
+| `docs/project/PROGRESS.md` | Log cronologico implementazioni + stato fasi + riferimento audit | 2026-07-29 |
 | `docs/audits/AUDIT.md` | Ultimo audit codice — **sempre sovrascritto** | 2026-04-16 |
 | `docs/audits/AUDIT_UNIFICATO.md` | Audit unificato Fase 0/1/2 | 2026-05-18 |
 | `docs/architecture/FUTURE_IMPROVEMENTS.md` | Miglioramenti proposti (da audit v2) | 2026-04-16 |

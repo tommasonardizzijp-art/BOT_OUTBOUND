@@ -4,6 +4,27 @@ Registro cronologico di tutto ciò che viene implementato.
 
 ---
 
+## Fasi di sviluppo (stato di sintesi)
+
+Spostata da `CLAUDE.md` il 2026-07-29. Il dettaglio cronologico di ogni fase è nelle sezioni datate sotto.
+
+| Fase | Descrizione | Stato |
+|---|---|---|
+| 1 | Foundation: backend, DB, models, schemas, API accounts | ✅ Completata |
+| 2 | Scraping follower/following con instagrapi (modalità selezionabile per campagna) | ✅ Completata |
+| 3 | AI personalizzazione messaggi (multi-provider: Ollama/Groq/Gemini) | ✅ Completata |
+| 4 | Engine invio DM (Patchright + anti-detection) | ✅ Completata |
+| 5 | Frontend Next.js dashboard | ✅ Completata |
+| 6 | Hardening, logging, test | Parziale (logging OK, test da fare) |
+| 7A | Multi-account per campagna | ✅ Completata |
+| 7C | Lead database + export CSV | ✅ Completata |
+| 7D | Scraping + DM parallelo, ruoli account, session break configurabile | ✅ Completata |
+| 7E | Import profili da lista (source_type=import, imported_profiles, resolve worker) | ✅ Completata |
+| 7F | Scraping avanzato: contatti (telefono/email/whatsapp/link) + messaggistica opzionale + cap scraping | ✅ Completata |
+| 7B | Multi-campagna parallela | Da fare |
+
+---
+
 ## [2026-04-14] Fase 1 — Foundation + Core API ✅ COMPLETATA
 
 ### Inizializzazione progetto
