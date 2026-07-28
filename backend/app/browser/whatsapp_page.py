@@ -89,6 +89,20 @@ def _parse_unread(raw: str) -> int:
     return int(digits) if digits else (1 if raw else 0)
 
 
+# Le quattro chiavi che _JS_MESSAGE_SIGNALS promette per ogni riga. Usate per
+# ESTENDERE la sentinella di cecita' oltre al caso rows is None: se domani
+# qualcuno tocca il JS senza toccare read_inbound_tail (o viceversa) e una
+# riga esce incompleta, un default silenzioso (.get(..., "")) produrrebbe un
+# inbound svuotato di testo -- non None, ma comunque invisibile a un
+# controllo di STOP. Stesso effetto pratico della cecita', quindi stessa
+# risposta: None, non un valore fabbricato.
+_MESSAGE_SIGNAL_KEYS = frozenset({"aria_tu", "tail_icon", "data_id", "text"})
+
+
+def _righe_ben_formate(rows: list) -> bool:
+    return all(isinstance(row, dict) and _MESSAGE_SIGNAL_KEYS.issubset(row) for row in rows)
+
+
 # Estrae i segnali GREZZI di direzione per ogni messaggio del pannello
 # conversazione, in ordine DOM. La classificazione resta in Python
 # (classify_direction): un'unica implementazione testabile senza browser,
@@ -191,9 +205,14 @@ class WhatsAppWebPage:
         return None
 
     async def session_state(self) -> Literal["logged_in", "qr_required", "unknown"]:
-        if await self._first_locator(sel.CHATLIST, timeout_ms=8000):
+        """Timeout tarati sull'incidente del 27/07 (poc1_login.py, vedi
+        SESSION_STATE_TIMEOUT_* in whatsapp_selectors.py): un profilo freddo
+        puo' costruire l'app WhatsApp Web in oltre un minuto. Un timeout
+        corto qui produce un falso 'qr_required' su una sessione sana -- e un
+        chiamante che ci crede rifa' il QR, azzerando PoC-1."""
+        if await self._first_locator(sel.CHATLIST, timeout_ms=sel.SESSION_STATE_TIMEOUT_CHATLIST_MS):
             return "logged_in"
-        if await self._first_locator(sel.QR, timeout_ms=4000):
+        if await self._first_locator(sel.QR, timeout_ms=sel.SESSION_STATE_TIMEOUT_QR_MS):
             return "qr_required"
         return "unknown"
 
@@ -363,25 +382,31 @@ class WhatsAppWebPage:
         anche in caso di cecita', il chiamante concluderebbe 'nessuno STOP'
         e invierebbe SEMPRE, sembrando funzionare.
 
+        La sentinella copre anche il caso "il JS ha risposto ma con righe
+        malformate" (chiave mancante, riga non-dict): un default silenzioso
+        in quel punto produrrebbe un inbound svuotato di testo, invisibile a
+        un controllo di STOP quanto una lista vuota fabbricata -- stesso
+        rischio di `rows is None`, stessa risposta.
+
         NON carica da sola la cronologia (SDD 6.4 punto 2): quella e'
         load_history, il chiamante decide quando invocarle in sequenza.
         Separate cosi' M3 puo' rileggere la coda a costo basso (cronologia
         gia' caricata) subito prima di premere invio.
         """
         rows = await self._page.evaluate(_JS_MESSAGE_SIGNALS, {"msgRow": sel.MSG_ROW})
-        if rows is None:
+        if rows is None or not _righe_ben_formate(rows):
             return None
 
         tail: list[str] = []
         for row in reversed(rows):
             direzione = classify_direction(
-                aria_tu=row.get("aria_tu", False),
-                tail_icon=row.get("tail_icon"),
-                data_id=row.get("data_id"),
+                aria_tu=row["aria_tu"],
+                tail_icon=row["tail_icon"],
+                data_id=row["data_id"],
             )
             if direzione == "out":
                 continue
-            tail.append(row.get("text", ""))
+            tail.append(row["text"])
             if len(tail) >= n:
                 break
         tail.reverse()

@@ -101,3 +101,16 @@ DATA_ID_OUT_PREFIX, DATA_ID_OUT_LEN = "A5", 32
 # Si cattura alla prima riconnessione: farlo apposta richiede un re-scan del
 # QR, che azzera PoC-1. Finche' e' vuoto, sync_state() torna 'unknown'.
 SYNC_INDICATOR: list[str] = []
+
+# Timeout per session_state(). STESSO INCIDENTE di poc1_login.py (27/07, vedi
+# il suo docstring): un profilo freddo puo' impiegare piu' di un minuto a
+# costruire l'app WhatsApp Web (download + costruzione + sync iniziale di
+# centinaia di chat). Con un timeout corto su CHATLIST, poc1_login.py e'
+# morto dichiarando "schermata ignota" mentre la sessione era perfettamente
+# loggata -- aveva guardato troppo presto. Qui il rischio e' peggiore: un
+# timeout corto produce un falso 'qr_required' su una sessione sana, e un
+# chiamante che ci crede puo' rifare il QR -- esattamente il re-scan che
+# azzera una misura di 14 giorni (PoC-1). Valori IDENTICI a poc1_login.py di
+# proposito: stesso incidente, stessa soglia gia' misurata.
+SESSION_STATE_TIMEOUT_CHATLIST_MS = 90000
+SESSION_STATE_TIMEOUT_QR_MS = 30000
