@@ -630,14 +630,20 @@ async def test_adv38_proxy_malformato_valueerror_prima_del_browser(monkeypatch, 
 
 
 def test_adv38c_url_di_esempio_del_team_lead_e_valido_non_malformato():
-    """Nota di trasparenza: l'URL suggerito per 38b nella richiesta del team
-    lead ('http://utente:segretissima@proxy.example:8080/rotto') ha
+    """Nota di trasparenza, non un'evasione: l'URL suggerito per 38b
+    ('http://utente:segretissima@proxy.example:8080/rotto') ha
     hostname='proxy.example' e port=8080 -- entrambi presenti, quindi
     parse_proxy_url lo accetta come proxy VALIDO (la sua validazione guarda
     solo se host/porta mancano, non la sintassi del resto). _open_wa_browser
     non solleva affatto su questo input: non e' malformato per il codice
-    attuale, nonostante il suffisso '/rotto'. Test 38b usa percio' un proxy
-    davvero malformato (host assente) che porta comunque credenziali."""
+    attuale, nonostante il suffisso '/rotto'. E' una proprieta' strutturale
+    di parse_proxy_url: un input con ENTRAMBI host e porta presenti non e'
+    MAI malformato per come e' scritta oggi -- un caso 'malformato con host
+    e porta insieme' e' irraggiungibile senza cambiare quella validazione
+    (in app/browser/context_manager.py, condivisa col canale Instagram:
+    fuori perimetro di questo batch). test_adv38b copre percio' host e
+    porta SEPARATAMENTE, coi due modi in cui parse_proxy_url dichiara
+    malformato un proxy (uno dei due assente)."""
     from app.browser.context_manager import parse_proxy_url
 
     url = "http://utente:segretissima@proxy.example:8080/rotto"
@@ -648,22 +654,48 @@ def test_adv38c_url_di_esempio_del_team_lead_e_valido_non_malformato():
 async def test_adv38b_proxy_malformato_con_credenziali_non_le_espone_nel_messaggio(monkeypatch, numero_id_usa_e_getta):
     """Un proxy malformato che porta anche credenziali non deve scriverle in
     chiaro nel ValueError: e' proprio il caso malformato quello in cui
-    qualcuno guardera' il log. Uso un host assente (genuinamente malformato,
-    a differenza dell'esempio del team lead -- vedi test_adv38c) invece che
-    'proxy.example:8080/rotto', che parse_proxy_url accetta come valido."""
+    qualcuno guardera' il log. _mask_proxy_url tiene schema/host/porta
+    (utili per capire QUALE proxy e' rotto) e oscura user:pass con '***@'.
+
+    Tre varianti, coprendo i due modi in cui parse_proxy_url dichiara un
+    proxy malformato (vedi test_adv38c per il perche' non esiste un caso
+    con host E porta insieme):
+    - porta assente, host presente -> il messaggio mostra l'host, non le
+      credenziali;
+    - host assente, porta presente -> il messaggio mostra la porta, non le
+      credenziali;
+    - nessuna credenziale -> il mascheramento non deve inventarsi un '***@'
+      dove non c'e' nulla da nascondere (il messaggio resta pulito anche
+      nel caso normale, non solo in quello con segreti)."""
     probe = _LaunchProbe(launch_delay=0.0)
     _patch_launcher(monkeypatch, probe)
-    proxy_malformato_con_credenziali = "http://utente:segretissima@"
 
+    casi = [
+        # (proxy_url, atteso_nel_messaggio, vietato_nel_messaggio)
+        ("http://utente:segretissima@proxy.example", "proxy.example", "segretissima"),
+        ("http://utente:segretissima@:8080", "8080", "segretissima"),
+    ]
+    for proxy_malformato, atteso, vietato in casi:
+        with pytest.raises(ValueError) as exc_info:
+            async with _open_wa_browser(numero_id_usa_e_getta, headless=True,
+                                         proxy_url=proxy_malformato):
+                pass
+        messaggio = str(exc_info.value)
+        assert vietato not in messaggio
+        assert "utente" not in messaggio
+        assert atteso in messaggio
+        assert numero_id_usa_e_getta in messaggio  # il problema resta nominato
+
+    # Variante senza credenziali: il mascheramento non deve rovinare il
+    # messaggio nel caso normale (nessun '***@' fabbricato dal nulla).
     with pytest.raises(ValueError) as exc_info:
         async with _open_wa_browser(numero_id_usa_e_getta, headless=True,
-                                     proxy_url=proxy_malformato_con_credenziali):
+                                     proxy_url="http://proxy.example"):
             pass
+    messaggio_senza_credenziali = str(exc_info.value)
+    assert "proxy.example" in messaggio_senza_credenziali
+    assert "***" not in messaggio_senza_credenziali
 
-    messaggio = str(exc_info.value)
-    assert "segretissima" not in messaggio
-    assert "utente" not in messaggio
-    assert numero_id_usa_e_getta in messaggio  # il problema resta nominato
     assert probe.launch_count == 0
 
 
