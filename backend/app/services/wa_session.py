@@ -71,8 +71,20 @@ def profile_dir_for(number_id: str) -> Path:
     """Path del profilo Chromium persistente per il numero (convenzione
     data/browser_profiles/wa_<id>). Prefisso wa_ per stare nella stessa
     cartella dei profili Instagram (browser_profiles_dir) senza collidere
-    con un account_id che avesse lo stesso UUID."""
+    con un account_id che avesse lo stesso UUID.
+
+    number_id e' sempre un UUID generato da noi (WaNumber.id) -- non arriva
+    mai da input utente -- ma la funzione e' comunque a guardia: '/' e '\\'
+    dentro f"wa_{number_id}" sono interpretati da pathlib come separatori di
+    path, quindi un number_id tipo '../../etc' produce un path FUORI dalla
+    cartella prevista (misurato in review 28/07). Rifiutare qui e' piu'
+    robusto che affidarsi a resolve()+contenimento: chiude anche i casi che
+    restano dentro browser_profiles_dir ma fuori dallo schema wa_<id>.
+    """
     from app.config import settings
+
+    if "/" in number_id or "\\" in number_id or ".." in number_id:
+        raise ValueError(f"number_id non valido per un path di profilo: {number_id!r}")
 
     return Path(settings.browser_profiles_dir) / f"wa_{number_id}"
 
