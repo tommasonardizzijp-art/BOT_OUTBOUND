@@ -54,3 +54,45 @@ async def test_instagram_human_type_ancora_digita_il_testo(monkeypatch):
     battuti = "".join(page.keyboard.typed)
     backspace = page.keyboard.pressed.count("Backspace")
     assert len(battuti) - backspace == len("ciao come stai")
+
+
+@pytest.mark.asyncio
+async def test_human_type_batte_il_testo_e_corregge_i_typo(monkeypatch):
+    from app.browser import human_input
+
+    _sleep_reale = asyncio.sleep   # catturare PRIMA del patch, o e' ricorsione infinita
+    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: _sleep_reale(0))
+    page, element = FakePage(), FakeElement()
+
+    await human_input.human_type(page, element, "ciao mondo")
+
+    battuti = "".join(page.keyboard.typed)
+    backspace = page.keyboard.pressed.count("Backspace")
+    assert len(battuti) - backspace == len("ciao mondo")
+    assert element.clicked is True
+
+
+@pytest.mark.asyncio
+async def test_human_type_usa_shift_enter_per_gli_a_capo(monkeypatch):
+    """Un a-capo battuto come Enter INVIA il messaggio a meta'. Su entrambi i siti."""
+    from app.browser import human_input
+
+    _sleep_reale = asyncio.sleep   # catturare PRIMA del patch, o e' ricorsione infinita
+    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: _sleep_reale(0))
+    page, element = FakePage(), FakeElement()
+
+    await human_input.human_type(page, element, "riga uno\nriga due")
+
+    assert page.keyboard.pressed.count("Shift+Enter") == 1
+    assert "Enter" not in page.keyboard.pressed
+
+
+def test_typo_char_resta_sulla_tastiera_e_conserva_il_maiuscolo():
+    from app.browser.human_input import QWERTY_ADJACENT, typo_char
+
+    assert typo_char("1") is None          # cifra: nessun vicino, nessun typo
+    for _ in range(50):
+        wrong = typo_char("S")
+        assert wrong is not None
+        assert wrong.isupper()
+        assert wrong.lower() in QWERTY_ADJACENT["s"]
