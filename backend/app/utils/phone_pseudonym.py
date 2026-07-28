@@ -17,8 +17,21 @@ from app.config import settings
 # Marcatori di direzione del testo che WhatsApp infila negli attributi `title`.
 # Invisibili a schermo, ma un numero che li contiene non normalizza (misurato
 # in M0, 27/07).
-_BIDI = re.compile(r"[‪-‮⁦-⁩]")
-_NON_CIFRE = re.compile(r"[^\d+]")
+_BIDI = re.compile(r"[\u202a-\u202e\u2066-\u2069]")
+
+# Separatori tipografici ammessi in un numero scritto da un umano: spazio,
+# trattino, punto, slash, parentesi. Lista CHIUSA: qualunque altro carattere
+# NON va ripulito, deve far fallire il match sotto. Bug trovato in review
+# (2026-07-28): con un `[^\d+]` che ripuliva le lettere ma non rifiutava
+# l'input, le cifre di un'annotazione tipo "ext. 12" sopravvivevano e si
+# saldavano al numero -> numero diverso da quello scritto, accettato in
+# silenzio.
+_SEPARATORI = re.compile(r"[ \-./()]")
+
+# Cifre ASCII esplicite. `\d` e `str.isdigit()` accettano anche le cifre di
+# altri alfabeti (es. arabo-indiche U+0660-U+0669): non sono componibili in
+# E.164 e finirebbero a DB come hmac di un numero che non esiste.
+_E164_ASCII = re.compile(r"^\+?[0-9]+$")
 
 
 class PhoneNormalizationError(ValueError):
@@ -31,19 +44,29 @@ class PhoneNormalizationError(ValueError):
 
 
 def normalize_e164(raw: str, default_country: str = "39") -> str:
-    """Da qualunque forma scritta da un umano a `393421460077` (senza '+')."""
+    """Da qualunque forma scritta da un umano a `393421460077` (senza '+').
+
+    Valida, non ripulisce: dopo aver tolto i marcatori bidi e i soli
+    separatori tipografici della lista chiusa (_SEPARATORI), quello che
+    resta deve corrispondere per intero a `^\\+?[0-9]+$`. Qualunque altro
+    carattere (lettere, cifre non ASCII, punteggiatura non prevista) fa
+    rifiutare l'intero input invece di essere silenziosamente scartato.
+    """
     if not raw or not isinstance(raw, str):
         raise PhoneNormalizationError(f"numero vuoto o non testuale: {raw!r}")
 
-    s = _NON_CIFRE.sub("", _BIDI.sub("", raw).strip())
+    s = _SEPARATORI.sub("", _BIDI.sub("", raw).strip())
+
+    if not _E164_ASCII.match(s):
+        raise PhoneNormalizationError(
+            f"attese solo cifre ASCII e separatori tipografici (spazio - . / ( )): {raw!r}"
+        )
+
     if s.startswith("+"):
         s = s[1:]
     elif s.startswith("00"):
         s = s[2:]
-    s = s.replace("+", "")
 
-    if not s.isdigit():
-        raise PhoneNormalizationError(f"caratteri non numerici: {raw!r}")
     # Numero nazionale italiano: il prefisso lo mettiamo noi.
     if len(s) == 10 and s.startswith("3"):
         s = default_country + s
@@ -65,7 +88,7 @@ def hmac_phone(e164: str) -> str:
 
 
 def mask_phone(e164: str) -> str:
-    """`+39•••••077` — forma da log e da display admin.
+    """Prefisso e ultime 3 cifre, il resto oscurato (es. +39, poi 5 pallini, poi 077).
 
     Non solleva mai: finisce dentro i messaggi d'errore, e un'eccezione qui
     nasconderebbe l'errore vero che si stava per loggare.
@@ -74,4 +97,4 @@ def mask_phone(e164: str) -> str:
         return ""
     s = str(e164).lstrip("+")
     prefisso, resto = s[:2], s[2:]
-    return f"+{prefisso}" + "•" * 5 + resto[-3:]
+    return f"+{prefisso}" + "\u2022" * 5 + resto[-3:]
