@@ -114,3 +114,12 @@ SYNC_INDICATOR: list[str] = []
 # proposito: stesso incidente, stessa soglia gia' misurata.
 SESSION_STATE_TIMEOUT_CHATLIST_MS = 90000
 SESSION_STATE_TIMEOUT_QR_MS = 30000
+
+# Timeout per read_last_tick(): attesa della SPUNTA dopo un invio, natura
+# diversa dai due sopra (quelli aspettano che l'APP si costruisca al primo
+# aggancio; questo aspetta che il SERVER consegni un messaggio gia' inviato,
+# un evento tipicamente sotto i 2-3s). Valore ereditato cosi' com'era in
+# whatsapp_page.py (nessun incidente noto legato a questo timeout) --
+# portato qui come costante solo per non lasciare un numero nudo nel POM,
+# non perche' sia stato ri-misurato in M0.
+READ_LAST_TICK_TIMEOUT_MS = 8000

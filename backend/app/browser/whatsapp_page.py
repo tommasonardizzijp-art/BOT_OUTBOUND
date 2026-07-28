@@ -13,6 +13,7 @@ contro WhatsApp vero: gli invii sono M3, dopo cap e guardie.
 """
 import asyncio
 import random
+import re
 import time
 from dataclasses import dataclass
 from typing import Literal
@@ -38,6 +39,14 @@ class HistoryInfo:
     after: int
     rounds: int
     exhausted: bool
+
+
+# Stessi marcatori del `pulisci()` dentro _JS_SCAN_CHAT_LIST piu' sotto. Qui
+# servono come SECONDA rete, non come sostituto: se il JS li lascia scappare
+# (bug futuro, range Unicode diverso da quello catalogato) title_is_number
+# non deve comunque leggere un numero come se fosse un nome -- e' il segnale
+# che impedisce a M2/M3 di salvare un numero in chiaro in chat_title (P12).
+_BIDI_MARKERS = re.compile("[" + chr(0x202a) + "-" + chr(0x202e) + chr(0x2066) + "-" + chr(0x2069) + "]")
 
 
 @dataclass
@@ -82,9 +91,14 @@ def _elapsed_ms(t0: float) -> float:
     return (time.perf_counter() - t0) * 1000
 
 
-def _parse_unread(raw: str) -> int:
+def _parse_unread(raw: str | None) -> int:
     """Da testo libero ('3', '3 messaggi non letti', '') a intero. Un badge
-    senza cifre ma con del testo (icona sola) vale comunque 1 non letto."""
+    senza cifre ma con del testo (icona sola) vale comunque 1 non letto.
+    None (DOM ostile: il JS reale _JS_SCAN_CHAT_LIST torna sempre una
+    stringa, vedi il suo ramo `u ? ... : ''`, ma un chiamante ostile o un
+    futuro bug potrebbe non farlo) si tratta come stringa vuota: nessuna
+    eccezione, mai un TypeError su `for ch in None`."""
+    raw = raw or ""
     digits = "".join(ch for ch in raw if ch.isdigit())
     return int(digits) if digits else (1 if raw else 0)
 
@@ -99,8 +113,27 @@ def _parse_unread(raw: str) -> int:
 _MESSAGE_SIGNAL_KEYS = frozenset({"aria_tu", "tail_icon", "data_id", "text"})
 
 
+def _riga_valida(row) -> bool:
+    """Una riga e' valida solo se ha le 4 chiavi attese CON I TIPI PROMESSI
+    dal JS: aria_tu e' sempre un bool (`!!...`), tail_icon/data_id sono
+    stringa o None, text e' SEMPRE una stringa (slice di innerText, mai
+    null). Un `text=None` che arrivasse qui sarebbe malformato quanto una
+    chiave mancante: se finisse in coda cosi' com'e', un chiamante che fa
+    'STOP' in t.upper() esploderebbe. Stessa famiglia di rischio, stessa
+    risposta -- cecita' dell'INTERA lettura (vedi _righe_ben_formate), non
+    uno scarto silenzioso della singola riga."""
+    return (
+        isinstance(row, dict)
+        and _MESSAGE_SIGNAL_KEYS.issubset(row)
+        and isinstance(row["aria_tu"], bool)
+        and isinstance(row["tail_icon"], (str, type(None)))
+        and isinstance(row["data_id"], (str, type(None)))
+        and isinstance(row["text"], str)
+    )
+
+
 def _righe_ben_formate(rows: list) -> bool:
-    return all(isinstance(row, dict) and _MESSAGE_SIGNAL_KEYS.issubset(row) for row in rows)
+    return all(_riga_valida(row) for row in rows)
 
 
 # Estrae i segnali GREZZI di direzione per ogni messaggio del pannello
@@ -394,7 +427,13 @@ class WhatsAppWebPage:
         gia' caricata) subito prima di premere invio.
         """
         rows = await self._page.evaluate(_JS_MESSAGE_SIGNALS, {"msgRow": sel.MSG_ROW})
-        if rows is None or not _righe_ben_formate(rows):
+        # `not rows` copre sia None (cecita' dichiarata dal JS) sia [] (che il
+        # JS di _JS_MESSAGE_SIGNALS non produce MAI legittimamente: promette
+        # null per zero righe agganciate, vedi il suo commento sopra). Una
+        # lista vuota qui e' quindi una violazione di contratto -- stessa
+        # cecita', non un silenzio: il silenzio vero (bolle presenti, tutte
+        # OUT) si produce DOPO il filtro di classify_direction, non prima.
+        if not rows or not _righe_ben_formate(rows):
             return None
 
         tail: list[str] = []
@@ -445,7 +484,7 @@ class WhatsAppWebPage:
     async def read_last_tick(self) -> str:
         """Spunta dell'ultimo messaggio (aria-label, non data-icon: Q39).
         ATTENZIONE: testo LOCALIZZATO IN ITALIANO (SDD A4)."""
-        found = await self._first_locator(sel.TICKS, timeout_ms=8000)
+        found = await self._first_locator(sel.TICKS, timeout_ms=sel.READ_LAST_TICK_TIMEOUT_MS)
         return found[1] if found else "nessuna-spunta-letta"
 
     async def scan_chat_list(self) -> list[ChatRow]:
@@ -464,15 +503,28 @@ class WhatsAppWebPage:
 
         rows: list[ChatRow] = []
         for r in result:
-            title = r["title"]
-            rows.append(ChatRow(
-                position=r["position"],
-                title=title,
-                title_is_number=title.replace(" ", "").replace("+", "").isdigit(),
-                unread_count=_parse_unread(r["unread_raw"]),
-                preview=r["preview"],
-                last_is_outbound=r["last_is_outbound"],
-                outgoing_state=r["outgoing_state"],
-                muted=r["muted"],
-            ))
+            try:
+                title = r["title"]
+                rows.append(ChatRow(
+                    position=r["position"],
+                    title=title,
+                    title_is_number=_BIDI_MARKERS.sub("", title)
+                                                  .replace(" ", "").replace("+", "").isdigit(),
+                    unread_count=_parse_unread(r["unread_raw"]),
+                    preview=r["preview"],
+                    last_is_outbound=r["last_is_outbound"],
+                    outgoing_state=r["outgoing_state"],
+                    muted=r["muted"],
+                ))
+            except KeyError as exc:
+                # Un KeyError grezzo qui dentro il ciclo non dice a chi debugga
+                # DOVE guardare: nomina i selettori del catalogo (TITLE/
+                # UNREAD_BADGE/PREVIEW/MUTED in whatsapp_selectors.py) invece
+                # di un'eccezione muta.
+                raise RuntimeError(
+                    f"scan_chat_list: riga senza la chiave {exc} -- probabile "
+                    "disallineamento tra _JS_SCAN_CHAT_LIST e i selettori "
+                    "TITLE/UNREAD_BADGE/PREVIEW/MUTED del catalogo in "
+                    "whatsapp_selectors.py (ricontrollarli)."
+                ) from exc
         return rows
