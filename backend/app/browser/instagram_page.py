@@ -7,9 +7,9 @@ Uses human-like timing and interaction patterns.
 Each method corresponds to a distinct Instagram action.
 """
 import asyncio
-import math
 import random
 from loguru import logger
+from app.browser import human_input
 from app.utils.timing import (
     pre_dm_browse_seconds,
     extended_pre_dm_browse_seconds,
@@ -20,26 +20,6 @@ from app.utils.exceptions import (
     DMSendError, DMRestrictedError, AccountBannedError, AccountChallengeError,
     DMAbortedBeforeSendError, AccountSessionExpiredError,
 )
-
-
-# Adjacent QWERTY keys — used to generate realistic single-character typos
-_QWERTY_ADJACENT: dict[str, str] = {
-    'q': 'wa',   'w': 'qes',  'e': 'wrd',  'r': 'etf',  't': 'ryg',
-    'y': 'tuh',  'u': 'yij',  'i': 'uok',  'o': 'ipl',  'p': 'ol',
-    'a': 'qsz',  's': 'awdz', 'd': 'sefc', 'f': 'drgv', 'g': 'fthb',
-    'h': 'gyun', 'j': 'huim', 'k': 'jiol', 'l': 'kop',
-    'z': 'asx',  'x': 'zdc',  'c': 'xfv',  'v': 'cgb',  'b': 'vhn',
-    'n': 'bhm',  'm': 'nj',
-}
-
-
-def _typo_char(char: str) -> str | None:
-    """Return a plausible adjacent QWERTY key for char (preserves case), or None."""
-    adjacent = _QWERTY_ADJACENT.get(char.lower())
-    if not adjacent:
-        return None
-    wrong = random.choice(adjacent)
-    return wrong.upper() if char.isupper() else wrong
 
 
 class InstagramPage:
@@ -631,64 +611,11 @@ class InstagramPage:
             logger.debug(f"@{username}: post-DM dwell skipped ({e})")
 
     async def _human_type(self, element, text: str) -> None:
-        """Type text with human-like variable speed and word-level pauses.
-
-        Clicks the element to focus it, then uses page.keyboard for all subsequent
-        key events. This avoids re-locating the element on every character, which
-        can fail if Instagram's React DOM re-renders during typing.
-        """
-        await element.click()
-        await asyncio.sleep(random.uniform(0.2, 0.5))
-
-        # After the click, the element has focus. Using page.keyboard sends events
-        # directly to the focused element without evaluating the locator again.
-        page = self._page
-
-        # Each session has a random base typing speed, scaled by per-account timing multiplier.
-        # Tarato su un utente "digitale" (~100 WPM di picco): 40-95 ms/char.
-        # La varianza lognormale + pause/typo sotto tengono il risultato umano.
-        base_ms = random.uniform(40, 95) * self._tm
-
-        # Su IG web Enter invia il DM: gli a-capo si battono come Shift+Enter
-        # (newline senza invio). Tipiamo riga per riga, parola per parola.
-        lines = text.split('\n')
-        for line_idx, line in enumerate(lines):
-            if line_idx > 0:
-                # A-capo umano: Shift+Enter (non invia)
-                await page.keyboard.press("Shift+Enter")
-                await asyncio.sleep(random.uniform(0.15, 0.5))
-
-            words = line.split(' ')
-            for i, word in enumerate(words):
-                # Occasional thinking pause before a word (more likely mid-sentence)
-                if i > 0 and random.random() < 0.07:
-                    await asyncio.sleep(random.uniform(0.25, 1.0))
-
-                for char_idx, char in enumerate(word):
-                    # Typo: ~8% chance per char in words >3 letters (skip first/last char)
-                    if len(word) > 3 and 0 < char_idx < len(word) - 1 and random.random() < 0.08:
-                        wrong = _typo_char(char)
-                        if wrong:
-                            err_delay = random.lognormvariate(math.log(base_ms), 0.45)
-                            await page.keyboard.type(wrong)
-                            await asyncio.sleep(max(30, min(480, err_delay)) / 1000)
-                            await asyncio.sleep(random.uniform(0.12, 0.40))  # notice mistake
-                            await page.keyboard.press("Backspace")
-                            await asyncio.sleep(random.uniform(0.06, 0.20))  # before retyping
-
-                    # Correct character with lognormal delay
-                    delay_ms = random.lognormvariate(math.log(base_ms), 0.45)
-                    delay_ms = max(30, min(480, delay_ms))
-                    await page.keyboard.type(char)
-                    await asyncio.sleep(delay_ms / 1000)
-                    # Rare micro-pause within a word (re-reading, hesitation)
-                    if random.random() < 0.015:
-                        await asyncio.sleep(random.uniform(0.2, 0.7))
-
-                # Type the space between words
-                if i < len(words) - 1:
-                    await page.keyboard.type(' ')
-                    await asyncio.sleep(random.uniform(25, 80) / 1000)
+        """Delega a browser.human_input (estratto in M1). Il comportamento non cambia:
+        stesse costanti, stesso Shift+Enter. Qui resta solo il legame con lo stato
+        dell'istanza (_page, _tm), che il modulo puro non deve conoscere."""
+        await human_input.human_type(self._page, element, text,
+                                     timing_multiplier=self._tm)
 
     async def _maybe_view_stories(self, page, username: str) -> bool:
         """Click the profile picture to open stories if available (≈35% of visits).
@@ -1033,24 +960,8 @@ class InstagramPage:
             )
 
     async def _human_click(self, page, element) -> None:
-        """Click an element at a random position within its bounding box.
-        bbox computed immediately before click to minimize stale-coords risk
-        from layout shift. Falls back to element.click() if bbox unavailable.
-        """
-        try:
-            await element.scroll_into_view_if_needed(timeout=1500)
-        except Exception:
-            pass
-        box = await element.bounding_box()
-        if box:
-            x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
-            y = box["y"] + box["height"] * random.uniform(0.3, 0.7)
-            await page.mouse.move(x, y, steps=random.randint(5, 15))
-            # Short pause only — long sleep here lets layout shift invalidate coords
-            await asyncio.sleep(random.uniform(0.05, 0.15))
-            await page.mouse.click(x, y)
-        else:
-            await element.click()
+        """Delega a browser.human_input (estratto in M1)."""
+        await human_input.human_click(page, element)
 
     async def _simulate_browsing(self, page, duration_seconds: float) -> None:
         """Simulate a human browsing a profile: varied scrolling, reading pauses, backtracking."""

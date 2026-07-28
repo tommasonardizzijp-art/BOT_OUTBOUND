@@ -21,6 +21,7 @@ os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./data/test_bot.db"
 import asyncio  # noqa: E402
 
 import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
 
 from app.services import notifier  # noqa: E402
 
@@ -51,3 +52,19 @@ def _init_test_db():
 @pytest.fixture(autouse=True)
 def _no_real_telegram(monkeypatch):
     monkeypatch.setattr(notifier, "_telegram_enabled", lambda: False)
+
+
+@pytest_asyncio.fixture
+async def db_session():
+    """Sessione su SQLite di test, con rollback a fine test: nessun test
+    vede le scritture di un altro."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from app.config import settings
+    from app.utils.db_dialect import to_async_database_url
+
+    eng = create_async_engine(to_async_database_url(settings.database_url))
+    maker = async_sessionmaker(eng, expire_on_commit=False)
+    async with maker() as s:
+        yield s
+        await s.rollback()
+    await eng.dispose()
