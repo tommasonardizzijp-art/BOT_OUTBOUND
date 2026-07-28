@@ -18,7 +18,12 @@ from datetime import datetime, timezone
 import psutil
 
 from _common import artifacts_dir, cmdline_matches_profile, first_locator, log_event, snap, wa_context
-from poc1_login import CHATLIST_CANDIDATES, QR_CANDIDATES
+from poc1_login import (
+    CHATLIST_CANDIDATES,
+    QR_CANDIDATES,
+    TIMEOUT_CHATLIST_MS,
+    TIMEOUT_QR_MS,
+)
 from wa_lib import mask_pii
 
 CSV_PATH = None  # impostato in main()
@@ -50,11 +55,19 @@ async def main(nota: str) -> None:
     start = datetime.fromisoformat(marker.read_text(encoding="utf-8")) if marker.exists() else None
 
     async with wa_context(headless=False) as (context, page):
-        alive = await first_locator(page, CHATLIST_CANDIDATES, timeout_ms=20000)
+        # Timeout dalle costanti di poc1_login, NON numeri scritti qui: prima
+        # erano 20000/5000 a mano, e il 28/07 hanno prodotto un falso
+        # "SESSIONE PERSA" -- #pane-side aveva agganciato dopo 19820 ms,
+        # centottanta millisecondi oltre il limite. Su un PoC il cui criterio
+        # e' "14 giorni senza re-scan" un falso negativo non e' un fastidio:
+        # sporca il CSV che decide il verdetto, e chi legge "SESSIONE PERSA"
+        # rifa' il QR, azzerando per davvero la misura che il test stava
+        # superando.
+        alive = await first_locator(page, CHATLIST_CANDIDATES, timeout_ms=TIMEOUT_CHATLIST_MS)
         if alive:
             viva, sel = True, alive[1]
         else:
-            qr = await first_locator(page, QR_CANDIDATES, timeout_ms=5000)
+            qr = await first_locator(page, QR_CANDIDATES, timeout_ms=TIMEOUT_QR_MS)
             viva, sel = False, (qr[1] if qr else "schermata-ignota")
             await snap(page, "poc1-sessione-persa")
         rss_mb, cpu_pct = _sample_profile_processes()
