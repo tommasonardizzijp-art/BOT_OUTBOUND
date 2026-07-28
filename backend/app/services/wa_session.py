@@ -99,6 +99,31 @@ def _get_wa_lock(number_id: str) -> asyncio.Lock:
     return _get_account_lock(f"wa_{number_id}")
 
 
+def _mask_proxy_url(url: str) -> str:
+    """Maschera user:pass di un proxy URL prima di metterlo in un messaggio
+    d'errore. Tiene schema/host/porta/path (utile per capire QUALE proxy e'
+    rotto), oscura le credenziali: e' proprio il caso di un proxy malformato
+    quello in cui qualcuno legge il log, e le credenziali in chiaro in un
+    ValueError sono le stesse credenziali in chiaro nei log dell'app.
+
+    Non solleva mai: deve restare leggibile anche sull'input piu' rotto
+    possibile (e' gia' dentro il ramo che gestisce un URL non valido).
+    """
+    from urllib.parse import urlparse
+
+    try:
+        p = urlparse(url.strip())
+    except Exception:
+        return "***"
+
+    schema = f"{p.scheme}://" if p.scheme else ""
+    cred = "***@" if (p.username or p.password) else ""
+    host = p.hostname or ""
+    porta = f":{p.port}" if p.port else ""
+    resto = f"{schema}{cred}{host}{porta}{p.path or ''}"
+    return resto if resto else "***"
+
+
 @asynccontextmanager
 async def _open_wa_browser(number_id: str, *, headless: bool, proxy_url: str | None):
     """Apre il profilo Chromium persistente del numero WA. Un solo browser
@@ -139,7 +164,9 @@ async def _open_wa_browser(number_id: str, *, headless: bool, proxy_url: str | N
     fingerprint = get_fingerprint(number_id)
     proxy_cfg = parse_proxy_url(proxy_url)
     if proxy_url and not proxy_cfg:
-        raise ValueError(f"Proxy malformato per numero WA {number_id}: {proxy_url!r}")
+        raise ValueError(
+            f"Proxy malformato per numero WA {number_id}: {_mask_proxy_url(proxy_url)!r}"
+        )
 
     chromium_args = ["--no-sandbox", "--disable-blink-features=AutomationControlled"]
     launch_kwargs = dict(

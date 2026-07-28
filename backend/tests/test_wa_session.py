@@ -629,6 +629,44 @@ async def test_adv38_proxy_malformato_valueerror_prima_del_browser(monkeypatch, 
     assert probe.launch_count == 0
 
 
+def test_adv38c_url_di_esempio_del_team_lead_e_valido_non_malformato():
+    """Nota di trasparenza: l'URL suggerito per 38b nella richiesta del team
+    lead ('http://utente:segretissima@proxy.example:8080/rotto') ha
+    hostname='proxy.example' e port=8080 -- entrambi presenti, quindi
+    parse_proxy_url lo accetta come proxy VALIDO (la sua validazione guarda
+    solo se host/porta mancano, non la sintassi del resto). _open_wa_browser
+    non solleva affatto su questo input: non e' malformato per il codice
+    attuale, nonostante il suffisso '/rotto'. Test 38b usa percio' un proxy
+    davvero malformato (host assente) che porta comunque credenziali."""
+    from app.browser.context_manager import parse_proxy_url
+
+    url = "http://utente:segretissima@proxy.example:8080/rotto"
+    assert parse_proxy_url(url) is not None
+
+
+@pytest.mark.asyncio
+async def test_adv38b_proxy_malformato_con_credenziali_non_le_espone_nel_messaggio(monkeypatch, numero_id_usa_e_getta):
+    """Un proxy malformato che porta anche credenziali non deve scriverle in
+    chiaro nel ValueError: e' proprio il caso malformato quello in cui
+    qualcuno guardera' il log. Uso un host assente (genuinamente malformato,
+    a differenza dell'esempio del team lead -- vedi test_adv38c) invece che
+    'proxy.example:8080/rotto', che parse_proxy_url accetta come valido."""
+    probe = _LaunchProbe(launch_delay=0.0)
+    _patch_launcher(monkeypatch, probe)
+    proxy_malformato_con_credenziali = "http://utente:segretissima@"
+
+    with pytest.raises(ValueError) as exc_info:
+        async with _open_wa_browser(numero_id_usa_e_getta, headless=True,
+                                     proxy_url=proxy_malformato_con_credenziali):
+            pass
+
+    messaggio = str(exc_info.value)
+    assert "segretissima" not in messaggio
+    assert "utente" not in messaggio
+    assert numero_id_usa_e_getta in messaggio  # il problema resta nominato
+    assert probe.launch_count == 0
+
+
 @pytest.mark.asyncio
 async def test_adv39_proxy_none_logga_warning_esplicito_e_procede(monkeypatch, numero_id_usa_e_getta):
     probe = _LaunchProbe(launch_delay=0.0)
