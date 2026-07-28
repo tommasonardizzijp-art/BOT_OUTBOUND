@@ -36,11 +36,21 @@ from app.models.wa import WaNumberStatus
 # profilo Chromium persistente (cookie/localStorage), non nell'URL.
 WHATSAPP_WEB_URL = "https://web.whatsapp.com/"
 
-# Cadenza di polling di assisted_login mentre si aspetta lo scan del QR.
-# Non e' una misura M0 (il PoC-1 non ha mai atteso uno scan sotto controllo
-# del bot): valore di buon senso, abbastanza breve da non far aspettare
-# Tommaso davanti al QR, abbastanza largo da non martellare il DOM mentre
-# la pagina anima la transizione qr_required -> logged_in.
+# Pausa fra un giro e l'altro del loop di assisted_login mentre si aspetta lo
+# scan del QR. Non e' una misura M0.
+#
+# ATTENZIONE, questo valore NON governa la reattivita' del loop, ed e' bene
+# saperlo prima di provare a "renderlo piu' reattivo" abbassandolo. Il costo
+# di un giro e' dominato da session_state(), che prova prima CHATLIST con
+# SESSION_STATE_TIMEOUT_CHATLIST_MS (90 s, tarato per tollerare un profilo
+# freddo) e solo dopo il QR: mentre si aspetta lo scan la lista chat NON c'e',
+# quindi ogni giro paga quel timeout per intero. Con timeout_s=180 si fanno
+# una o due letture reali, non novanta.
+#
+# Non e' un errore di classificazione -- cio' che viene letto e persistito e'
+# comunque vero -- ma se servira' un login davvero reattivo la leva e' una
+# lettura DOM piu' snella della session_state() generica, non questa costante.
+# Rilevato in review il 28/07, da affrontare nella chiusura del modulo.
 ASSISTED_LOGIN_POLL_INTERVAL_S = 2.0
 
 
@@ -133,6 +143,15 @@ async def _open_wa_browser(number_id: str, *, headless: bool, proxy_url: str | N
     if proxy_cfg:
         launch_kwargs["proxy"] = proxy_cfg
     else:
+        # Stesso avviso di context_manager: senza proxy il traffico esce
+        # dall'IP locale. Per il canale WhatsApp conta piu' che per IG --
+        # i proxy mobili servono a evitare che piu' numeri risultino
+        # correlati dallo stesso indirizzo (SDD 10.2, minaccia T3). Senza
+        # questa riga il fatto sarebbe invisibile nei log.
+        logger.warning(
+            f"wa_session({number_id}): browser SENZA proxy, il traffico esce "
+            f"dall'IP locale"
+        )
         chromium_args.append("--no-proxy-server")
 
     lock = _get_wa_lock(number_id)
