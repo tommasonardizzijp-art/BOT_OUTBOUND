@@ -18,6 +18,12 @@ import os
 # al primo import e legge questa env (le env var vincono sul .env in pydantic).
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./data/test_bot.db"
 
+# La cartella e' gitignorata: in locale esiste perche' ci gira il bot, su un
+# runner pulito no, e sqlite non la crea da solo ("unable to open database
+# file", 700+ ERROR in setup che sembrano un guasto della suite e sono una
+# cartella mancante).
+os.makedirs("data", exist_ok=True)
+
 import asyncio  # noqa: E402
 
 import pytest  # noqa: E402
