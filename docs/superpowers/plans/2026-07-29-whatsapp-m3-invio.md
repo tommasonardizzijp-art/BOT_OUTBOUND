@@ -1357,7 +1357,7 @@ async def test_sync_state_synced_non_e_richiesto_ma_syncing_blocca(monkeypatch):
 
 - [ ] **Step 2: Lanciare i test e verificare che falliscano**
 
-Run: `pytest backend/tests/test_wa_sender.py -v -k guardia or quarantena or incoerenza or sync_state`
+Run: `pytest backend/tests/test_wa_sender.py -v -k "guardia or quarantena or incoerenza or sync_state"`
 Expected: FAIL con `AttributeError: module 'app.services.wa_sender' has no attribute 'guardia_pre_invio'`.
 
 - [ ] **Step 3: Implementare la guardia**
@@ -1527,7 +1527,7 @@ def test_placeholder_presente_viene_valorizzato():
 
 - [ ] **Step 2: Lanciare i test e verificare che falliscano**
 
-Run: `pytest backend/tests/test_wa_sender.py -v -k prepara or cta or placeholder`
+Run: `pytest backend/tests/test_wa_sender.py -v -k "prepara or cta or placeholder"`
 Expected: FAIL con `AttributeError: module 'app.services.wa_sender' has no attribute 'prepara_testo'`.
 
 - [ ] **Step 3: Implementare `prepara_testo`**
@@ -1740,7 +1740,7 @@ async def _scenario_invio(db_session, e164: str = "+393331112223"):
 
 - [ ] **Step 2: Lanciare i test e verificare che falliscano**
 
-Run: `pytest backend/tests/test_wa_sender.py -v -k invia or toctou or cecita_nella_seconda`
+Run: `pytest backend/tests/test_wa_sender.py -v -k "invia or toctou or cecita_nella_seconda"`
 Expected: FAIL con `AttributeError: module 'app.services.wa_sender' has no attribute 'invia_a_contatto'`.
 
 - [ ] **Step 3: Implementare `invia_a_contatto`**
@@ -2507,7 +2507,7 @@ async def _mini_sessione_con_doppi(db_session, monkeypatch, *, contatti=1,
 
 - [ ] **Step 2: Lanciare i test e verificare che falliscano**
 
-Run: `pytest backend/tests/test_wa_worker.py -v -k mini or cap or kill or finestra or guasti`
+Run: `pytest backend/tests/test_wa_worker.py -v -k "mini or cap or kill or finestra or guasti"`
 Expected: FAIL con `AttributeError: module 'app.workers.wa_worker' has no attribute 'esegui_mini_sessione'`.
 
 - [ ] **Step 3: Implementare la mini-sessione**
