@@ -1,9 +1,10 @@
 # Contratto M2 ↔ M3 — canale WhatsApp
 
 > Stato: **v1.0 — vincolante** · Data: 2026-07-29 · Owner: Tommaso
-> Vale per: `feat/whatsapp-m2-ingest-campagne` e `feat/whatsapp-m3-invio`, che si implementano **in parallelo**.
+> Vale per: `feat/whatsapp-m2-ingest-campagne` e `feat/whatsapp-m3-invio`.
+> **Ordine deciso il 29/07: prima M2, poi M3 — un cantiere alla volta.** Il vincolo è la macchina: 7,4 GB, la build frontend di M2 ne prende 2,7 e un browser di M3 1,2, più i subagent di entrambi. Il contratto resta **più** necessario, non meno: M3 partirà da una sessione che non ha visto nulla di questo lavoro.
 > Base di codice: `main` @ `8b4f819` (M1 mergiato con PR #21 @ `18a6231`; PR #22 ha modularizzato i CLAUDE.md).
-> ⚠️ Prerequisito: **PR #23 (CI verde) deve essere mergiata prima di PR-0** — vedi §8.3.
+> ✅ Prerequisito soddisfatto: **PR #23 (CI verde) mergiata il 29/07**, `main` @ `b0bc2ac` — vedi §8.3.
 > Fonti misurate: [`poc-report.md`](poc-report.md), [`wa-dom-catalog.md`](wa-dom-catalog.md), [`SDD-whatsapp-channel.md`](SDD-whatsapp-channel.md).
 
 ---
@@ -312,9 +313,19 @@ Se una modifica a un file congelato diventa inevitabile: **si dichiara all'altro
 - Se un modulo non ha bisogno di migrazione, **il suo numero resta un buco**. I buchi non fanno male, le collisioni sì. (Ad oggi M2 potrebbe non averne bisogno: lo schema 025 copre già ingest e campagne. M3 ne ha bisogno di sicuro, per `bot_state.wa_halted`.)
 - **`027.down_revision`**: M3 lo scrive `"025"`. Se al momento del rebase la 026 esiste su `main`, M3 lo cambia in `"026"` e **rifà il ciclo su-giù-su**. Non è un dettaglio di forma: due branch che partono entrambi da `down_revision = 025` producono due head alembic e un merge doloroso.
 
-### 6.2 La 025 non ha mai visto Postgres
+### 6.2 La 025 non ha mai visto Postgres — e il ciclo di prova non si fa in produzione
 
-La migrazione 025 è provata **solo su SQLite** (ciclo su-giù-su isolato con `alembic stamp 024`). **Chi arriva primo con la propria migrazione è il primo a toccare Postgres davvero.** Va nel piano come rischio con un task suo — applicare 025+026 (o 025+027) su un Postgres di test, non sul DB di produzione — non come riga di checklist.
+La migrazione 025 è provata **solo su SQLite** (ciclo su-giù-su isolato con `alembic stamp 024`). **Chi arriva primo con la propria migrazione è il primo a toccare Postgres davvero.** Va nel piano come rischio con un task suo, non come riga di checklist.
+
+**Deciso il 29/07 — il ciclo su-giù-su va su un Postgres usa-e-getta, mai sul DB di produzione.** L'obiezione ragionevole è "tanto le tabelle `wa_*` sono nuove e separate". È vera per la 025, e falsa per tutto il resto:
+
+1. **La 027 non tocca una tabella nuova.** Aggiunge `wa_halted` a **`bot_state`**, che è la tabella del kill-switch di Instagram: esistente, popolata, e letta da ogni worker in produzione a ogni giro.
+2. **Provare una migrazione significa su-giù-su**, cioè verificare il `downgrade` — il percorso che serve il giorno in cui devi tornare indietro. In produzione quel ciclo è un `DROP COLUMN` su una tabella viva, e un `downgrade base` scritto al posto di `downgrade -1` cancella l'intero schema. L'8/07 sono nate 110 campagne fantasma in produzione partendo da un errore molto più piccolo.
+3. **Su Supabase gli `ALTER` si impiccano** sui lock `idle in transaction` (regola nota del repo). Su un DB di test si aspetta e si ripete; su prod hai il bot fermo mentre indaghi.
+
+Applicare 025+027 alla produzione **va fatto comunque**, ma è un **deploy**: una volta sola, in avanti, con `pg_dump` fatto prima. Non è un test.
+
+**Dove girare il ciclo:** un **progetto Supabase nuovo e vuoto** (due minuti, gratis, stesso motore e stessa versione della produzione, quindi il test vale davvero; si cancella dopo). Docker su questa macchina **non è installato** — verificato il 29/07. Se il progetto usa-e-getta non si vuole creare, l'alternativa onesta è applicare in avanti su prod con backup e **dichiarare nella PR che il percorso di rollback non è stato provato**: è una scelta legittima, ma va scritta, non sottintesa.
 
 ### 6.3 Ordine di merge: M2 prima, sempre
 
@@ -471,7 +482,9 @@ La CI su `main` è rossa **da prima di M1** (verificato su `acda5d6`, `a9a3aa8`,
 - **backend**: `ModuleNotFoundError: No module named 'app'` — il workflow muore caricando `conftest.py`, in 27 secondi, senza eseguire un solo test. Working directory / `PYTHONPATH` del workflow.
 - **frontend**: 2 errori eslint (`Calling setState synchronously within an effect`) su pagine Instagram, più 10 warning.
 
-**Deciso il 29/07: si ripara prima di aprire i due cantieri**, in una PR a sé. Con la CI rossa per motivi suoi, nessuno dei due cantieri potrebbe usarla per accorgersi di aver rotto qualcosa, e la verifica resterebbe tutta sui run locali — che in parallelo sono proprio la risorsa contesa.
+**FATTO il 29/07 — PR #23 mergiata, `main` @ `b0bc2ac`, backend e frontend verdi.** Le cause erano **tre**, in fila, ognuna nascosta dalla precedente: `pytest` console script che non mette la CWD in `sys.path` (`pythonpath = ["."]`), il runner senza `.env` con `Settings` che fallisce all'import (chiavi usa-e-getta nel workflow + `PHONE_HMAC_KEY`), e `backend/data/` gitignorata che SQLite non crea da sola (700+ ERROR "unable to open database file"). Tutte **riprodotte in locale**, non dedotte dal log.
+
+⚠️ **Resta rosso il check Vercel, e non è codice**: `Project framework is set to "services", but no services are declared` — configurazione del progetto Vercel, fuori dal repo, rossa identica da mesi. Va scollegata o riconfigurata da Tommaso: un check sempre rosso insegna a ignorare i check rossi.
 
 ### 8.4 Worktree, branch, commit
 
@@ -503,6 +516,9 @@ Ogni modifica a questo contratto va scritta qui, con data, motivo e chi l'ha chi
 | 2026-07-29 | Le pagine WA stanno in `frontend/app/wa/`, non `frontend/src/app/wa/` | Questo repo non ha `src/`: il path del contratto v1.0 era sbagliato | lead |
 | 2026-07-29 | `.env.example` è alla radice del repo, non in `backend/` | Verificato sul filesystem | lead |
 | 2026-07-29 | Aggiunta §3.6: **C4/FM9 non è implementabile con il POM attuale** | `read_inbound_tail` filtra via l'outbound per contratto; leggere l'ultimo messaggio a prescindere dalla direzione richiede un metodo nuovo su `whatsapp_page.py`, che è patrimonio M1 | lead, scrivendo il piano M3 |
+| 2026-07-29 | **I due cantieri si fanno in sequenza, M2 poi M3**, non in parallelo | RAM: 7,4 GB totali, build frontend 2,7 GB + browser 1,2 GB + i subagent di entrambi. Il contratto resta necessario: M3 partirà da una sessione senza memoria di questo lavoro | Tommaso |
+| 2026-07-29 | §6.2: **il ciclo migrazioni su-giù-su non si fa sul DB di produzione**, ma su un progetto Supabase usa-e-getta; docker non è installato su questa macchina | La 027 tocca `bot_state`, tabella viva del kill-switch Instagram; il valore del test è il `downgrade`, che in prod è un DROP COLUMN su tabella in uso | Tommaso (ha sollevato l'obiezione), lead (ha portato i tre motivi) |
+| 2026-07-29 | CI verde mergiata su `main` (**PR #23**, `main` @ `b0bc2ac`): PR-0 può partire | Prerequisito §8.3 soddisfatto | Tommaso |
 
 ---
 

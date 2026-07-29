@@ -754,23 +754,26 @@ Expected: tre comandi a exit 0, nessun errore di colonna mancante. È lo stesso 
 
 ⚠️ **La 025 non ha mai visto Postgres.** È stata provata solo su SQLite. Questo task è il primo che tocca Postgres davvero, e la differenza non è teorica: gli enum sono `native_enum=False` proprio per questo, e un `server_default` mancante su una colonna NOT NULL passa su SQLite vuoto e fallisce su una tabella popolata.
 
-```bash
-docker --version
-```
-
-- **Se docker c'è:**
+**Docker su questa macchina NON è installato** (verificato il 29/07). Il Postgres di prova è un **progetto Supabase nuovo e vuoto**: due minuti, gratis, stesso motore e stessa versione della produzione — quindi il test vale davvero — e si cancella dopo. Chiedere a Tommaso la connection string di quel progetto, e verificare **prima di ogni comando** che non sia quella di produzione.
 
 ```bash
-docker run --rm -d --name wa-pg-test -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:17-alpine
-# attendere che accetti connessioni, poi:
-DATABASE_URL="postgresql+asyncpg://postgres:test@localhost:55432/postgres" alembic upgrade head
-DATABASE_URL="postgresql+asyncpg://postgres:test@localhost:55432/postgres" alembic downgrade base
-DATABASE_URL="postgresql+asyncpg://postgres:test@localhost:55432/postgres" alembic upgrade head
-docker stop wa-pg-test
+# La stringa arriva da un progetto Supabase USA-E-GETTA, mai da .env.
+export WA_PG_TEST="postgresql+asyncpg://postgres:<pwd>@<host-usa-e-getta>:5432/postgres"
+
+# Controllo di sicurezza PRIMA di toccare qualsiasi cosa: se compare l'host di
+# produzione, fermarsi.
+echo "$WA_PG_TEST" | grep -q "$(grep -o 'db\.[a-z]*\.supabase\.co' ../.env | head -1)" \
+  && echo "STOP: e' il DB di produzione" || echo "ok, non e' produzione"
+
+DATABASE_URL="$WA_PG_TEST" alembic upgrade head
+DATABASE_URL="$WA_PG_TEST" alembic downgrade -1
+DATABASE_URL="$WA_PG_TEST" alembic upgrade head
 ```
 Expected: la catena `024 → 025 → 027` sale, scende e risale pulita. Qualunque errore qui è **un difetto della 025 o della 027 da correggere adesso**, non al primo deploy.
 
-- **Se docker NON c'è: FERMARSI e chiedere a Tommaso un Postgres usa-e-getta** (un progetto Supabase nuovo e vuoto va bene). **Mai puntare `DATABASE_URL` al database di produzione per provare una migrazione**: l'8/07 i test hanno creato 110 campagne fantasma in produzione partendo da un errore molto più piccolo di questo. Se il Postgres non è disponibile, il rischio va scritto nella PR come **non verificato**, non silenziosamente saltato.
+⚠️ **Mai puntare `DATABASE_URL` al database di produzione per provare una migrazione**, e la ragione non è la prudenza generica (contratto §6.2): la **027 tocca `bot_state`**, la tabella del kill-switch di Instagram, viva e letta da ogni worker in produzione; e il valore del test è proprio il `downgrade`, che lì diventa un `DROP COLUMN` su una tabella in uso. Un `downgrade base` scritto al posto di `downgrade -1` cancella l'intero schema. L'8/07 sono nate 110 campagne fantasma in produzione partendo da un errore molto più piccolo.
+
+Se il progetto usa-e-getta non è disponibile, **non ripiegare su prod**: si applica in avanti sulla produzione come **deploy** (una volta sola, con `pg_dump` fatto prima) e si scrive nella PR che **il percorso di rollback non è stato provato**. È una scelta legittima, ma va dichiarata, non sottintesa.
 
 - [ ] **Step 9: Commit**
 
