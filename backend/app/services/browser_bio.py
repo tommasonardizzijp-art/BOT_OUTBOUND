@@ -95,6 +95,27 @@ def web_user_to_shim(user: dict) -> SimpleNamespace:
     )
 
 
+def graphql_user_to_web_shape(gql_user: dict) -> dict:
+    """Normalizza il dict `data.user` della query GraphQL interna di IG
+    (`PolarisProfilePageContentQuery`) nella FORMA di `web_profile_info`, cosi'
+    `web_user_to_shim` resta l'UNICO shim (anti-divergenza col path API).
+
+    Delta di forma noti (GraphQL FLAT -> web_profile_info ANNIDATO):
+      - pk              -> id
+      - follower_count  -> edge_followed_by.count
+      - following_count -> edge_follow.count
+    Gli altri campi (username, full_name, biography, is_private, is_verified,
+    external_url, bio_links) hanno gia' gli stessi nomi e passano invariati.
+    Pura e testabile: nessun IO. Robusta a chiavi mancanti/None.
+    """
+    g = gql_user or {}
+    shaped = dict(g)  # copia: preserva i campi col nome gia' coincidente
+    shaped["id"] = g.get("pk") or g.get("id")
+    shaped["edge_followed_by"] = {"count": g.get("follower_count")}
+    shaped["edge_follow"] = {"count": g.get("following_count")}
+    return shaped
+
+
 async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 8.0) -> dict | None:
     """Naviga al profilo e cattura il JSON di web_profile_info.
 
