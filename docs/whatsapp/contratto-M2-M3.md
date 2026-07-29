@@ -2,7 +2,8 @@
 
 > Stato: **v1.0 — vincolante** · Data: 2026-07-29 · Owner: Tommaso
 > Vale per: `feat/whatsapp-m2-ingest-campagne` e `feat/whatsapp-m3-invio`, che si implementano **in parallelo**.
-> Base di codice: `main` @ `18a6231` (M1 mergiato, PR #21).
+> Base di codice: `main` @ `8b4f819` (M1 mergiato con PR #21 @ `18a6231`; PR #22 ha modularizzato i CLAUDE.md).
+> ⚠️ Prerequisito: **PR #23 (CI verde) deve essere mergiata prima di PR-0** — vedi §8.3.
 > Fonti misurate: [`poc-report.md`](poc-report.md), [`wa-dom-catalog.md`](wa-dom-catalog.md), [`SDD-whatsapp-channel.md`](SDD-whatsapp-channel.md).
 
 ---
@@ -176,6 +177,18 @@ Fra guardia e invio passano ~20 s misurati (`guardia_totale_ms` mediana 22,2 s, 
 
 ---
 
+### 3.6 C4 / FM9 — "non intromettersi se sta scrivendo l'umano" non si può fare oggi
+
+La SDD (§9, regola C4; FM9) prevede che il bot non si intrometta quando **l'ultimo messaggio in chat è dell'umano-business**: il cliente sta conversando a mano e lo step va rinviato.
+
+**Con il POM di M1 non è implementabile**, ed è meglio saperlo adesso che scoprirlo a metà cantiere. `read_inbound_tail` **filtra via l'outbound per contratto** — è la sua garanzia contro i falsi "nessuno STOP" — quindi non esiste oggi un modo di sapere se l'ultimo messaggio della conversazione è nostro, dell'umano del cliente, o del contatto. `scan_chat_list` espone `last_is_outbound` per la **lista**, ma dice solo "l'ultimo è nostro", non distingue il bot dall'umano (quella distinzione richiede il confronto con `wa_messages.sent_at`, e la lista non porta i timestamp).
+
+Conseguenze, esplicite:
+
+- **M3 non implementa C4/FM9.** Non è una dimenticanza del piano: è un limite dichiarato.
+- Il rischio residuo è che il bot mandi un messaggio di campagna mentre il cliente sta conversando a mano con quella persona. In MVP è **accettato**: le campagne sono a un messaggio solo, i contatti sono caldi, e la guardia pre-invio blocca comunque se il **contatto** ha risposto.
+- **Va deciso prima di M4**: aggiungere al POM un metodo che legga l'ultimo messaggio a prescindere dalla direzione è un emendamento a `whatsapp_page.py` (patrimonio M1), con il suo test di non-regressione.
+
 ## 4. Proprietà delle scritture: chi scrive cosa
 
 La regola generale: **una colonna ha un solo proprietario in scrittura.** Chi non è proprietario può leggere quanto vuole.
@@ -230,7 +243,7 @@ Lo stesso vale per `wa_numbers.sent_today`, con in più il rollover date-aware: 
    - `app/api/tenants.py`, `app/api/wa_numbers.py`, `app/api/wa_campaigns.py`, `app/api/wa_contacts.py` → riempiti da **M2**
    - `app/api/wa_ops.py` (kill-switch WA, stato invii, start/stop worker) → riempito da **M3**
    - Ogni file: `router = APIRouter(prefix="/wa/...", tags=[...])` e nient'altro. Registrazione con `dependencies=_protected` come gli altri (`main.py`, righe 116-129).
-2. **`app/config.py`**: tutte le variabili di **entrambi** i moduli, con i default della §5.2. Dopo PR-0 nessuno dei due cantieri riapre `config.py`. Stesso per `.env.example`.
+2. **`app/config.py`**: tutte le variabili di **entrambi** i moduli, con i default della §5.2. Dopo PR-0 nessuno dei due cantieri riapre `config.py`. Stesso per `.env.example`, che sta alla **radice del repo** (non in `backend/`).
 3. **`app/services/wa_template.py`** completo, con i suoi test (§2.4).
 4. **`backend/scripts/wa_seed_campaign.py`** (§7.4).
 5. **`backend/tests/conftest.py`**: DB di test per-slot + lock (§8.1).
@@ -277,7 +290,7 @@ Aggiunte in PR-0, con questi nomi e questi default. Chi ne vuole una in più: em
 | Area | Proprietario | Regola |
 |---|---|---|
 | `app/services/wa_ingest.py`, `app/api/tenants.py`, `wa_numbers.py`, `wa_campaigns.py`, `wa_contacts.py` | M2 | |
-| `frontend/**` (tutto) | M2 | M3 è backend puro (deciso il 29/07): kill-switch e stato via API + Telegram |
+| `frontend/**` (tutto; le pagine WA stanno in `frontend/app/wa/`, **non** in `frontend/src/app/` — questo repo non ha `src/`) | M2 | M3 è backend puro (deciso il 29/07): kill-switch e stato via API + Telegram |
 | `app/services/wa_sender.py`, `wa_number_manager.py`, `wa_optout.py`, `workers/wa_worker.py` | M3 | |
 | `app/api/wa_ops.py` | M3 | |
 | `app/models/bot_state.py` + migrazione 027 | M3 | aggiunge `wa_halted` |
@@ -486,6 +499,10 @@ Ogni modifica a questo contratto va scritta qui, con data, motivo e chi l'ha chi
 | Data | Cosa cambia | Perché | Chiesto da |
 |---|---|---|---|
 | 2026-07-29 | v1.0 — versione iniziale | — | — |
+| 2026-07-29 | Base di codice: `main` è a `8b4f819`, non `18a6231` | PR #22 è entrata dopo la stesura | lead, scrivendo i piani |
+| 2026-07-29 | Le pagine WA stanno in `frontend/app/wa/`, non `frontend/src/app/wa/` | Questo repo non ha `src/`: il path del contratto v1.0 era sbagliato | lead |
+| 2026-07-29 | `.env.example` è alla radice del repo, non in `backend/` | Verificato sul filesystem | lead |
+| 2026-07-29 | Aggiunta §3.6: **C4/FM9 non è implementabile con il POM attuale** | `read_inbound_tail` filtra via l'outbound per contratto; leggere l'ultimo messaggio a prescindere dalla direzione richiede un metodo nuovo su `whatsapp_page.py`, che è patrimonio M1 | lead, scrivendo il piano M3 |
 
 ---
 
