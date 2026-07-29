@@ -10,6 +10,16 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    # Il runner non ha un .env: senza queste, app.config.Settings fallisce la
+    # validazione all'import (SECRET_KEY/JWT_SECRET) e la suite muore prima di
+    # partire. Sono chiavi USA-E-GETTA, generate per la CI e valide solo qui:
+    # non cifrano e non firmano nulla che esista fuori da questo job. Il DB e'
+    # comunque riscritto a SQLite dal conftest prima di ogni import di app.*.
+    env:
+      SECRET_KEY: "8lGskiwa4OemnoItMwY9qRsBeNr4qzOKhl3NSLs46Wg="
+      JWT_SECRET: "iO4VwUcDUZjBunQ5ZNXfg-EuEr_qmpREbmYQDglDaoo"
+      PHONE_HMAC_KEY: "IFntdaCtw2-lQ5x-HIbOSSmrl-vyHlDh1YPEJoECXe0"
+      DATABASE_URL: "sqlite+aiosqlite:///./data/test_bot.db"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -68,7 +68,11 @@ function ScrapeBreakPanel({ breakUntil, onResume, loading }: { breakUntil: strin
 function useCountdown(until: string | null | undefined): string {
   const [remaining, setRemaining] = useState('')
   useEffect(() => {
-    if (!until) { setRemaining(''); return }
+    // Niente reset di stato qui dentro: senza `until` non c'e' countdown, e la
+    // stringa vuota si DERIVA al return invece di scriverla in stato (che
+    // costerebbe un render in piu' ed e' quello che react-hooks/set-state-in-effect
+    // segnala).
+    if (!until) return
     const tick = () => {
       const diff = Math.max(0, new Date(until).getTime() - Date.now())
       const m = Math.floor(diff / 60000)
@@ -79,7 +83,7 @@ function useCountdown(until: string | null | undefined): string {
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
   }, [until])
-  return remaining
+  return until ? remaining : ''
 }
 
 function TwoPhasePanel({ campaign, id, action, loadingAction }: {

@@ -41,6 +41,13 @@ where = ["."]
 include = ["app*"]
 
 [tool.pytest.ini_options]
+# `pytest` (console script) NON mette la working directory in sys.path; `python -m
+# pytest` sì. In locale si lancia col secondo e funziona, la CI usa il primo e muore
+# in 27 secondi caricando conftest.py con "ModuleNotFoundError: No module named
+# 'app'", senza eseguire un solo test. pythonpath rende le due invocazioni
+# equivalenti, invece di dipendere da come è stato lanciato pytest.
+pythonpath = ["."]
+
 # L'engine async di app/database.py è un singleton module-level: il pool asyncpg
 # lega le connessioni all'event loop. Con loop function-scoped (default), un test
 # eredita una connessione di un loop già chiuso dal test precedente ->
