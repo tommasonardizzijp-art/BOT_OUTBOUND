@@ -105,3 +105,21 @@ async def test_campagna_su_numero_di_un_altro_tenant_rifiutata(db_session):
             "tenant_id": tenant_a.id, "wa_number_id": number_b.id, "name": "x",
             "campaign_type": WaCampaignType.followup, "template_a": "Ciao.",
         })
+
+
+@pytest.mark.asyncio
+async def test_optout_enabled_nel_payload_di_creazione_non_bypassa_il_gate_cta(db_session):
+    """Trovato in review: un client poteva passare optout_enabled=False in
+    creazione per una campagna marketing, bypassando sia il calcolo sia il
+    gate CTA -- risultato: marketing senza via d'uscita, esattamente il
+    danno che il contratto §2.1 esiste per impedire. optout_enabled ora e'
+    SEMPRE calcolato in crea_campagna, il payload del chiamante e' ignorato."""
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await db_session.commit()
+    with pytest.raises(ValueError):
+        await svc.crea_campagna(db_session, {
+            "tenant_id": tenant.id, "wa_number_id": number.id, "name": "exploit",
+            "campaign_type": WaCampaignType.marketing, "template_a": "Ciao {nome}.",
+            "optout_enabled": False,   # tentativo di bypass: deve essere ignorato
+        })

@@ -38,9 +38,13 @@ def valida_step(template: str, *, colonne_note: set[str]) -> None:
 async def crea_campagna(db, dati: dict) -> WaCampaign:
     """Crea la campagna in draft + il suo step 0.
 
-    optout_enabled e' assegnato ESPLICITAMENTE (mai lasciato al
-    server_default=true della migrazione 025, contratto §2.1): True se e
-    solo se il chiamante non forza un valore diverso e il tipo e' marketing.
+    optout_enabled e' SEMPRE calcolato da calcola_optout_enabled(tipo), mai
+    accettato dal chiamante alla creazione (contratto §2.1): il valore
+    iniziale e' calcolato, l'override manuale e' un atto successivo
+    dell'admin via PATCH, non un parametro di POST. Bug trovato in review
+    dedicata: un `optout_enabled` nel payload di creazione bypassava sia il
+    calcolo sia il gate CTA sotto, permettendo una campagna marketing senza
+    via d'uscita.
     """
     tipo = dati["campaign_type"]
     numero = await db.scalar(select(WaNumber).where(WaNumber.id == dati["wa_number_id"]))
@@ -49,9 +53,7 @@ async def crea_campagna(db, dati: dict) -> WaCampaign:
     if numero.tenant_id != dati["tenant_id"]:
         raise ValueError("Il numero appartiene a un altro tenant.")
 
-    optout = dati.get("optout_enabled")
-    if optout is None:
-        optout = calcola_optout_enabled(tipo)      # esplicito, mai il default a DB
+    optout = calcola_optout_enabled(tipo)      # mai dal payload, mai il default a DB
     cta = (dati.get("optout_cta") or "").strip() or None
     if optout and not cta:
         raise ValueError(
