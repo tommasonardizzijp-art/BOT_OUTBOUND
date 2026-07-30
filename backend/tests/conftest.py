@@ -16,7 +16,16 @@ import os
 
 # DEVE stare PRIMA di ogni import `app.*`: app.config.settings viene istanziato
 # al primo import e legge questa env (le env var vincono sul .env in pydantic).
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./data/test_bot.db"
+#
+# Il percorso e' relativo alla working directory: due run pytest nella STESSA
+# directory si cancellano lo schema a vicenda col drop_all di sessione, e
+# producono rossi che sembrano regressioni (28/07: tre run con 24, poi 1, poi
+# 22 falliti, tutti fantasmi, contro 729 verdi in isolamento). Con lo slot,
+# due run possono convivere dichiarando WA_TEST_DB_SLOT diversi; senza slot,
+# il lock qui sotto fa fallire subito il secondo con un messaggio chiaro
+# invece di lasciarlo sbagliare in silenzio (contratto M2/M3 §8.1).
+_SLOT = os.environ.get("WA_TEST_DB_SLOT", "default")
+os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///./data/test_bot_{_SLOT}.db"
 
 # La cartella e' gitignorata: in locale esiste perche' ci gira il bot, su un
 # runner pulito no, e sqlite non la crea da solo ("unable to open database
@@ -24,12 +33,38 @@ os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./data/test_bot.db"
 # cartella mancante).
 os.makedirs("data", exist_ok=True)
 
+_LOCK_PATH = f"./data/test_bot_{_SLOT}.lock"
+
 import asyncio  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 
 from app.services import notifier  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _suite_lock():
+    """Un solo run pytest alla volta per slot. Il file resta se un run viene
+    ucciso: si cancella a mano, ed e' comunque meglio di un'ora persa a
+    inseguire rossi fantasma."""
+    try:
+        fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise RuntimeError(
+            f"Un'altra suite pytest sta girando sullo slot '{_SLOT}' "
+            f"({_LOCK_PATH}). Usa WA_TEST_DB_SLOT=<nome> per uno slot tuo, "
+            "oppure cancella il file se e' rimasto da un run ucciso."
+        )
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    try:
+        yield
+    finally:
+        try:
+            os.remove(_LOCK_PATH)
+        except OSError:
+            pass
 
 
 @pytest.fixture(scope="session", autouse=True)

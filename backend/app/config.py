@@ -317,5 +317,42 @@ class Settings(BaseSettings):
     anomaly_challenge_threshold_per_day: int = 3       # 3+ challenge events/24h → pause everything
     anomaly_worker_crash_threshold_per_hour: int = 3   # 3+ worker crashes/h → notify (no auto-stop)
 
+    # --- Canale WhatsApp: ingest e campagne (M2) -------------------------
+    # Prefisso applicato ai numeri senza '+' (SDD Q14). Un numero estero si
+    # accetta solo se gia' in E.164.
+    wa_ingest_default_country: str = "39"
+    # Soft limit per file (SDD Q22): con cap 100-200/giorno, 5.000 contatti
+    # sono MESI di campagna. Rifiutare e' piu' onesto che accettare.
+    wa_ingest_max_rows: int = 5000
+    # Tetto agli attributi liberi per contatto (SDD Q15).
+    wa_ingest_max_attrs_bytes: int = 2048
+
+    # --- Canale WhatsApp: invio (M3) -------------------------------------
+    # Master switch fail-closed: nessun invio finche' non lo si accende a
+    # mano. Nessun task di M2 lo tocca.
+    wa_send_enabled: bool = False
+    wa_daily_cap_default: int = 20              # SDD 10.3, warmup giorno 1-3
+    # ATTENZIONE: proposta NON misurata (SDD 10.3). A6 si verifica solo con
+    # la rampa di M5.
+    wa_warmup_steps: str = "20,20,30,40,60,80,100"
+    wa_send_delay_median_s: int = 90            # SDD 10.3
+    wa_send_delay_sigma: float = 0.7            # SDD 10.3
+    wa_session_min_msg: int = 8                 # SDD 10.3
+    wa_session_max_msg: int = 15                # SDD 10.3
+    wa_break_min_min: int = 20                  # SDD 10.3
+    wa_break_max_min: int = 40                  # SDD 10.3
+    wa_active_hours: str = "09:30-19:30"        # SDD 10.3, Europe/Rome
+    # STIMATO, non misurato: finestra in cui la sincronizzazione post
+    # riconnessione rende cieca la guardia (A9/FM16). Da rimisurare quando
+    # SYNC_INDICATOR sara' catalogato.
+    wa_resync_quarantine_min: int = 15
+    wa_guard_tail_n: int = 40                   # default del POM
+    wa_guard_history_min: int = 80              # default del POM
+    # Stesso valore di campaign_orchestrator.LOCK_TIMEOUT_MINUTES.
+    wa_lock_timeout_min: int = 20
+    wa_max_failures_per_contact: int = 3        # SDD 8.2
+    wa_stop_words: str = "stop,basta,cancellami,non scrivermi,unsubscribe,rimuovimi"
+    wa_global_daily_cap: int = 200              # SDD Q70, safety valve macchina
+
 
 settings = Settings()
