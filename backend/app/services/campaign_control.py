@@ -240,6 +240,11 @@ async def resume_campaign_control(
                     "assegna un account DM o disattiva auto_generate."
                 )
             if campaign.auto_generate and has_dm_account:
+                if not await has_dedicated_scrape_and_dm_accounts(db, campaign_id):
+                    raise CampaignControlError(
+                        "Servono almeno 2 profili distinti: uno dedicato SOLO allo scraping "
+                        "e uno dedicato SOLO ai DM. Un profilo 'entrambi' da solo non basta."
+                    )
                 campaign.status = CampaignStatus.scraping_and_running
                 action = "campaign_resumed_parallel"
             else:
