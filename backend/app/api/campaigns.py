@@ -22,6 +22,7 @@ from app.services.campaign_control import (
     ensure_campaign_can_send_messages,
     ensure_bot_accepts_work,
     has_active_role_account,
+    has_dedicated_scrape_and_dm_accounts,
     pause_campaign_control,
     resume_campaign_control,
 )
@@ -885,16 +886,6 @@ async def start_dm_auto(campaign_id: str, db: AsyncSession = Depends(get_db)):
     except CampaignControlError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if campaign.source_type == "import":
-        # Import è a fase singola: prima si risolvono tutti i profili, poi (ready) si
-        # avviano i DM con /start. Il DM parallelo non è supportato qui — un worker DM
-        # partito durante la risoluzione uscirebbe senza follower pronti e lascerebbe
-        # la campagna "running" senza worker.
-        raise HTTPException(
-            status_code=400,
-            detail="DM in parallelo non disponibile per campagne import: attendi la fine della risoluzione, poi avvia i DM."
-        )
-
     if campaign.status not in (CampaignStatus.scraping, CampaignStatus.scraping_break):
         raise HTTPException(
             status_code=400,
@@ -922,6 +913,15 @@ async def start_dm_auto(campaign_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(
             status_code=400,
             detail="Assegna almeno un account attivo con ruolo 'dm' o 'entrambi' prima di avviare i DM"
+        )
+
+    if not await has_dedicated_scrape_and_dm_accounts(db, campaign_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Servono almeno 2 profili distinti: uno dedicato SOLO allo scraping "
+            "(ruolo 'scraping') e uno dedicato SOLO ai DM (ruolo 'dm'). Un profilo 'entrambi' "
+            "da solo non basta: farebbe scraping e DM in parallelo sullo stesso account, "
+            "generando checkpoint Instagram."
         )
 
     if not await _check_redis_reachable():
