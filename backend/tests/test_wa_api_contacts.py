@@ -149,3 +149,25 @@ async def test_rimozione_contatto_sotto_lock_fresco_rifiutata(db_session, client
     r2 = await client.delete(f"/api/wa/contacts/{cc.id}")
     assert r2.status_code == 200, r2.text
     assert r2.json() == {"rimosso": True}
+
+
+@pytest.mark.asyncio
+async def test_rimozione_decrementa_total_contacts(db_session, client):
+    """Trovato in review dedicata (Task 12): total_contacts non veniva mai
+    aggiornato alla rimozione, restava per sempre disallineato dal
+    conteggio reale -- visibile nella UI del dettaglio campagna."""
+    from app.models.wa import WaCampaign
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number)
+    contact_a = await make_contact(db_session, tenant, e164="+393331112223")
+    contact_b = await make_contact(db_session, tenant, e164="+393334445556")
+    cc_a = await make_campaign_contact(db_session, campaign, contact_a)
+    await make_campaign_contact(db_session, campaign, contact_b)
+    campaign.total_contacts = 2
+    await db_session.commit()
+
+    r = await client.delete(f"/api/wa/contacts/{cc_a.id}")
+    assert r.status_code == 200, r.text
+    await db_session.refresh(campaign)
+    assert campaign.total_contacts == 1

@@ -164,7 +164,15 @@ export default function DettaglioCampagnaPage({ params }: { params: Promise<{ id
     try {
       await waApi.contatti.rimuovi(cc.id)
       toast.success('Contatto rimosso dalla campagna.')
-      await refreshContatti()
+      const aggiornati = await refreshContatti()
+      // Trovato in review: rimuovere l'ultimo contatto rimasto sull'ULTIMA
+      // pagina svuota la pagina corrente senza toccare l'offset -- il
+      // messaggio "nessun contatto caricato" diventa fuorviante (i contatti
+      // ci sono ancora, sono solo sulla pagina precedente). Si torna
+      // indietro di una pagina, non si finge che la campagna sia vuota.
+      if (aggiornati && aggiornati.contatti.length === 0 && offset > 0) {
+        setOffset(Math.max(0, offset - RIGHE_PER_PAGINA))
+      }
     } catch (err: unknown) {
       // Caso raro (race col worker fra il render e il click, malgrado il
       // bottone gia' disabilitato per i casi noti): messaggio del backend

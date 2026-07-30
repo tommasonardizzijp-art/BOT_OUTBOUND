@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.config import settings
 from app.database import get_db
@@ -104,6 +104,15 @@ async def rimuovi_contatto(campaign_contact_id: str, db=Depends(get_db)) -> dict
     if cc.status in (WaContactStatus.opted_out, WaContactStatus.completed):
         raise HTTPException(409, f"riga in stato terminale ({cc.status.value}): "
                                  "non si rimuove, resta come storico")
+    campaign_id = cc.campaign_id
     await db.delete(cc)
+    # In SQL, mai read-modify-write (contratto §4.2): un secondo ingest o
+    # una seconda rimozione concorrenti non devono perdere un decremento.
+    # Trovato in review dedicata: total_contacts non veniva mai aggiornato
+    # qui, restava per sempre disallineato dal conteggio reale dopo ogni
+    # rimozione (visibile nella UI del Task 12, root cause qui).
+    await db.execute(
+        update(WaCampaign).where(WaCampaign.id == campaign_id)
+        .values(total_contacts=WaCampaign.total_contacts - 1))
     await db.commit()
     return {"rimosso": True}
