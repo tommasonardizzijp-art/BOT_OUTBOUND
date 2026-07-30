@@ -46,6 +46,21 @@ def _dialetto(prima_riga: str) -> str:
     return ";" if prima_riga.count(";") > prima_riga.count(",") else ","
 
 
+def _maschera_se_numerico(valore: str) -> str:
+    """Un file SENZA intestazione fa leggere la prima riga di DATI come
+    header: se quella riga sono numeri di telefono, il messaggio 'colonna
+    numero assente' non deve stamparli in chiaro (P12, contratto §2.3). Qui
+    non sappiamo ancora se e' davvero un numero: un token con 6+ cifre lo
+    trattiamo come tale per sicurezza, un vero nome di colonna (es.
+    'telefono', 'id_cliente') non ne ha abbastanza e passa intatto."""
+    if sum(c.isdigit() for c in valore) < 6:
+        return valore
+    v = valore.strip()
+    if len(v) <= 5:
+        return "•" * len(v)
+    return f"{v[:3]}{'•' * max(3, len(v) - 5)}{v[-2:]}"
+
+
 def parse_wa_csv(contenuto: bytes) -> tuple[list[RigaCsv], list[str]]:
     testo = _decodifica(contenuto).strip()
     if not testo:
@@ -59,9 +74,10 @@ def parse_wa_csv(contenuto: bytes) -> tuple[list[RigaCsv], list[str]]:
     if len(set(header)) != len(header):
         raise CsvParseError("Intestazioni duplicate: ogni colonna deve avere un nome unico.")
     if COLONNA_NUMERO not in header:
+        colonne_sicure = [_maschera_se_numerico(h) for h in header]
         raise CsvParseError(
             f"Colonna '{COLONNA_NUMERO}' obbligatoria e assente. "
-            f"Colonne trovate: {', '.join(header)}."
+            f"Colonne trovate: {', '.join(colonne_sicure)}."
         )
 
     righe: list[RigaCsv] = []

@@ -73,3 +73,13 @@ def test_il_messaggio_di_errore_non_contiene_numeri_in_chiaro():
     with pytest.raises(CsvParseError) as exc:
         parse_wa_csv(b"telefono\n+393421460077\n")
     assert "3421460077" not in str(exc.value)
+
+
+def test_file_senza_intestazione_non_stampa_i_numeri_come_colonne():
+    """Trovato in review: un file SENZA header (l'utente incolla numeri
+    grezzi) fa leggere la prima riga di dati come intestazione, e il
+    messaggio 'colonna numero assente' interpolava quei valori in chiaro."""
+    with pytest.raises(CsvParseError) as exc:
+        parse_wa_csv(b"+393421460077\n+393421460078\n")
+    assert "3421460077" not in str(exc.value)
+    assert "3421460078" not in str(exc.value)
