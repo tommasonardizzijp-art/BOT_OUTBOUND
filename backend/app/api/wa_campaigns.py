@@ -194,3 +194,45 @@ async def aggiorna_step(campaign_id: str, dati: dict, db=Depends(get_db)) -> dic
     await db.commit()
     await db.refresh(step)
     return _serializza_step(step)
+
+
+# Ciclo di vita (Task 7). Le regole vere (macchina a stati SDD 8.1, max 1
+# campagna 'running' per numero, re-pacing di next_action_at) stanno TUTTE
+# nel servizio: qui solo la traduzione ValueError -> 422, stesso pattern di
+# crea()/aggiorna() sopra. Nessun body: lo stato di partenza e' sempre e
+# solo quello a DB, un client non ha nessun campo da passare per aggirare
+# le validazioni (a differenza del bug optout_enabled trovato in crea()).
+@router.post("/{campaign_id}/start")
+async def start(campaign_id: str, db=Depends(get_db)) -> dict:
+    try:
+        campagna = await svc.avvia(db, campaign_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return _serializza(campagna)
+
+
+@router.post("/{campaign_id}/pause")
+async def pause(campaign_id: str, db=Depends(get_db)) -> dict:
+    try:
+        campagna = await svc.pausa(db, campaign_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return _serializza(campagna)
+
+
+@router.post("/{campaign_id}/resume")
+async def resume(campaign_id: str, db=Depends(get_db)) -> dict:
+    try:
+        campagna = await svc.riprendi(db, campaign_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return _serializza(campagna)
+
+
+@router.post("/{campaign_id}/stop")
+async def stop(campaign_id: str, db=Depends(get_db)) -> dict:
+    try:
+        campagna = await svc.ferma(db, campaign_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return _serializza(campagna)

@@ -9,7 +9,7 @@ from datetime import datetime
 from sqlalchemy import select
 
 from app.models.wa import (WaCampaign, WaCampaignStatus, WaCampaignType, WaNumber,
-                           WaSendCondition, WaSequenceStep)
+                           WaNumberStatus, WaSendCondition, WaSequenceStep)
 from app.services.wa_template import validate_wa_template
 
 
@@ -82,6 +82,121 @@ async def crea_campagna(db, dati: dict) -> WaCampaign:
         # motore multi-step si accende post-MVP senza migrazione (SDD Q29).
         send_condition=WaSendCondition.always, wait_days=0,
     ))
+    await db.commit()
+    await db.refresh(campagna)
+    return campagna
+
+
+async def _ristampa_next_action(db, campaign_id: str, quando: datetime) -> int:
+    """Re-pacing (contratto 7.2, SDD Q31): tutte le righe ancora attive
+    prendono un appuntamento nuovo. NON tocca le righe terminali, che hanno
+    next_action_at NULL per una ragione: uno UPDATE senza il filtro sullo
+    status le risveglierebbe silenziosamente."""
+    from sqlalchemy import update
+
+    from app.models.wa import WaCampaignContact, WaContactStatus
+
+    res = await db.execute(
+        update(WaCampaignContact)
+        .where(WaCampaignContact.campaign_id == campaign_id,
+               WaCampaignContact.status.in_([WaContactStatus.queued,
+                                             WaContactStatus.in_sequence]))
+        .values(next_action_at=quando)
+    )
+    return res.rowcount or 0
+
+
+async def avvia(db, campaign_id: str) -> WaCampaign:
+    """Avvia (start) o riprende (resume, via riprendi()) una campagna.
+
+    Validazioni SDD 8.1, tutte a livello di servizio (non nell'endpoint,
+    stessa ragione di calcola_optout_enabled sopra): numero attivo, almeno
+    uno step, almeno un contatto, e nessun'altra campagna 'running' sullo
+    stesso numero (decisione 23/07, Q2 -- il pacing e' per-job, due
+    campagne sullo stesso numero raddoppierebbero il ritmo)."""
+    from sqlalchemy import func
+
+    from app.models.wa import WaCampaignContact
+
+    campagna = await db.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
+    if campagna is None:
+        raise ValueError("Campagna inesistente.")
+    if campagna.status not in (WaCampaignStatus.draft, WaCampaignStatus.paused):
+        raise ValueError(f"La campagna e' gia' in stato {campagna.status.value}.")
+
+    numero = await db.scalar(select(WaNumber).where(WaNumber.id == campagna.wa_number_id))
+    if numero is None or numero.status != WaNumberStatus.active:
+        raise ValueError(
+            "Il numero non e' attivo: serve una sessione WhatsApp valida (QR) "
+            "prima di far partire la campagna.")
+
+    # Max 1 campagna running per numero (Q2, 23/07): con due, il pacing
+    # per-job produrrebbe ritmo doppio sullo stesso numero.
+    altra = await db.scalar(
+        select(WaCampaign.id).where(WaCampaign.wa_number_id == numero.id,
+                                    WaCampaign.status == WaCampaignStatus.running,
+                                    WaCampaign.id != campagna.id))
+    if altra:
+        raise ValueError("Questo numero ha gia' una campagna in corso: mettila in "
+                         "pausa prima di avviarne un'altra.")
+
+    if not await db.scalar(select(func.count(WaSequenceStep.id))
+                           .where(WaSequenceStep.campaign_id == campaign_id)):
+        raise ValueError("La campagna non ha nessun messaggio.")
+    if not await db.scalar(select(func.count(WaCampaignContact.id))
+                           .where(WaCampaignContact.campaign_id == campaign_id)):
+        raise ValueError("La campagna non ha contatti: carica prima la lista.")
+
+    adesso = datetime.utcnow()
+    campagna.status = WaCampaignStatus.running
+    campagna.started_at = campagna.started_at or adesso
+    await _ristampa_next_action(db, campaign_id, adesso)
+    await db.commit()
+    await db.refresh(campagna)
+    return campagna
+
+
+async def pausa(db, campaign_id: str) -> WaCampaign:
+    """running -> paused. Non tocca next_action_at: la ri-stampa avviene
+    solo al resume (riprendi), non qui -- mettere in pausa non deve alterare
+    le righe, solo fermare il consumo (contratto 7.2)."""
+    campagna = await db.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
+    if campagna is None or campagna.status != WaCampaignStatus.running:
+        raise ValueError("Si mette in pausa solo una campagna in corso.")
+    campagna.status = WaCampaignStatus.paused
+    await db.commit()
+    # NB: i job gia' accodati di M3 vedranno lo stato al prossimo controllo
+    # (la mini-sessione ricontrolla a ogni messaggio, non solo all'avvio).
+    await db.refresh(campagna)
+    return campagna
+
+
+async def riprendi(db, campaign_id: str) -> WaCampaign:
+    """paused -> running, passando dalle stesse validazioni di avvia() (il
+    numero potrebbe essere stato sospeso durante la pausa, o un'altra
+    campagna potrebbe essere partita sullo stesso numero nel frattempo) e
+    dalla ri-stampa di next_action_at su tutte le righe non terminali."""
+    campagna = await db.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
+    if campagna is None or campagna.status != WaCampaignStatus.paused:
+        raise ValueError("Si riprende solo una campagna in pausa.")
+    return await avvia(db, campaign_id)
+
+
+async def ferma(db, campaign_id: str) -> WaCampaign:
+    """Stop definitivo. Non cancella niente: i contatti e i KPI restano, e
+    la campagna diventa storico.
+
+    Confine con M3 (contratto 4.1): running -> completed e running -> error
+    sono SOLO di M3. Questo servizio scrive solo lo stato 'stopped', mai
+    'completed' ne' 'error'.
+    """
+    campagna = await db.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
+    if campagna is None:
+        raise ValueError("Campagna inesistente.")
+    if campagna.status in (WaCampaignStatus.completed, WaCampaignStatus.stopped):
+        raise ValueError(f"La campagna e' gia' {campagna.status.value}.")
+    campagna.status = WaCampaignStatus.stopped
+    campagna.completed_at = datetime.utcnow()
     await db.commit()
     await db.refresh(campagna)
     return campagna
