@@ -62,6 +62,12 @@ def render_wa_template(template: str, *, display_name: str | None,
         raise TemplateRenderError(f"Placeholder non risolto: {residuo.group(0)!r}")
     out = re.sub(r"[ \t]{2,}", " ", out.replace("\r\n", "\n"))
     out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    # {nome} vuoto lascia una virgola orfana ("Ciao , promo."): il caso
+    # tipico e' proprio "Ciao {nome}, ..." (contratto §2.4, esempi). Non e'
+    # un segnaposto letterale come '@username' su IG, ma la punteggiatura
+    # va comunque pulita, non solo il nome.
+    out = re.sub(r"\s+,", ",", out)
+    out = re.sub(r"^,\s*", "", out)
     if not out:
         raise TemplateRenderError("Template vuoto dopo il rendering")
     return out

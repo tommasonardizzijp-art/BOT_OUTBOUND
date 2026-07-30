@@ -37,6 +37,16 @@ def test_render_senza_nome_non_inventa_un_segnaposto():
     assert "@" not in out and "{" not in out
 
 
+def test_render_senza_nome_non_lascia_virgola_orfana():
+    """Trovato in review: '{nome}' vuoto lasciava 'Ciao , promo.' (virgola
+    orfana), esattamente il pattern usato negli esempi del contratto §2.4.
+    Un messaggio cosi' e' visibilmente rotto per il destinatario reale."""
+    assert render_wa_template("Ciao {nome}, promo.", display_name=None,
+                              attributes=None) == "Ciao, promo."
+    assert render_wa_template("{nome}, ecco l'offerta.", display_name="",
+                              attributes=None) == "ecco l'offerta."
+
+
 def test_render_solleva_su_placeholder_sconosciuto():
     with pytest.raises(TemplateRenderError):
         render_wa_template("Ciao {azienda}.", display_name="M", attributes={})
