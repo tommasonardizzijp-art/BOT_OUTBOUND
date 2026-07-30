@@ -236,3 +236,56 @@ async def stop(campaign_id: str, db=Depends(get_db)) -> dict:
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     return _serializza(campagna)
+
+
+# KPI (Task 8). I contatori sono TUTTI denormalizzati e scritti altrove
+# (sent/failed/opted_out da M3, replied da M4, contratto 4.1): qui c'e' solo
+# lettura e aritmetica. L'unico contatore che M2 stesso scrive e'
+# total_contacts, dall'ingest (Task 3).
+#
+# I tassi si calcolano sugli INVIATI, non sui caricati (altrimenti una
+# campagna appena partita, con 5 invii su 5.000 contatti, sembra un
+# disastro anche se va benissimo). Con inviati=0 il tasso e' 0.0 per
+# definizione: un contatto puo' risultare opted_out/failed prima ancora di
+# aver ricevuto un messaggio di QUESTA campagna (es. DNC importato, o
+# opt-out arrivato da un altro canale) -- il conteggio assoluto resta
+# visibile, il tasso non mente con una divisione per zero o un 'infinito
+# per cento'.
+SOGLIA_ALLARME_OPTOUT_PCT = 5.0   # SDD 10.3, da confermare con dati veri (Q65)
+
+
+@router.get("/{campaign_id}/kpi")
+async def kpi(campaign_id: str, db=Depends(get_db)) -> dict:
+    campagna = await _campagna_o_404(db, campaign_id)
+
+    inviati = campagna.sent or 0
+
+    def _pct(n: int) -> float:
+        """0.0 senza inviati (niente da dividere). Sopra gli inviati si
+        clampa a 100: n > inviati non dovrebbe succedere (opted_out/failed
+        sono un sottoinsieme dei messaggi inviati), ma sono contatori scritti
+        da un altro modulo (M3, non ancora costruito) senza un vincolo a DB
+        che lo garantisca -- un bug li' non deve tradursi in un tasso tipo
+        '100000%' mostrato all'operatore. E' un dato fuorviante quanto una
+        divisione per zero, solo meno ovvio da notare."""
+        if not inviati:
+            return 0.0
+        return round(min(100.0, 100.0 * n / inviati), 1)
+
+    return {
+        "stato": campagna.status.value,
+        "caricati": campagna.total_contacts or 0,
+        "inviati": inviati,
+        "da_inviare": max(0, (campagna.total_contacts or 0) - inviati),
+        "risposti": campagna.replied or 0,
+        "optout": campagna.opted_out or 0,
+        "falliti": campagna.failed or 0,
+        "tasso_risposta": _pct(campagna.replied or 0),
+        "tasso_optout": _pct(campagna.opted_out or 0),
+        "allarme_optout": _pct(campagna.opted_out or 0) > SOGLIA_ALLARME_OPTOUT_PCT,
+        # Onesta' del dato: le risposte arrivate dopo la fine della campagna
+        # possono sfuggire allo scan, quindi il tasso e' una stima per
+        # DIFETTO (SDD 15.1). La UI lo dice, non lo nasconde.
+        "nota": "Il tasso di risposta e' una stima per difetto: le risposte "
+                "arrivate a campagna chiusa possono non essere conteggiate.",
+    }
