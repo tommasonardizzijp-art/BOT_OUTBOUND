@@ -261,16 +261,16 @@ async def kpi(campaign_id: str, db=Depends(get_db)) -> dict:
     inviati = campagna.sent or 0
 
     def _pct(n: int) -> float:
-        """0.0 senza inviati (niente da dividere). Sopra gli inviati si
-        clampa a 100: n > inviati non dovrebbe succedere (opted_out/failed
-        sono un sottoinsieme dei messaggi inviati), ma sono contatori scritti
-        da un altro modulo (M3, non ancora costruito) senza un vincolo a DB
-        che lo garantisca -- un bug li' non deve tradursi in un tasso tipo
-        '100000%' mostrato all'operatore. E' un dato fuorviante quanto una
-        divisione per zero, solo meno ovvio da notare."""
+        """0.0 senza inviati (niente da dividere). Clampato in [0, 100]:
+        n fuori da [0, inviati] non dovrebbe succedere (opted_out/failed
+        sono un sottoinsieme dei messaggi inviati), ma sono contatori
+        scritti da un altro modulo (M3, non ancora costruito) senza un
+        vincolo a DB che lo garantisca -- un bug li' non deve tradursi in
+        un tasso tipo '100000%' o '-1000%' mostrato all'operatore (trovato
+        in review: il clamp originale copriva solo il limite superiore)."""
         if not inviati:
             return 0.0
-        return round(min(100.0, 100.0 * n / inviati), 1)
+        return round(max(0.0, min(100.0, 100.0 * n / inviati)), 1)
 
     return {
         "stato": campagna.status.value,

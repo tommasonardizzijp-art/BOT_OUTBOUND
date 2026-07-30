@@ -69,3 +69,31 @@ async def test_kpi_con_optout_prima_ancora_di_un_invio_non_esplode(db_session):
     assert kpi["optout"] == 3
     assert kpi["tasso_optout"] == 0.0
     assert kpi["allarme_optout"] is False
+
+
+@pytest.mark.asyncio
+async def test_kpi_con_contatore_sopra_gli_inviati_non_mostra_oltre_100(db_session):
+    """Trovato in review: sent/opted_out/failed sono scritti da M3 (non
+    ancora costruito), senza vincolo a DB che impedisca n > inviati. Senza
+    clamp, sent=1 e opted_out=1000 dava un tasso di 100000%."""
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number)
+    campaign.sent, campaign.opted_out = 1, 1000
+    await db_session.commit()
+    kpi = await wa_campaigns.kpi(campaign.id, db=db_session)
+    assert kpi["tasso_optout"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_kpi_con_contatore_negativo_non_mostra_sotto_zero(db_session):
+    """Stesso rischio del test sopra, lato opposto: il clamp originale
+    copriva solo il limite superiore (min(100, ...)), non quello inferiore
+    -- un contatore negativo dava un tasso tipo -1000%."""
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number)
+    campaign.sent, campaign.opted_out = 10, -5
+    await db_session.commit()
+    kpi = await wa_campaigns.kpi(campaign.id, db=db_session)
+    assert kpi["tasso_optout"] == 0.0
