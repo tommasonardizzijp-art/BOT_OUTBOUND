@@ -73,6 +73,37 @@ async def test_retry_failed_requeues_not_found_and_error_rows():
 
 
 @pytest.mark.asyncio
+async def test_retry_failed_does_not_force_error_on_active_campaign():
+    """Se un worker e' gia' attivo (status=scraping), import-retry-failed NON deve
+    forzare status=error: rischio di far accodare start-scrape un SECONDO job
+    concorrente sulle stesse righe (race condition, doppia elaborazione, doppio
+    traffico IG). Il requeue delle righe not_found/error avviene comunque."""
+    from app.api import campaigns as capi
+
+    async with AsyncSessionLocal() as db:
+        campaign = await _campaign(db, status=CampaignStatus.scraping)
+        db.add(ImportedProfile(
+            campaign_id=campaign.id, raw_input="bad_a", username="bad_a", status="not_found",
+        ))
+        db.add(ImportedProfile(
+            campaign_id=campaign.id, raw_input="bad_b", username="bad_b", status="error", error="timeout",
+        ))
+        await db.commit()
+
+        result = await capi.import_retry_failed(campaign.id, db)
+
+        assert result.status == "scraping"  # worker attivo: stato macchina invariato
+
+        rows = await db.execute(
+            select(ImportedProfile.username, ImportedProfile.status)
+            .where(ImportedProfile.campaign_id == campaign.id)
+        )
+        by_username = {u: s for u, s in rows.all()}
+        assert by_username["bad_a"] == "pending"
+        assert by_username["bad_b"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_retry_failed_on_non_import_campaign_returns_400():
     from app.api import campaigns as capi
 

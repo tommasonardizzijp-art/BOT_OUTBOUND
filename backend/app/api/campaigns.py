@@ -480,7 +480,11 @@ async def import_retry_failed(campaign_id: str, db: AsyncSession = Depends(get_d
 
     # Se la campagna era ferma su ready/completed/paused, sblocca il riavvio:
     # ora ci sono righe pending, start-scrape le riprende (richiede draft/error).
-    if campaign.status not in (CampaignStatus.draft, CampaignStatus.error):
+    # Whitelist esplicita (non blacklist!): se un worker e' gia' attivo
+    # (scraping/scraping_and_running/scraping_break/listing/listing_break/running)
+    # o lo stato e' gia' draft/error, NON toccare lo stato macchina — altrimenti
+    # start-scrape accoderebbe un secondo job concorrente sulle stesse righe.
+    if campaign.status in (CampaignStatus.ready, CampaignStatus.completed, CampaignStatus.paused):
         campaign.status = CampaignStatus.error
     campaign.updated_at = datetime.utcnow()
 
