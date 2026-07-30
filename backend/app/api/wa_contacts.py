@@ -20,6 +20,15 @@ router = APIRouter(prefix="/wa/contacts", tags=["wa-contacts"])
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
+def _lock_fresco(cc: WaCampaignContact) -> bool:
+    """Stessa soglia usata da DELETE: un lock piu' vecchio di
+    wa_lock_timeout_min e' considerato stale (worker morto a meta'), non
+    'in lavorazione'. GET e DELETE devono vedere lo stesso stato, altrimenti
+    un operatore vede 'in lavorazione' su una riga che e' gia' rimovibile."""
+    return bool(cc.locked_by and cc.locked_at and cc.locked_at > (
+        datetime.utcnow() - timedelta(minutes=int(settings.wa_lock_timeout_min))))
+
+
 @router.post("/ingest")
 async def ingest(campaign_id: str = Form(...), file: UploadFile = File(...),
                  db=Depends(get_db)) -> dict:
@@ -74,7 +83,7 @@ async def lista_contatti(campaign_id: str, limit: int = 200, offset: int = 0,
             "tentativi_falliti": cc.failure_count,
             "ultimo_errore": cc.last_error,
             "opted_out": c.opted_out,
-            "in_lavorazione": bool(cc.locked_by),
+            "in_lavorazione": _lock_fresco(cc),
         }
         for cc, c in righe
     ]}
@@ -90,8 +99,7 @@ async def rimuovi_contatto(campaign_contact_id: str, db=Depends(get_db)) -> dict
                          .where(WaCampaignContact.id == campaign_contact_id))
     if cc is None:
         raise HTTPException(404, "riga inesistente")
-    if cc.locked_by and cc.locked_at and cc.locked_at > (
-            datetime.utcnow() - timedelta(minutes=int(settings.wa_lock_timeout_min))):
+    if _lock_fresco(cc):
         raise HTTPException(409, "contatto in lavorazione dal worker: riprova fra poco")
     if cc.status in (WaContactStatus.opted_out, WaContactStatus.completed):
         raise HTTPException(409, f"riga in stato terminale ({cc.status.value}): "
