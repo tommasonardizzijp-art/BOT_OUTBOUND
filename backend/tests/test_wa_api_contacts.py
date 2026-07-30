@@ -171,3 +171,47 @@ async def test_rimozione_decrementa_total_contacts(db_session, client):
     assert r.status_code == 200, r.text
     await db_session.refresh(campaign)
     assert campaign.total_contacts == 1
+
+
+@pytest.mark.asyncio
+async def test_rimozione_cancella_il_contatto_orfano(db_session, client):
+    """Trovato in Fase 4 QA (adversarial #46): rimuovere un contatto dalla
+    SUA UNICA campagna lasciava il WaContact (numero cifrato, hmac) a DB
+    per sempre -- anagrafica orfana, contro la minimizzazione dichiarata
+    (Q23: 'l'ingest crea SOLO i contatti della campagna')."""
+    from sqlalchemy import select
+    from app.models.wa import WaContact
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number)
+    contact = await make_contact(db_session, tenant, e164="+393331112223")
+    cc = await make_campaign_contact(db_session, campaign, contact)
+    await db_session.commit()
+    contact_id = contact.id
+
+    r = await client.delete(f"/api/wa/contacts/{cc.id}")
+    assert r.status_code == 200, r.text
+    ancora_a_db = await db_session.scalar(select(WaContact).where(WaContact.id == contact_id))
+    assert ancora_a_db is None
+
+
+@pytest.mark.asyncio
+async def test_rimozione_non_cancella_un_contatto_usato_da_altra_campagna(db_session, client):
+    """Lo scopo dichiarato di WaContact e' il dedup CROSS-campagna: un
+    contatto ancora referenziato da un'altra campagna non deve sparire."""
+    from sqlalchemy import select
+    from app.models.wa import WaContact
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign_a, _ = await make_campaign(db_session, tenant, number, name="A")
+    campaign_b, _ = await make_campaign(db_session, tenant, number, name="B")
+    contact = await make_contact(db_session, tenant, e164="+393331112223")
+    cc_a = await make_campaign_contact(db_session, campaign_a, contact)
+    await make_campaign_contact(db_session, campaign_b, contact)
+    await db_session.commit()
+    contact_id = contact.id
+
+    r = await client.delete(f"/api/wa/contacts/{cc_a.id}")
+    assert r.status_code == 200, r.text
+    ancora_a_db = await db_session.scalar(select(WaContact).where(WaContact.id == contact_id))
+    assert ancora_a_db is not None      # ancora referenziato da campaign_b

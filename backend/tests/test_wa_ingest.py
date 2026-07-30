@@ -218,3 +218,55 @@ async def test_lo_scoping_per_tenant_non_si_rompe(db_session):
     b = await wa_ingest.ingerisci_csv(db_session, tenant_id=tenant_b.id,
                                       campaign_id=campaign_b.id, contenuto=csv)
     assert a.creati == 1 and b.creati == 1
+
+
+@pytest.mark.asyncio
+async def test_ingest_concorrente_stesso_numero_due_campagne_non_va_in_500(db_session):
+    """Trovato in Fase 4 QA (adversarial #20/#24): due ingest concorrenti
+    con lo stesso numero, stesso tenant, due campagne diverse, passavano
+    ENTRAMBI la SELECT prima che l'altro facesse INSERT -- IntegrityError
+    non catturato -> 500 grezzo, e nel peggiore dei casi l'intero batch
+    della richiesta perdente andava perso in silenzio. La savepoint in
+    ingerisci_csv deve far convergere entrambe le chiamate senza eccezioni,
+    con UN solo WaContact creato (dedup regge) e nessuna riga persa."""
+    import asyncio
+
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.config import settings
+    from app.models.wa import WaCampaignContact, WaContact
+    from app.utils.db_dialect import to_async_database_url
+
+    tenant, campaign_a = await _ctx(db_session)
+    number_b = await make_number(db_session, tenant)
+    campaign_b, _ = await make_campaign(db_session, tenant, number_b, name="B")
+    await db_session.commit()
+
+    eng = create_async_engine(to_async_database_url(settings.database_url))
+    Session = async_sessionmaker(eng, expire_on_commit=False)
+    csv = b"numero\n+393331112223\n"
+
+    async def ingest_in_propria_sessione(campaign_id):
+        async with Session() as db:
+            return await wa_ingest.ingerisci_csv(
+                db, tenant_id=tenant.id, campaign_id=campaign_id, contenuto=csv)
+
+    risultati = await asyncio.gather(
+        ingest_in_propria_sessione(campaign_a.id),
+        ingest_in_propria_sessione(campaign_b.id),
+    )
+    assert [r.creati + r.aggiornati for r in risultati] == [1, 1]   # nessun 500, nessuna riga persa
+
+    async with Session() as check_db:
+        n_contatti = await check_db.scalar(
+            select(func.count(WaContact.id)).where(WaContact.tenant_id == tenant.id))
+        assert n_contatti == 1                     # dedup regge, un solo WaContact
+        n_righe_a = await check_db.scalar(
+            select(func.count(WaCampaignContact.id))
+            .where(WaCampaignContact.campaign_id == campaign_a.id))
+        n_righe_b = await check_db.scalar(
+            select(func.count(WaCampaignContact.id))
+            .where(WaCampaignContact.campaign_id == campaign_b.id))
+        assert n_righe_a == 1 and n_righe_b == 1    # nessun batch perso
+    await eng.dispose()

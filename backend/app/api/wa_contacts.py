@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.config import settings
 from app.database import get_db
@@ -105,7 +105,23 @@ async def rimuovi_contatto(campaign_contact_id: str, db=Depends(get_db)) -> dict
         raise HTTPException(409, f"riga in stato terminale ({cc.status.value}): "
                                  "non si rimuove, resta come storico")
     campaign_id = cc.campaign_id
+    contact_id = cc.contact_id
     await db.delete(cc)
+    await db.flush()
+    # Minimizzazione (Q23, "l'ingest crea SOLO i contatti della campagna,
+    # niente anagrafica speculativa"): se questa era l'ULTIMA campagna che
+    # referenziava il contatto, l'anagrafica orfana non deve restare a DB
+    # per sempre. Trovato in Fase 4 QA (adversarial #46): un WaContact con
+    # encrypted_phone/phone_hmac sopravviveva indefinitamente dopo l'unica
+    # rimozione che lo riguardava. Un contatto usato da PIU' campagne (dedup
+    # cross-campagna, e' lo scopo dichiarato di WaContact) resta intatto.
+    altre_campagne = await db.scalar(
+        select(func.count(WaCampaignContact.id))
+        .where(WaCampaignContact.contact_id == contact_id))
+    if not altre_campagne:
+        contatto = await db.scalar(select(WaContact).where(WaContact.id == contact_id))
+        if contatto is not None:
+            await db.delete(contatto)
     # In SQL, mai read-modify-write (contratto §4.2): un secondo ingest o
     # una seconda rimozione concorrenti non devono perdere un decremento.
     # Trovato in review dedicata: total_contacts non veniva mai aggiornato

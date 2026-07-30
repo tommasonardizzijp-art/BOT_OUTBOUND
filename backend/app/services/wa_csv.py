@@ -94,8 +94,14 @@ def parse_wa_csv(contenuto: bytes) -> tuple[list[RigaCsv], list[str]]:
         # riga lunga scarta la coda. In entrambi i casi la riga SOPRAVVIVE:
         # sara' la validazione del numero a scartarla, con un motivo vero.
         valori = list(valori) + [""] * (len(header) - len(valori))
+        # NUL byte rimosso, non solo stripped: SQLite lo tollera in una
+        # colonna TEXT, ma Postgres/asyncpg (il backend di produzione) lo
+        # rifiuta a livello di driver PRIMA di raggiungere il server --
+        # senza questa pulizia qui, un file con un \x00 in una cella
+        # produrrebbe un 500 grezzo in produzione, non riproducibile in
+        # test su SQLite (trovato in Fase 4 QA, verifica analitica).
         righe.append(RigaCsv(numero_riga=i,
-                             valori={h: (v or "").strip()
+                             valori={h: (v or "").replace("\x00", "").strip()
                                      for h, v in zip(header, valori)}))
 
     if not righe:

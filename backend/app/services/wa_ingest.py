@@ -30,6 +30,7 @@ from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.services.wa_csv import COLONNA_NOME, COLONNA_NUMERO, parse_wa_csv
@@ -137,9 +138,32 @@ async def ingerisci_csv(db, *, tenant_id: str, campaign_id: str,
             contatto = WaContact(tenant_id=tenant_id, phone_hmac=pseudo,
                                  encrypted_phone=encrypt(e164), display_name=nome,
                                  attributes=attrs, first_seen_at=adesso)
-            db.add(contatto)
-            await db.flush()
-            report.creati += 1
+            try:
+                # SAVEPOINT: due ingest concorrenti sullo stesso numero (due
+                # richieste, due campagne diverse dello stesso tenant, o un
+                # doppio submit) possono passare ENTRAMBE la SELECT qui
+                # sopra prima che l'altra abbia fatto INSERT. Trovato in
+                # Fase 4 QA (adversarial #20/#24): senza la savepoint, la
+                # UNIQUE(tenant_id, phone_hmac) sollevava un IntegrityError
+                # non catturato -> 500 grezzo, e nel caso fra due campagne
+                # diverse l'intero batch della richiesta perdente veniva
+                # perso in silenzio (rollback dell'intera transazione).
+                async with db.begin_nested():
+                    db.add(contatto)
+                    await db.flush()
+                report.creati += 1
+            except IntegrityError:
+                # L'altra richiesta ha vinto la corsa: il contatto esiste
+                # gia', si rilegge e si procede come nel ramo "trovato"
+                # sotto -- stesso comportamento, solo scoperto piu' tardi.
+                contatto = await db.scalar(
+                    select(WaContact).where(WaContact.tenant_id == tenant_id,
+                                            WaContact.phone_hmac == pseudo))
+                if nome:
+                    contatto.display_name = nome
+                if attrs:
+                    contatto.attributes = {**(contatto.attributes or {}), **attrs}
+                report.aggiornati += 1
         else:
             # Gap-fill (Q16): si aggiorna cio' che il file porta, non si
             # cancella cio' che c'era.

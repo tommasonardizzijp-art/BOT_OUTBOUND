@@ -83,3 +83,12 @@ def test_file_senza_intestazione_non_stampa_i_numeri_come_colonne():
         parse_wa_csv(b"+393421460077\n+393421460078\n")
     assert "3421460077" not in str(exc.value)
     assert "3421460078" not in str(exc.value)
+
+
+def test_null_byte_in_cella_viene_rimosso_non_solo_stripped():
+    """Trovato in Fase 4 QA: SQLite tollera \\x00 in una colonna TEXT, ma
+    Postgres/asyncpg (produzione) lo rifiuta a livello di driver -- senza
+    pulizia qui il file passerebbe i test locali e romperebbe in prod."""
+    righe, _ = parse_wa_csv(b"numero,nome\n+393331112223,Mar\x00co\n")
+    assert "\x00" not in righe[0].valori["nome"]
+    assert righe[0].valori["nome"] == "Marco"
