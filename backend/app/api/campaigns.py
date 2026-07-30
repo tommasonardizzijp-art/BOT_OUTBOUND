@@ -823,14 +823,29 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
         select(sa_func.count(Follower.id)).where(Follower.campaign_id == campaign_id)
     ) or 0
 
+    is_import = campaign.source_type == "import"
+    unresolved_count = 0
+    if is_import:
+        unresolved_count = await db.scalar(
+            select(sa_func.count(ImportedProfile.id)).where(
+                ImportedProfile.campaign_id == campaign_id,
+                ImportedProfile.status.in_(("pending", "resolving")),
+            )
+        ) or 0
+
     # Reset landing status:
     # - scrape → draft (si ri-scrappa la pagina target)
-    # - import con lead già risolti → ready: la risoluzione IG è la parte costosa,
-    #   si mantengono i follower e si riparte dall'invio DM (no campagna incastrata
-    #   in draft, dato che start-scrape per import richiede righe import pending)
-    # - import senza lead → draft + righe import rimesse a pending (sotto) per rilanciare
-    is_import = campaign.source_type == "import"
-    if is_import and actual_count > 0:
+    # - import CON righe ancora da risolvere (pending/resolving) → error: start-scrape
+    #   (draft|error) riprende la risoluzione senza perdere i follower gia' risolti.
+    #   Prima di questo fix andava a 'ready' se actual_count>0, bloccando per sempre
+    #   il resto della lista (sintomo A, vedi memoria botoutbound-campagne-import-macchina-stati).
+    # - import SENZA righe pending e CON follower risolti → ready: si riparte dai DM.
+    # - import SENZA righe pending e SENZA follower → draft + righe not_found/error
+    #   rimesse a pending (sotto) per rilanciare da zero.
+    if is_import and unresolved_count > 0:
+        campaign.status = CampaignStatus.error
+        campaign.scrape_completed_at = None
+    elif is_import and actual_count > 0:
         campaign.status = CampaignStatus.ready
         campaign.scrape_completed_at = datetime.utcnow()
     else:
@@ -858,9 +873,10 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
         .values(status=FollowerStatus.bio_scraped, locked_by_account_id=None, locked_at=None)
     )
 
-    # Import senza lead risolti: rimetti le righe staging a pending così la
-    # risoluzione può ripartire (start-scrape per import richiede righe pending).
-    if is_import and actual_count == 0:
+    # Import senza lead risolti e senza righe pending: rimetti le righe staging
+    # (not_found/error) a pending così la risoluzione può ripartire da zero
+    # (start-scrape per import richiede righe pending).
+    if is_import and actual_count == 0 and unresolved_count == 0:
         await db.execute(
             update(ImportedProfile)
             .where(ImportedProfile.campaign_id == campaign_id)
