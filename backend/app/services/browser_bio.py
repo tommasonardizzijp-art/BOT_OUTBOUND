@@ -44,6 +44,14 @@ from app.utils.exceptions import (
 WEB_APP_ID = "936619743392459"
 _WEB_PROFILE_PATH = "/api/v1/users/web_profile_info/"
 
+# Endpoint interno del client web IG: il browser lo chiama da solo navigando il
+# profilo (query `PolarisProfilePageContentQuery`). Lo INTERCETTIAMO passivamente
+# come fallback quando web_profile_info fallisce col bug 400 "asset ...subvertical
+# deleted". VIETATO fare fetch attivo di questo endpoint (replicherebbe fb_dtsg/
+# lsd/doc_id = pattern anomalo + fragile): solo lettura passiva. Vedi
+# docs/audits/GRAPHQL_FALLBACK_BIO_BROWSER.md.
+_GRAPHQL_PATH = "/api/graphql"
+
 # Backstop iterazioni per mini-sessione: `cap` conta solo gli outcome 'done'. Un pool
 # di pending prevalentemente private/not_found/error potrebbe non raggiungere mai
 # `cap` pur richiedendo moltissime iterazioni (ognuna con un human_profile_pause di
@@ -95,17 +103,47 @@ def web_user_to_shim(user: dict) -> SimpleNamespace:
     )
 
 
+def graphql_user_to_web_shape(gql_user: dict) -> dict:
+    """Normalizza il dict `data.user` della query GraphQL interna di IG
+    (`PolarisProfilePageContentQuery`) nella FORMA di `web_profile_info`, cosi'
+    `web_user_to_shim` resta l'UNICO shim (anti-divergenza col path API).
+
+    Delta di forma noti (GraphQL FLAT -> web_profile_info ANNIDATO):
+      - pk              -> id
+      - follower_count  -> edge_followed_by.count
+      - following_count -> edge_follow.count
+    Gli altri campi (username, full_name, biography, is_private, is_verified,
+    external_url, bio_links) hanno gia' gli stessi nomi e passano invariati.
+    Pura e testabile: nessun IO. Robusta a chiavi mancanti/None.
+    """
+    g = gql_user or {}
+    shaped = dict(g)  # copia: preserva i campi col nome gia' coincidente
+    shaped["id"] = g.get("pk") or g.get("id")
+    shaped["edge_followed_by"] = {"count": g.get("follower_count")}
+    shaped["edge_follow"] = {"count": g.get("following_count")}
+    return shaped
+
+
 async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 8.0) -> dict | None:
     """Naviga al profilo e cattura il JSON di web_profile_info.
 
     Strategia (dalla piu' "umana" alla piu' esplicita):
-      1. Registra un listener sulle response e naviga: se il JS di IG spara
-         web_profile_info lo intercettiamo passivamente (nessuna chiamata extra).
-      2. Fallback: se entro timeout non l'abbiamo colto (dati SSR nell'HTML o
-         endpoint GraphQL diverso), facciamo un fetch IN-PAGE con x-ig-app-id —
-         gira nel contesto della pagina, con i cookie della sessione reale.
+      1. Listener passivo sulle response: se il JS di IG spara web_profile_info lo
+         intercettiamo (nessuna chiamata extra). In PARALLELO ascoltiamo anche le
+         response /api/graphql (PolarisProfilePageContentQuery), che il browser
+         genera comunque, come FALLBACK.
+      2. Se non colto entro timeout, fetch IN-PAGE di web_profile_info (cookie
+         reali, x-ig-app-id web).
+      3. FALLBACK: se web_profile_info fallisce con un errore NON-rate-limit
+         (tipicamente il bug 400 "asset ...subvertical deleted" su certi account
+         business) oppure non da' dati, e durante la navigazione abbiamo catturato
+         passivamente una risposta GraphQL del profilo giusto, la normalizziamo
+         nella forma di web_profile_info e la usiamo. NON facciamo MAI un fetch
+         attivo di /api/graphql (solo lettura passiva).
 
-    Ritorna il dict `data.user` oppure None. Non solleva su errori di parsing.
+    Ritorna il dict `data.user` (forma web_profile_info, eventualmente da GraphQL
+    gia' normalizzata), oppure {"__status": st} su fail rate-limit, oppure None.
+    Non solleva su errori di parsing.
     """
     captured: dict = {}
 
@@ -116,8 +154,27 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
                 u = (((body or {}).get("data") or {}).get("user"))
                 if u:
                     captured["user"] = u
+            elif (_GRAPHQL_PATH in resp.url and resp.status == 200
+                  and "graphql_user" not in captured):
+                body = await resp.json()
+                u = (((body or {}).get("data") or {}).get("user"))
+                # Solo il profilo GIUSTO (username combacia) e con i campi bio:
+                # /api/graphql serve molte query diverse; ci interessa solo quella
+                # del profilo navigato.
+                if (isinstance(u, dict) and u.get("username")
+                        and str(u["username"]).lower() == username.lower()
+                        and ("biography" in u or "follower_count" in u)):
+                    captured["graphql_user"] = u
         except Exception:
             pass  # response non-JSON o gia' consumata: ignora
+
+    def _graphql_fallback():
+        """Ritorna il user GraphQL normalizzato se catturato, altrimenti None."""
+        g = captured.get("graphql_user")
+        if g:
+            logger.info(f"[BioBrowser] @{username}: uso fallback GraphQL passivo (web_profile_info non utilizzabile)")
+            return graphql_user_to_web_shape(g)
+        return None
 
     raw_page.on("response", _on_response)
     try:
@@ -133,7 +190,7 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
         if "user" in captured:
             return captured["user"]
 
-        # Fallback: fetch in-page (stessa sessione/cookie, header come l'app IG).
+        # Fallback esplicito: fetch in-page di web_profile_info.
         try:
             result = await raw_page.evaluate(
                 """async (args) => {
@@ -149,14 +206,23 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
             )
             if isinstance(result, dict):
                 if result.get("__status"):
-                    logger.warning(f"[BioBrowser] @{username}: web_profile_info fetch HTTP {result['__status']}")
-                    return {"__status": result["__status"]}
+                    st = result["__status"]
+                    # 429/401/403 = rate-limit reale: propaga come soft_block, NON
+                    # mascherare con GraphQL (altrimenti si martella cieco).
+                    if st not in (429, 401, 403):
+                        gql = _graphql_fallback()
+                        if gql is not None:
+                            return gql
+                    logger.warning(f"[BioBrowser] @{username}: web_profile_info fetch HTTP {st}")
+                    return {"__status": st}
                 u = (((result or {}).get("data") or {}).get("user"))
                 if u:
                     return u
         except Exception as e:
             logger.warning(f"[BioBrowser] @{username}: fetch in-page fallito ({type(e).__name__}: {e})")
-        return None
+
+        # Ne' passivo ne' fetch in-page hanno dato dati usabili: ultima spiaggia GraphQL.
+        return _graphql_fallback()
     finally:
         try:
             raw_page.remove_listener("response", _on_response)
