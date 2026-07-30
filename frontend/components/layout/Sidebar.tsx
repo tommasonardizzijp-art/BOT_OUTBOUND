@@ -18,12 +18,13 @@ import {
   PauseCircle,
   Activity,
   Target,
+  ArrowLeftRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api, getAuthToken, setAuthToken } from '@/lib/api'
 
 const navItems = [
-  { href: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/campaigns', label: 'Campagne', icon: Megaphone },
   { href: '/accounts', label: 'Account IG', icon: Users },
   { href: '/messages', label: 'Messaggi', icon: MessageSquare },
@@ -161,6 +162,16 @@ export default function Sidebar() {
           </Link>
         ))}
       </nav>
+
+      {/* Il mondo WhatsApp e' separato (Task 9, SDD 6.3): questo link resta
+          sempre visibile per tornare al picker senza digitare l'URL a mano. */}
+      <Link
+        href="/canale"
+        className="mx-3 mb-1 flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-medium text-gray-500 hover:bg-gray-800 hover:text-gray-200"
+      >
+        <ArrowLeftRight className="w-3.5 h-3.5" />
+        Cambia canale
+      </Link>
 
       {me && (
         <div className="mx-3 mt-2 mb-1 rounded-lg bg-gray-800/60 px-3 py-2 space-y-1.5">
