@@ -13,7 +13,7 @@ from app.models.activity_log import ActivityLog
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.campaign_account import CampaignAccount
 from app.models.follower import Follower, FollowerStatus
-from app.utils.roles import SCRAPE_ROLES, DM_ROLES, INBOX_ROLES
+from app.utils.roles import SCRAPE_ROLES, DM_ROLES, INBOX_ROLES, SCRAPE_ONLY_ROLES, DM_ONLY_ROLES
 from app.services.work_enqueue import (
     enqueue_bios,
     enqueue_campaign_run,
@@ -115,6 +115,23 @@ async def has_active_role_account(
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
+
+
+async def has_dedicated_scrape_and_dm_accounts(
+    db: AsyncSession,
+    campaign_id: str,
+) -> bool:
+    """True se la campagna ha ALMENO 1 account attivo dedicato SOLO allo scraping
+    (role in SCRAPE_ONLY_ROLES) E ALMENO 1 account attivo DIVERSO dedicato SOLO ai DM
+    (role in DM_ONLY_ROLES). Un account role='both' non soddisfa nessuno dei due bucket:
+    avviare scraping+DM in parallelo su un solo profilo 'both' fa scrapare e mandare DM
+    allo stesso account nella stessa finestra, il pattern che genera i checkpoint IG
+    (vedi memoria botoutbound-checkpoint-pattern-api / botoutbound-antidetect-protocollo-rigido).
+    """
+    has_scrape_only = await has_active_role_account(db, campaign_id, SCRAPE_ONLY_ROLES)
+    if not has_scrape_only:
+        return False
+    return await has_active_role_account(db, campaign_id, DM_ONLY_ROLES)
 
 
 async def pause_campaign_control(
