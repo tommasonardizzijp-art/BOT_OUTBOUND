@@ -6,7 +6,7 @@ HTTP e' una regola che il resto del sistema puo' aggirare.
 """
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import exists, func, select, update
 
 from app.models.wa import (WaCampaign, WaCampaignStatus, WaCampaignType, WaNumber,
                            WaNumberStatus, WaSendCondition, WaSequenceStep)
@@ -92,8 +92,6 @@ async def _ristampa_next_action(db, campaign_id: str, quando: datetime) -> int:
     prendono un appuntamento nuovo. NON tocca le righe terminali, che hanno
     next_action_at NULL per una ragione: uno UPDATE senza il filtro sullo
     status le risveglierebbe silenziosamente."""
-    from sqlalchemy import update
-
     from app.models.wa import WaCampaignContact, WaContactStatus
 
     res = await db.execute(
@@ -114,8 +112,6 @@ async def avvia(db, campaign_id: str) -> WaCampaign:
     uno step, almeno un contatto, e nessun'altra campagna 'running' sullo
     stesso numero (decisione 23/07, Q2 -- il pacing e' per-job, due
     campagne sullo stesso numero raddoppierebbero il ritmo)."""
-    from sqlalchemy import func
-
     from app.models.wa import WaCampaignContact
 
     campagna = await db.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
@@ -131,7 +127,13 @@ async def avvia(db, campaign_id: str) -> WaCampaign:
             "prima di far partire la campagna.")
 
     # Max 1 campagna running per numero (Q2, 23/07): con due, il pacing
-    # per-job produrrebbe ritmo doppio sullo stesso numero.
+    # per-job produrrebbe ritmo doppio sullo stesso numero. Il controllo qui
+    # sotto (SELECT) e' solo per dare un messaggio d'errore chiaro nel caso
+    # comune non concorrente: la garanzia VERA e' nell'UPDATE piu' in basso,
+    # che ripete la stessa condizione dentro la transazione. Trovato in
+    # review dedicata: due avvia() concorrenti su due campagne dello stesso
+    # numero passavano ENTRAMBE con questa sola SELECT (TOCTOU riprodotto
+    # con un test di concorrenza vero, non sequenziale).
     altra = await db.scalar(
         select(WaCampaign.id).where(WaCampaign.wa_number_id == numero.id,
                                     WaCampaign.status == WaCampaignStatus.running,
@@ -148,8 +150,27 @@ async def avvia(db, campaign_id: str) -> WaCampaign:
         raise ValueError("La campagna non ha contatti: carica prima la lista.")
 
     adesso = datetime.utcnow()
-    campagna.status = WaCampaignStatus.running
-    campagna.started_at = campagna.started_at or adesso
+    # UPDATE atomico: la condizione "nessun'altra running sullo stesso
+    # numero" e' RIVALUTATA dentro la stessa istruzione che scrive
+    # status=running, sotto il lock di riga che l'UPDATE prende. Se due
+    # richieste corrono insieme, la seconda a committare vede gia' l'altra
+    # running (o viene serializzata dal motore) e rowcount torna 0 -- niente
+    # finestra fra "ho controllato" e "ho scritto".
+    res = await db.execute(
+        update(WaCampaign)
+        .where(WaCampaign.id == campaign_id,
+               WaCampaign.status.in_([WaCampaignStatus.draft, WaCampaignStatus.paused]),
+               ~exists(select(1).where(
+                   WaCampaign.wa_number_id == numero.id,
+                   WaCampaign.status == WaCampaignStatus.running,
+                   WaCampaign.id != campagna.id)))
+        .values(status=WaCampaignStatus.running,
+                started_at=func.coalesce(WaCampaign.started_at, adesso))
+    )
+    if res.rowcount == 0:
+        await db.rollback()
+        raise ValueError("Questo numero ha gia' una campagna in corso: mettila in "
+                         "pausa prima di avviarne un'altra.")
     await _ristampa_next_action(db, campaign_id, adesso)
     await db.commit()
     await db.refresh(campagna)
@@ -196,7 +217,9 @@ async def ferma(db, campaign_id: str) -> WaCampaign:
     if campagna.status in (WaCampaignStatus.completed, WaCampaignStatus.stopped):
         raise ValueError(f"La campagna e' gia' {campagna.status.value}.")
     campagna.status = WaCampaignStatus.stopped
-    campagna.completed_at = datetime.utcnow()
+    # completed_at NON si tocca qui: contratto §4.1, lo scrive solo M3
+    # "insieme a completed" -- una riga 'stopped' con completed_at
+    # valorizzato sarebbe fuorviante per chi legge dopo (KPI, M3).
     await db.commit()
     await db.refresh(campagna)
     return campagna

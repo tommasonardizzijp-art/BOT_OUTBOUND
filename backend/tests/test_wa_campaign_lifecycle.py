@@ -121,3 +121,50 @@ async def test_stop_non_cancella_niente(db_session):
     assert campaign.status == WaCampaignStatus.stopped
     assert await db_session.scalar(select(func.count(WaCampaignContact.id))
                                    .where(WaCampaignContact.campaign_id == campaign.id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_due_avvia_concorrenti_sullo_stesso_numero_non_passano_entrambe(db_session):
+    """Trovato in review dedicata: la sola SELECT-poi-UPDATE lasciava una
+    finestra TOCTOU reale -- due avvia() in due sessioni DB indipendenti,
+    lanciate insieme, passavano ENTRAMBE (riprodotto con asyncio.gather,
+    non sequenziale). L'UPDATE atomico con NOT EXISTS dentro la stessa
+    istruzione chiude la finestra: qui si verifica sotto concorrenza vera,
+    non solo con chiamate in sequenza come gli altri test di questo file."""
+    import asyncio
+
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.config import settings
+    from app.models.wa import WaCampaign, WaCampaignStatus
+    from app.utils.db_dialect import to_async_database_url
+
+    tenant, number, campaign_a, _ = await _pronta(db_session)
+    campaign_b, _ = await make_campaign(db_session, tenant, number, name="B")
+    contact_b = await make_contact(db_session, tenant)
+    await make_campaign_contact(db_session, campaign_b, contact_b)
+    await db_session.commit()
+
+    eng = create_async_engine(to_async_database_url(settings.database_url))
+    Session = async_sessionmaker(eng, expire_on_commit=False)
+
+    async def avvia_in_propria_sessione(campaign_id):
+        async with Session() as db:
+            try:
+                await svc.avvia(db, campaign_id)
+                return True
+            except ValueError:
+                return False
+
+    esiti = await asyncio.gather(
+        avvia_in_propria_sessione(campaign_a.id),
+        avvia_in_propria_sessione(campaign_b.id),
+    )
+    assert sorted(esiti) == [False, True]     # una passa, una viene rifiutata: mai entrambe
+
+    n_running = await db_session.scalar(
+        select(func.count(WaCampaign.id)).where(WaCampaign.wa_number_id == number.id,
+                                                 WaCampaign.status == WaCampaignStatus.running))
+    assert n_running == 1
+    await eng.dispose()
