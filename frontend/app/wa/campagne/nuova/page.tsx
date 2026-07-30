@@ -200,13 +200,18 @@ export default function NuovaCampagnaPage() {
     }
   }, [campagna, testoMessaggio])
 
-  // Verita' server-side: un messaggio e' "salvato" se e solo se lo step_0
-  // che il server restituisce non e' (piu') il segnaposto di creazione. Non
-  // teniamo un flag locale separato che potrebbe disallinearsi da questo.
+  // Verita' server-side (step_0 non e' il segnaposto di creazione) PIU' il
+  // confronto col testo che l'operatore sta guardando ORA nella textarea:
+  // senza questo secondo controllo, un utente che salva, poi corregge una
+  // parola SENZA ricliccare "Salva messaggio", vedeva ancora "salvato" e
+  // poteva avviare la campagna col template VECCHIO -- un cliente reale
+  // avrebbe ricevuto un testo diverso da quello a schermo, in silenzio.
+  // Trovato in review dedicata.
   const messaggioSalvato =
     !!campagna?.step_0.template_a &&
     campagna.step_0.template_a.trim().length > 0 &&
-    campagna.step_0.template_a !== TEMPLATE_SEGNAPOSTO_INIZIALE
+    campagna.step_0.template_a !== TEMPLATE_SEGNAPOSTO_INIZIALE &&
+    (testoMessaggio ?? '').trim() === campagna.step_0.template_a.trim()
 
   function inserisciSegnaposto(nomeSegnaposto: string) {
     const testoAttuale = testoMessaggio ?? ''
