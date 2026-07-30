@@ -451,6 +451,51 @@ async def import_status(campaign_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.post("/{campaign_id}/import-retry-failed", response_model=CampaignResponse)
+async def import_retry_failed(campaign_id: str, db: AsyncSession = Depends(get_db)):
+    """Rimette in coda TUTTE le righe imported_profiles in stato not_found/error
+    (requeue bulk, non per-riga — 'private' resta escluso: e' un esito definitivo,
+    non un fallimento tecnico da ritentare)."""
+    campaign = await _get_or_404(campaign_id, db)
+    if campaign.source_type != "import":
+        raise HTTPException(status_code=400, detail="La campagna non è di tipo 'import'")
+
+    failed_count = await db.scalar(
+        select(func.count(ImportedProfile.id)).where(
+            ImportedProfile.campaign_id == campaign_id,
+            ImportedProfile.status.in_(("not_found", "error")),
+        )
+    ) or 0
+    if failed_count == 0:
+        raise HTTPException(status_code=400, detail="Nessun profilo fallito da ritentare")
+
+    await db.execute(
+        update(ImportedProfile)
+        .where(
+            ImportedProfile.campaign_id == campaign_id,
+            ImportedProfile.status.in_(("not_found", "error")),
+        )
+        .values(status="pending", ig_user_id=None, error=None)
+    )
+
+    # Se la campagna era ferma su ready/completed/paused, sblocca il riavvio:
+    # ora ci sono righe pending, start-scrape le riprende (richiede draft/error).
+    if campaign.status not in (CampaignStatus.draft, CampaignStatus.error):
+        campaign.status = CampaignStatus.error
+    campaign.updated_at = datetime.utcnow()
+
+    db.add(
+        ActivityLog(
+            campaign_id=campaign.id,
+            action="import_retry_failed",
+            details=json.dumps({"requeued": failed_count}),
+        )
+    )
+    await db.commit()
+    await db.refresh(campaign)
+    return await _enrich_campaign(campaign, db, include_today=True)
+
+
 @router.post("/{campaign_id}/start-scrape", response_model=CampaignResponse)
 async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
     campaign = await _get_or_404(campaign_id, db)
