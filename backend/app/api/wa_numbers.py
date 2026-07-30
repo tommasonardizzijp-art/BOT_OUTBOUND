@@ -21,9 +21,19 @@ from app.database import get_db
 from app.models.wa import WaNumber, WaNumberStatus
 from app.services import wa_session
 from app.utils.crypto import decrypt, encrypt
-from app.utils.phone_pseudonym import hmac_phone, mask_phone, normalize_e164
+from app.utils.phone_pseudonym import (PhoneNormalizationError, hmac_phone,
+                                       mask_phone, normalize_e164)
 
 router = APIRouter(prefix="/wa/numbers", tags=["wa-numbers"])
+
+
+def _motivo_pulito(exc: PhoneNormalizationError) -> str:
+    """Stesso rischio, stesso fix di wa_ingest._motivo_pulito: il messaggio
+    di PhoneNormalizationError contiene il numero in chiaro (forma
+    "<diagnosi>: {raw!r}"), e str(exc) lo esporrebbe nel 422 -- trovato in
+    review dedicata su questo endpoint."""
+    testo = str(exc)
+    return testo.split(":")[0].strip() if ":" in testo else type(exc).__name__
 
 # Contratto §4.1: sent_today / sent_date / warmup_day / status NON sono qui,
 # sono di M3 in scrittura runtime (tranne l'azzeramento fatto da `riattiva`).
@@ -87,8 +97,9 @@ async def crea(dati: dict, db=Depends(get_db)) -> dict:
 
     try:
         e164 = normalize_e164(numero_raw)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc))
+    except PhoneNormalizationError as exc:
+        # MAI str(exc): contiene il numero in chiaro (contratto §2.3).
+        raise HTTPException(422, _motivo_pulito(exc))
 
     esiste = await db.scalar(select(WaNumber).where(WaNumber.phone_hmac == hmac_phone(e164)))
     if esiste is not None:

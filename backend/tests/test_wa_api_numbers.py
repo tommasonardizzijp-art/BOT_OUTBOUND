@@ -62,3 +62,16 @@ async def test_patch_non_puo_scrivere_i_contatori_di_runtime(db_session):
     await db_session.refresh(n)
     assert n.label == "nuovo nome"
     assert n.sent_today == 5      # ignorato, non applicato
+
+
+@pytest.mark.asyncio
+async def test_crea_con_numero_malformato_non_stampa_il_numero_in_chiaro(db_session):
+    """Trovato in review: crea() faceva raise HTTPException(422, str(exc)),
+    e PhoneNormalizationError porta il numero grezzo nel proprio messaggio
+    (stesso rischio di wa_ingest, contratto §2.3)."""
+    tenant = await make_tenant(db_session)
+    with pytest.raises(Exception) as exc:
+        await wa_numbers.crea(
+            {"tenant_id": tenant.id, "label": "N", "numero": "ABC123NONVALIDO456"},
+            db=db_session)
+    assert "ABC123NONVALIDO456" not in str(exc.value)
