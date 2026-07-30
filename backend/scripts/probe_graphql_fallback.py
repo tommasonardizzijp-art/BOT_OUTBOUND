@@ -1,7 +1,14 @@
 """Probe LIVE del fallback GraphQL (NON un test pytest).
 
-Uso (a mano, con un account loggato e Playwright su D:):
-    PLAYWRIGHT_BROWSERS_PATH=D:\\dev\\.playwright-browsers \\
+Uso (a mano, con un account loggato):
+    # IMPORTANTE: NON impostare PLAYWRIGHT_BROWSERS_PATH. I profili account sono
+    # nati con chromium-1208 (C:\\...\\ms-playwright); puntare a D:\\dev\\.playwright-browsers
+    # (build 1228/1234) fa un upgrade IRREVERSIBILE del profilo + fingerprint diverso
+    # = sessione corrotta. Lascia il default (C: chromium-1208, quello che usa il bot).
+    # I profili loggati stanno nel worktree PRINCIPALE: se giri da un worktree, punta
+    #   BROWSER_PROFILES_DIR="D:/BOT OUTBOUND/backend/data/browser_profiles"
+    # e copia il .env del progetto nel CWD.
+    BROWSER_PROFILES_DIR="D:/BOT OUTBOUND/backend/data/browser_profiles" \\
     python -m scripts.probe_graphql_fallback <account_id> user1 user2 ...
 
 Per ogni username apre il profilo, esegue _capture_web_profile_info e stampa da

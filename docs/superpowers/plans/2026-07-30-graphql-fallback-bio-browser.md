@@ -15,7 +15,7 @@
 - **Repo:** `D:\BOT OUTBOUND`, codice in `backend/`. CWD dei comandi = `D:\BOT OUTBOUND\backend`.
 - **Worktree isolato SEMPRE** per questo lavoro (sviluppo-modulo Fase 1). Branch dedicato + PR, mai push diretto su master.
 - **Una sola suite pytest alla volta** (DB sqlite condiviso + `phone_hmac` UNIQUE globale: run paralleli danno rossi falsi). Vedi memory `botoutbound-una-suite-pytest-alla-volta`.
-- **Playwright browsers su D:**, mai C: → `PLAYWRIGHT_BROWSERS_PATH=D:\dev\.playwright-browsers`. Il profilo PoC va aperto con la build già installata lì (NON `PLAYWRIGHT_BROWSERS_PATH=D:` nudo — distrugge il profilo, vedi memory `botoutbound-playwright-profilo-versione`).
+- **Chromium: NON impostare `PLAYWRIGHT_BROWSERS_PATH`** per la probe live. VERIFICATO 30/07: i profili account sono nati con **chromium-1208** (`C:\Users\...\AppData\Local\ms-playwright`), che è anche il default del bot. `D:\dev\.playwright-browsers` ha build 1228/1234: aprirci un profilo = upgrade IRREVERSIBILE + fingerprint diverso = sessione corrotta (memory `botoutbound-playwright-profilo-versione`). Il pattern `PLAYWRIGHT_BROWSERS_PATH=D:\dev\.playwright-browsers` negli handoff è SBAGLIATO per i profili reali. (Per i test pytest di Task 1/2 è irrilevante: non aprono profili persistenti.)
 - **Passivo-only, hard rule:** GraphQL si LEGGE dalle response che il browser emette navigando. NON si costruisce né si fa fetch in-page di `/api/graphql` (replicherebbe `fb_dtsg`/`lsd`/`doc_id` = pattern anomalo + fragile). Il codice deve avere un commento che vieta il fetch attivo.
 - **Non mascherare i rate-limit:** il fallback GraphQL scatta SOLO su fail non-rate-limit di `web_profile_info` (status ∉ {429,401,403}) o su None. Per 429/401/403 si continua a ritornare `{"__status": st}` così il breaker soft_block esistente funziona.
 - **Anti-divergenza:** un unico shim (`web_user_to_shim`). GraphQL viene normalizzato NELLA forma di `web_profile_info`, non con uno shim parallelo, così `extract_contacts` e lo storage restano identici al path API.
@@ -561,9 +561,10 @@ asyncio.run(m())"
 
 - [ ] **Step 3: Esegui la probe su almeno 6 profili falliti**
 
-Run (account loggato reale, finestra visibile):
+Run (account loggato reale, finestra visibile). NON impostare `PLAYWRIGHT_BROWSERS_PATH` (default C: chromium-1208 = build dei profili). Da worktree, punta i profili al main tree:
 ```bash
-PLAYWRIGHT_BROWSERS_PATH=D:\dev\.playwright-browsers python -m scripts.probe_graphql_fallback <account_id> <user1> <user2> <user3> <user4> <user5> <user6>
+BROWSER_PROFILES_DIR="D:/BOT OUTBOUND/backend/data/browser_profiles" \
+  python -m scripts.probe_graphql_fallback <account_id> <user1> <user2> <user3> <user4> <user5> <user6>
 ```
 Expected: la maggioranza esce `[OK]` con `followers` e `bio_len>0`, e nei log INFO compare `uso fallback GraphQL passivo` per i profili col bug 400.
 
