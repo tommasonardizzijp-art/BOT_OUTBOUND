@@ -67,3 +67,43 @@ async def test_resume_parallel_import_blocked_without_dedicated_accounts(monkeyp
 
         with pytest.raises(CampaignControlError, match="dedicat"):
             await resume_campaign_control(db, campaign.id, by="test", enqueue=False)
+
+
+@pytest.mark.asyncio
+async def test_resume_parallel_import_allowed_with_two_dedicated_accounts(monkeypatch):
+    async def _ok(*a, **kw):
+        return True
+
+    async def _no_halt(*a, **kw):
+        return None
+
+    async def _fake_enqueue(campaign_id):
+        return 1
+
+    monkeypatch.setattr("app.services.campaign_control.check_redis_reachable", _ok)
+    monkeypatch.setattr("app.services.campaign_control.ensure_bot_accepts_work", _no_halt)
+    monkeypatch.setattr("app.services.work_enqueue.enqueue_campaign_run", _fake_enqueue)
+
+    async with AsyncSessionLocal() as db:
+        campaign = await _import_campaign(db)
+        acc_scrape = await _account(db, "scraping")
+        acc_dm = await _account(db, "dm")
+        db.add(CampaignAccount(campaign_id=campaign.id, account_id=acc_scrape.id, role="scraping", is_active=True))
+        db.add(CampaignAccount(campaign_id=campaign.id, account_id=acc_dm.id, role="dm", is_active=True))
+        await db.commit()
+
+        updated_campaign, counts = await resume_campaign_control(db, campaign.id, by="test", enqueue=False)
+
+        from sqlalchemy import select as _select
+
+        from app.models.activity_log import ActivityLog
+
+        log = await db.scalar(
+            _select(ActivityLog)
+            .where(ActivityLog.campaign_id == campaign.id)
+            .order_by(ActivityLog.created_at.desc())
+        )
+
+    assert updated_campaign.status == CampaignStatus.scraping_and_running
+    assert log is not None
+    assert log.action == "campaign_resumed_parallel"
