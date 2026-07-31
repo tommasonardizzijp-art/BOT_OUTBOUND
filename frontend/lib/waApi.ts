@@ -43,7 +43,7 @@ export type WaCampaignStatus =
 export type WaCampaignType = 'marketing' | 'followup'
 
 export type WaContactStatus =
-  | 'queued' | 'in_sequence' | 'replied' | 'completed' | 'opted_out' | 'skipped'
+  | 'queued' | 'in_sequence' | 'replied' | 'completed' | 'opted_out' | 'skipped' | 'failed'
 
 export type Tenant = {
   id: string

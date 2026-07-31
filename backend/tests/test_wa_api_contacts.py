@@ -215,3 +215,24 @@ async def test_rimozione_non_cancella_un_contatto_usato_da_altra_campagna(db_ses
     assert r.status_code == 200, r.text
     ancora_a_db = await db_session.scalar(select(WaContact).where(WaContact.id == contact_id))
     assert ancora_a_db is not None      # ancora referenziato da campaign_b
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stato_terminale", ["replied", "skipped"])
+async def test_rimozione_rifiutata_su_ogni_stato_terminale(db_session, client, stato_terminale):
+    """Trovato in whole-branch review: la guardia controllava solo
+    opted_out/completed, ma WaContactStatus ha QUATTRO stati terminali
+    (replied, completed, opted_out, skipped) -- invisibile finche' M2 da
+    solo non crea mai righe in quegli stati (li scrive M3), ma un contatto
+    che ha risposto o uno scarto diagnostico sarebbe stato rimovibile."""
+    from app.models.wa import WaContactStatus
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number)
+    contact = await make_contact(db_session, tenant)
+    cc = await make_campaign_contact(db_session, campaign, contact,
+                                     status=WaContactStatus(stato_terminale))
+    await db_session.commit()
+
+    r = await client.delete(f"/api/wa/contacts/{cc.id}")
+    assert r.status_code == 409, r.text

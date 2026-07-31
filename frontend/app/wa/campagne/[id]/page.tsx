@@ -54,6 +54,7 @@ const STATO_CONTATTO_LABEL: Record<WaContactStatus, string> = {
   completed: 'Completato',
   opted_out: 'Opt-out',
   skipped: 'Saltato',
+  failed: 'Fallito (in retry)',
 }
 
 const STATO_CONTATTO_COLORE: Record<WaContactStatus, string> = {
@@ -63,6 +64,7 @@ const STATO_CONTATTO_COLORE: Record<WaContactStatus, string> = {
   completed: '#8fb3aa',
   opted_out: '#e07a3c',
   skipped: 'var(--wa-muted)',
+  failed: '#e0553c',
 }
 
 // Numero di righe per pagina della tabella contatti. Il backend accetta
@@ -185,7 +187,13 @@ export default function DettaglioCampagnaPage({ params }: { params: Promise<{ id
 
   function motivoRimozioneBloccata(cc: WaCampaignContactRow): string | null {
     if (cc.in_lavorazione) return 'In lavorazione dal worker: non rimovibile finche\' il lock non scade.'
-    if (cc.stato === 'opted_out' || cc.stato === 'completed') {
+    // I quattro stati terminali della state machine (WaContactStatus):
+    // replied, completed, opted_out, skipped. failed e' transitorio.
+    // Trovato in whole-branch review: mancavano replied/skipped, coerente
+    // (ma sbagliato) col backend prima del fix -- invisibile finche' M2
+    // non crea mai righe in quegli stati (li scrive M3).
+    if (cc.stato === 'opted_out' || cc.stato === 'completed'
+        || cc.stato === 'replied' || cc.stato === 'skipped') {
       return `Riga in stato terminale (${STATO_CONTATTO_LABEL[cc.stato]}): resta come storico.`
     }
     return null

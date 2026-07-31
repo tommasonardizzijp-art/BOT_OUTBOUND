@@ -101,7 +101,14 @@ async def rimuovi_contatto(campaign_contact_id: str, db=Depends(get_db)) -> dict
         raise HTTPException(404, "riga inesistente")
     if _lock_fresco(cc):
         raise HTTPException(409, "contatto in lavorazione dal worker: riprova fra poco")
-    if cc.status in (WaContactStatus.opted_out, WaContactStatus.completed):
+    # I quattro stati terminali della state machine (app/models/wa.py,
+    # WaContactStatus): replied, completed, opted_out, skipped. failed e'
+    # transitorio (retry), non terminale. Trovato in whole-branch review:
+    # mancavano replied/skipped -- invisibile finche' M2 da solo non crea
+    # mai righe in quegli stati (li scrive M3), ma un contatto che ha
+    # risposto o uno scarto diagnostico sarebbe diventato rimovibile.
+    if cc.status in (WaContactStatus.opted_out, WaContactStatus.completed,
+                     WaContactStatus.replied, WaContactStatus.skipped):
         raise HTTPException(409, f"riga in stato terminale ({cc.status.value}): "
                                  "non si rimuove, resta come storico")
     campaign_id = cc.campaign_id
