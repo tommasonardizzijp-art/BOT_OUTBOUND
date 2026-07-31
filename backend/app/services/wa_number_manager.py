@@ -42,7 +42,7 @@ def effective_wa_daily_cap(number, campaign) -> int:
     """Minimo tra: daily_cap del numero (override admin), daily_limit della
     campagna (se impostato), e il gradino di warmup (se warmup_day>0).
     Nessuno di questi e' opzionale da solo -- e' la composizione ad
-    AND che conta (contratto §... / SDD 10.3)."""
+    AND che conta (SDD 10.3)."""
     candidates = [number.daily_cap]
     if getattr(campaign, "daily_limit", None) is not None:
         candidates.append(campaign.daily_limit)
@@ -81,7 +81,7 @@ async def has_wa_send_budget(db, number, campaign) -> bool:
 
 async def record_wa_sent(db, number_id: str) -> None:
     """+1 atomico su sent_today, con rollover date-aware nella STESSA
-    UPDATE (§4.2: mai read-modify-write, mai due statement separati per
+    UPDATE (sezione 4.2: mai read-modify-write, mai due statement separati per
     incremento e confronto data -- pattern scrape_lookups_date, mig. 018)."""
     from sqlalchemy import update, case
     from app.models.wa import WaNumber
