@@ -17,10 +17,13 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # server_default="0": la riga singleton esiste gia' in produzione e la
+    # server_default="false": la riga singleton esiste gia' in produzione e la
     # colonna e' NOT NULL -- senza default il backfill fallisce su Postgres.
+    # sa.text("0") e' invalido su Postgres (nessun cast implicito intero->bool
+    # in DEFAULT); "false" e' la convenzione gia' usata su questa stessa
+    # tabella (007_add_bot_state.py, 025_wa_channel_schema.py).
     op.add_column("bot_state", sa.Column("wa_halted", sa.Boolean(), nullable=False,
-                                          server_default=sa.text("0")))
+                                          server_default=sa.text("false")))
     op.add_column("bot_state", sa.Column("wa_halted_reason", sa.Text(), nullable=True))
     op.add_column("bot_state", sa.Column("wa_halted_at", sa.DateTime(), nullable=True))
     op.add_column("bot_state", sa.Column("wa_halted_by", sa.String(255), nullable=True))

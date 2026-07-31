@@ -142,26 +142,56 @@ async def is_wa_halted(db: AsyncSession | None = None) -> bool:
 
 
 async def halt_wa(*, reason: str, by: str = "user", db: AsyncSession | None = None) -> bool:
-    if db is None:
-        async with AsyncSessionLocal() as own_db:
-            return await halt_wa(reason=reason, by=by, db=own_db)
-    row = await _ensure_row(db)
-    row.wa_halted = True
-    row.wa_halted_reason = reason
-    row.wa_halted_at = datetime.utcnow()
-    row.wa_halted_by = by
-    await db.commit()
-    logger.warning(f"[WA KILL-SWITCH] canale WhatsApp fermato da {by}: {reason}")
-    return True
+    """Kill-switch del canale WhatsApp. Stesso pattern own_session di halt():
+    se il chiamante passa una sessione propria, il commit resta a lui (Task
+    11/14 devono poter comporre halt_wa in una transazione piu' ampia)."""
+    own_session = db is None
+    if own_session:
+        db = AsyncSessionLocal()
+    try:
+        row = await _ensure_row(db)
+        row.wa_halted = True
+        row.wa_halted_reason = reason
+        row.wa_halted_at = datetime.utcnow()
+        row.wa_halted_by = by
+        if own_session:
+            await db.commit()
+        logger.warning(f"[WA KILL-SWITCH] canale WhatsApp fermato da {by}: {reason}")
+        return True
+    except Exception as e:
+        logger.error(f"[BotState] halt_wa() failed: {e}")
+        if own_session:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        if own_session:
+            await db.close()
 
 
 async def resume_wa(*, by: str = "user", db: AsyncSession | None = None) -> bool:
-    if db is None:
-        async with AsyncSessionLocal() as own_db:
-            return await resume_wa(by=by, db=own_db)
-    row = await _ensure_row(db)
-    row.wa_halted = False
-    row.wa_halted_reason = None
-    await db.commit()
-    logger.info(f"[WA KILL-SWITCH] canale WhatsApp ripreso da {by}")
-    return True
+    """Stesso pattern own_session di resume()."""
+    own_session = db is None
+    if own_session:
+        db = AsyncSessionLocal()
+    try:
+        row = await _ensure_row(db)
+        row.wa_halted = False
+        row.wa_halted_reason = None
+        if own_session:
+            await db.commit()
+        logger.info(f"[WA KILL-SWITCH] canale WhatsApp ripreso da {by}")
+        return True
+    except Exception as e:
+        logger.error(f"[BotState] resume_wa() failed: {e}")
+        if own_session:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        if own_session:
+            await db.close()
