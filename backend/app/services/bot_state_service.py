@@ -128,3 +128,40 @@ async def resume(*, by: str = "user", db: AsyncSession | None = None) -> bool:
     finally:
         if own_session:
             await db.close()
+
+
+async def is_wa_halted(db: AsyncSession | None = None) -> bool:
+    """Kill-switch del canale WhatsApp. Fail-safe di lettura: se la riga
+    singleton manca, torna False -- un errore qui bloccherebbe il canale
+    per un motivo che non e' una decisione di nessuno."""
+    if db is None:
+        async with AsyncSessionLocal() as own_db:
+            return await is_wa_halted(own_db)
+    row = await db.scalar(select(BotState).limit(1))
+    return bool(row.wa_halted) if row else False
+
+
+async def halt_wa(*, reason: str, by: str = "user", db: AsyncSession | None = None) -> bool:
+    if db is None:
+        async with AsyncSessionLocal() as own_db:
+            return await halt_wa(reason=reason, by=by, db=own_db)
+    row = await _ensure_row(db)
+    row.wa_halted = True
+    row.wa_halted_reason = reason
+    row.wa_halted_at = datetime.utcnow()
+    row.wa_halted_by = by
+    await db.commit()
+    logger.warning(f"[WA KILL-SWITCH] canale WhatsApp fermato da {by}: {reason}")
+    return True
+
+
+async def resume_wa(*, by: str = "user", db: AsyncSession | None = None) -> bool:
+    if db is None:
+        async with AsyncSessionLocal() as own_db:
+            return await resume_wa(by=by, db=own_db)
+    row = await _ensure_row(db)
+    row.wa_halted = False
+    row.wa_halted_reason = None
+    await db.commit()
+    logger.info(f"[WA KILL-SWITCH] canale WhatsApp ripreso da {by}")
+    return True

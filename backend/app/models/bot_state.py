@@ -20,3 +20,11 @@ class BotState(Base):
     halted_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_resume_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_resume_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Kill-switch del canale WhatsApp, SEPARATO da `halted` (che resta di
+    # Instagram, in produzione): un incidente su un canale non deve fermare
+    # l'altro (SDD 4.3). Stessa tabella singleton, comandi dedicati.
+    wa_halted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    wa_halted_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wa_halted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    wa_halted_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
