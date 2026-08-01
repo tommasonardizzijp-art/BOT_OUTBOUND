@@ -14,6 +14,7 @@ from app.services import wa_optout
     "CANCELLAMI da questa lista",
     "unsubscribe",
     "Va bene ma poi STOP grazie",
+    "  STOP  ",   # adversarial #10: spazi iniziali/finali non impediscono il match
 ])
 def test_looks_like_stop_riconosce_i_casi_plausibili(testo):
     assert wa_optout.looks_like_stop(testo) is True

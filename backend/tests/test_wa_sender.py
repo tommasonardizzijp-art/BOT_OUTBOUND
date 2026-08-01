@@ -580,3 +580,28 @@ async def test_i35_chat_title_mai_salvato_come_numero(db_session, monkeypatch):
         contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
     await db_session.refresh(ctx["contact"])
     assert ctx["contact"].chat_title is None
+
+
+@pytest.mark.asyncio
+async def test_l48_null_byte_scritto_e_riletto_da_sqlite_senza_rompere(db_session, monkeypatch):
+    """Adversarial #48: round-trip DB vero (SQLite), non solo rendering in
+    memoria -- il messaggio scritto con un null byte nell'attributo si
+    rilegge senza rompere."""
+    from sqlalchemy import select
+    from app.config import settings
+    from app.models.wa import WaMessage
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    ctx["contact"].attributes = {"nota": "test\x00fine"}
+    ctx["step"].template_a = "Ciao {nome}, nota: {nota}"
+    await db_session.commit()
+
+    pom = _PomInvio([])
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    assert esito.stato == "sent"
+
+    msg = await db_session.scalar(
+        select(WaMessage).where(WaMessage.contact_id == ctx["contact"].id))
+    assert "test" in msg.rendered_text and "fine" in msg.rendered_text
