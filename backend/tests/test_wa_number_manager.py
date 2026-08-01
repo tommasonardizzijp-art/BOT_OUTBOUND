@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 
 from app.services import wa_number_manager as wnm
 from app.models.wa import WaNumberStatus
@@ -102,3 +103,81 @@ async def test_apply_and_release_wa_cooldown(monkeypatch):
     calls["exists_result"] = 0  # TTL scaduto in Redis
     released = await wnm.release_expired_wa_cooldowns()
     assert released == []  # nessun numero passato: serve la query DB (step successivo)
+
+
+@pytest_asyncio.fixture
+async def _tenant(db_session):
+    import uuid
+    from app.models.tenant import Tenant
+    t = Tenant(id=str(uuid.uuid4()), name="T-numman", status="active")
+    db_session.add(t)
+    await db_session.commit()
+    return t
+
+
+@pytest.mark.asyncio
+async def test_16_cap_globale_di_un_altro_numero_blocca_anche_chi_ha_margine(
+        db_session, monkeypatch, _tenant):
+    """QA item 16 (funzionale) + adversarial #23 (confine esatto)."""
+    import uuid
+    from app.config import settings
+    from app.models.wa import WaNumber
+
+    monkeypatch.setattr(settings, "wa_global_daily_cap", 5)
+    oggi = wnm._utc_today_str()
+
+    numero_b = WaNumber(id=str(uuid.uuid4()), tenant_id=_tenant.id, label="B",
+                        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e",
+                        daily_cap=20, warmup_day=0, sent_today=5, sent_date=oggi)
+    numero_a = WaNumber(id=str(uuid.uuid4()), tenant_id=_tenant.id, label="A",
+                        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e",
+                        daily_cap=20, warmup_day=0, sent_today=0, sent_date=oggi)
+    db_session.add_all([numero_b, numero_a])
+    await db_session.commit()
+
+    campagna = SimpleNamespace(daily_limit=None)
+    ok = await wnm.has_wa_send_budget(db_session, numero_a, campagna)
+    assert ok is False   # margine individuale di A non basta: il globale e' saturo
+
+
+@pytest.mark.asyncio
+async def test_22_cap_esatto_del_numero_blocca(db_session, monkeypatch, _tenant):
+    """Adversarial #22: sent_today == daily_cap -> nessun budget (>=, non >)."""
+    import uuid
+    from app.config import settings
+    from app.models.wa import WaNumber
+
+    monkeypatch.setattr(settings, "wa_global_daily_cap", 999)
+    oggi = wnm._utc_today_str()
+    numero = WaNumber(id=str(uuid.uuid4()), tenant_id=_tenant.id, label="n",
+                      phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e",
+                      daily_cap=5, warmup_day=0, sent_today=5, sent_date=oggi)
+    db_session.add(numero)
+    await db_session.commit()
+
+    ok = await wnm.has_wa_send_budget(db_session, numero, SimpleNamespace(daily_limit=None))
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_adv23_cap_globale_esattamente_raggiunto_non_superato(
+        db_session, monkeypatch, _tenant):
+    """Adversarial #23: global_sent == WA_GLOBAL_DAILY_CAP (non oltre) blocca
+    comunque -- il confronto e' `<`, non `<=`."""
+    import uuid
+    from app.config import settings
+    from app.models.wa import WaNumber
+
+    monkeypatch.setattr(settings, "wa_global_daily_cap", 10)
+    oggi = wnm._utc_today_str()
+    numero_b = WaNumber(id=str(uuid.uuid4()), tenant_id=_tenant.id, label="B",
+                        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e",
+                        daily_cap=20, warmup_day=0, sent_today=10, sent_date=oggi)
+    numero_a = WaNumber(id=str(uuid.uuid4()), tenant_id=_tenant.id, label="A",
+                        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e",
+                        daily_cap=20, warmup_day=0, sent_today=0, sent_date=oggi)
+    db_session.add_all([numero_b, numero_a])
+    await db_session.commit()
+
+    ok = await wnm.has_wa_send_budget(db_session, numero_a, SimpleNamespace(daily_limit=None))
+    assert ok is False
