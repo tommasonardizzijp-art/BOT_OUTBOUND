@@ -220,10 +220,26 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                     esito["motivo"] = "cap_esaurito"
                     break
 
-                res = await wa_sender.invia_a_contatto(
-                    db, pom, campaign=campaign, step=step, cc=cc, contact=contact,
-                    number=number,
-                    browser_avviato_da_s=time.perf_counter() - browser_t0)
+                try:
+                    res = await wa_sender.invia_a_contatto(
+                        db, pom, campaign=campaign, step=step, cc=cc, contact=contact,
+                        number=number,
+                        browser_avviato_da_s=time.perf_counter() - browser_t0)
+                except Exception as exc:
+                    # Un'eccezione IMPREVISTA (decrypt, commit DB, blip) non
+                    # deve mai propagare fuori dalla mini-sessione: senza
+                    # questo except fermava TUTTO il job in silenzio, il
+                    # contatto restava lockato fino al prossimo health-check
+                    # (20 min) e _rischedula non veniva mai raggiunta -- il
+                    # numero smetteva di inviare senza un log che lo
+                    # spiegasse (Fix 4, review finale I7). Si tratta come
+                    # 'queued': stesso ramo del guasto nostro qui sotto,
+                    # rilascia il lock e arma FM2. Nessun numero in chiaro:
+                    # solo l'id opaco del contatto.
+                    logger.error(f"[WA] invia_a_contatto: eccezione imprevista su "
+                                f"contatto {contact.id} (cc={cc.id}): "
+                                f"{type(exc).__name__}: {exc}")
+                    res = wa_sender.EsitoInvio("queued", f"eccezione:{type(exc).__name__}")
                 processati += 1
 
                 if res.stato == "sent":

@@ -292,6 +292,37 @@ async def test_tre_guasti_nostri_consecutivi_fermano_il_numero(db_session, monke
     assert esito["falliti"] == 0
 
 
+@pytest.mark.asyncio
+async def test_eccezione_imprevista_in_invia_a_contatto_non_rompe_la_mini_sessione(
+        db_session, monkeypatch):
+    """Fix 4 (review finale I7): un'eccezione IMPREVISTA da invia_a_contatto
+    (decrypt fallito, commit DB, blip) non deve propagare fuori dal job --
+    prima usciva dall'intera mini-sessione e da wa_send_task in silenzio, il
+    contatto restava lockato fino al prossimo health-check (20 min) e
+    _rischedula non veniva MAI raggiunta: il numero smetteva di inviare
+    senza un log che lo spiegasse. Ora si logga, si rilascia il lock, e
+    conta come guasto verso l'escalation FM2 -- stesso trattamento degli
+    altri path 'colpa nostra'."""
+    from sqlalchemy import select
+    from app.models.wa import WaCampaignContact
+
+    async def _fake_invio_rotto(*a, **kw):
+        raise RuntimeError("decrypt fallito")
+
+    ctx_out: dict = {}
+    esito = await _mini_sessione_con_doppi(
+        db_session, monkeypatch, fake_invio=_fake_invio_rotto, contatti=5,
+        _ctx_out=ctx_out)
+
+    assert esito["motivo"] == "guasti_consecutivi"
+    assert esito["inviati"] == 0
+    assert esito["falliti"] == 0
+
+    cc = await db_session.scalar(
+        select(WaCampaignContact).where(WaCampaignContact.id == ctx_out["cc"].id))
+    assert cc.locked_by is None and cc.locked_at is None
+
+
 # ---------------------------------------------------------------------------
 # QA M3 (Task 15 Step 3): items funzionali 7, 15, 17, 18, 20, 22 e
 # adversarial D20/D21, G26/G27.
