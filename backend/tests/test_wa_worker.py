@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timedelta
 
 import pytest
+import pytest_asyncio
 
 from app.workers import wa_worker
 
@@ -538,8 +539,24 @@ async def test_g27_numero_qr_required_a_meta_sessione_ferma_pulito(db_session, m
     assert esito["inviati"] == 1
 
 
+@pytest_asyncio.fixture
+async def _redis_o_skip():
+    """Redis reale e' un requisito duro per questo test (adversarial #20):
+    se non e' raggiungibile (es. CI senza servizio Redis), skip esplicito
+    con motivo chiaro invece di un rosso che sembra una regressione.
+    Duplicata in test_wa_ops_api.py (conftest.py e' congelato, §8.1)."""
+    import arq
+    from app.services.work_enqueue import arq_redis_settings
+    try:
+        pool = await arq.create_pool(arq_redis_settings())
+        await pool.ping()
+        await pool.aclose()
+    except Exception as exc:
+        pytest.skip(f"Redis non raggiungibile, test saltato: {type(exc).__name__}: {exc}")
+
+
 @pytest.mark.asyncio
-async def test_d20_due_enqueue_job_stesso_job_id_arq_scarta_il_duplicato(db_session):
+async def test_d20_due_enqueue_job_stesso_job_id_arq_scarta_il_duplicato(db_session, _redis_o_skip):
     """Adversarial #20: un solo job attivo per numero -- niente doppia
     mini-sessione parallela sullo stesso numero (romperebbe il pacing)."""
     import arq
