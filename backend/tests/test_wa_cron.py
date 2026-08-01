@@ -109,6 +109,33 @@ async def test_healthcheck_rilascia_i_lock_stale(db_session, monkeypatch):
     assert ctx["cc"].locked_by is None
 
 
+@pytest.mark.asyncio
+async def test_19_healthcheck_avvisa_telegram_su_sessione_caduta(db_session, monkeypatch):
+    """QA item 19: l'alert Telegram e' verificabile mockando il notifier,
+    non serve un bot reale."""
+    from app.models.wa import WaNumberStatus
+    from app.services import notifier
+    from app.workers import cron_worker
+
+    ctx = await _scenario_claim(db_session)
+
+    async def _fake_check(number_id):
+        return WaNumberStatus.qr_required
+    monkeypatch.setattr(cron_worker, "check_session", _fake_check)
+
+    chiamate = []
+
+    async def _fake_telegram(msg, level="info"):
+        chiamate.append((msg, level))
+    monkeypatch.setattr(notifier, "send_telegram", _fake_telegram)
+
+    esito = await cron_worker.wa_session_healthcheck({})
+    assert esito["caduti"] >= 1
+    assert len(chiamate) >= 1
+    assert chiamate[0][1] == "error"
+    assert "WhatsApp" in chiamate[0][0]
+
+
 def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():
     """Non-regressione: cron_worker.py e' condiviso con Instagram in
     produzione. Ogni entry di cron_jobs e' un arq.cron.CronJob: il nome
