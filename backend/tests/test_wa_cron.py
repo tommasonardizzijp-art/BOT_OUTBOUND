@@ -107,3 +107,18 @@ async def test_healthcheck_rilascia_i_lock_stale(db_session, monkeypatch):
     await cron_worker.wa_session_healthcheck({})
     await db_session.refresh(ctx["cc"])
     assert ctx["cc"].locked_by is None
+
+
+def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():
+    """Non-regressione: cron_worker.py e' condiviso con Instagram in
+    produzione. Ogni entry di cron_jobs e' un arq.cron.CronJob: il nome
+    reale sta in .coroutine.__name__ (nessuna wrapping alternativa in
+    questo file, verificato — a differenza di task_queue.py::WorkerSettings
+    .functions, che mischia funzioni nude e arq.worker.func(...))."""
+    from app.workers import cron_worker
+
+    nomi = {job.coroutine.__name__ for job in cron_worker.CronWorkerSettings.cron_jobs}
+    for atteso in ("daily_reset", "release_stale_locks", "check_replies",
+                   "recover_sending", "telegram_commands"):
+        assert atteso in nomi, f"{atteso} sparita dai cron IG"
+    assert "wa_session_healthcheck" in nomi
