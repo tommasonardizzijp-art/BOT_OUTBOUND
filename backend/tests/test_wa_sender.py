@@ -74,3 +74,113 @@ def test_segnale_sconosciuto_e_trattato_come_colpa_nostra():
     assert esito.puo_inviare is False
     assert esito.esito_contatto is None
     assert esito.colpa_nostra is True
+
+
+class _PomFinto:
+    """Doppio del POM: nessun browser. Ogni test costruisce lo scenario
+    dichiarando cosa 'vede' il DOM."""
+    def __init__(self, tail, *, history_ok=True, count=30, sync="unknown"):
+        self._tail = tail
+        self._history_ok = history_ok
+        self._count = count
+        self._sync = sync
+        self.load_history_chiamata = False
+
+    async def load_history(self, minimo: int = 80):
+        from app.browser.whatsapp_page import HistoryInfo
+        self.load_history_chiamata = True
+        return HistoryInfo(ok=self._history_ok, before=0, after=self._count,
+                           rounds=1, exhausted=True)
+
+    async def read_inbound_tail(self, n: int = 40):
+        return self._tail
+
+    async def sync_state(self):
+        return self._sync
+
+
+@pytest.mark.asyncio
+async def test_guardia_blocca_su_stop_in_coda():
+    pom = _PomFinto(["ciao", "STOP", "ah no scusa"])
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "optout"
+    assert "STOP" in esito.prova
+
+
+@pytest.mark.asyncio
+async def test_guardia_blocca_su_stop_seguito_da_altri_messaggi():
+    """Uno STOP seguito da altro NON diventa invisibile: la coda si legge
+    tutta, non ci si ferma al primo messaggio."""
+    pom = _PomFinto(["STOP", "cmq grazie", "buona giornata"])
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+
+
+@pytest.mark.asyncio
+async def test_guardia_blocca_su_cecita_del_dom():
+    """None = nessuna bolla agganciata. NON e' 'nessuno STOP'."""
+    pom = _PomFinto(None)
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "coda_non_agganciata"
+
+
+@pytest.mark.asyncio
+async def test_guardia_passa_su_silenzio_vero():
+    """[] = bolle presenti, nessun inbound: questo si', si invia."""
+    pom = _PomFinto([])
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is True
+
+
+@pytest.mark.asyncio
+async def test_guardia_carica_sempre_la_cronologia_prima_di_leggere():
+    pom = _PomFinto([])
+    await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert pom.load_history_chiamata is True
+
+
+@pytest.mark.asyncio
+async def test_quarantena_post_riconnessione_blocca(monkeypatch):
+    """Nei primi minuti dopo l'avvio del browser la sincronizzazione e'
+    ancora in corso e la guardia leggerebbe il vuoto (A9/FM16)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 15)
+    pom = _PomFinto([])
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=60)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "quarantena_risync"
+
+
+@pytest.mark.asyncio
+async def test_incoerenza_db_dom_blocca(monkeypatch):
+    """Il DB dice che a questo contatto avevamo gia' scritto, il DOM mostra
+    zero messaggi: il DOM sta mentendo (chat non sincronizzata)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    pom = _PomFinto([], count=0)
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=True, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "incoerenza_db_dom"
+
+
+@pytest.mark.asyncio
+async def test_sync_state_synced_non_e_richiesto_ma_syncing_blocca(monkeypatch):
+    """Oggi sync_state torna sempre 'unknown' (selettore non catalogato):
+    'unknown' non blocca da solo. Ma se un giorno tornera' 'syncing', quello
+    deve bloccare senza altre modifiche."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    pom = _PomFinto([], sync="syncing")
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "sincronizzazione_in_corso"

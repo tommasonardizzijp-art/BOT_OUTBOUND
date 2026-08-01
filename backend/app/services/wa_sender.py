@@ -76,3 +76,70 @@ def valuta_apertura(res: OpenResult) -> EsitoApertura:
     logger.error(f"valuta_apertura: segnale non catalogato {signal!r} -- "
                  "trattato come guasto nostro, il contatto non si tocca")
     return EsitoApertura(False, None, "segnale_non_catalogato", True)
+
+
+@dataclass
+class EsitoGuardia:
+    puo_inviare: bool
+    motivo: str
+    prova: str | None = None      # il testo dell'inbound che ha bloccato
+
+
+async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
+                            browser_avviato_da_s: float) -> EsitoGuardia:
+    """Guardia opt-out/reply a chat APERTA. E' la garanzia strutturale del
+    canale (SDD 7.2): con questa, uno STOP non e' mai scavalcabile, anche
+    tra campagne distanti mesi e anche se lo scan lista lo ha perso.
+
+    Costo misurato in M0: mediana 5,7 s, p95 7,5 s, max 12,1 s -- di cui la
+    quasi totalita' e' il caricamento della cronologia, che e' PARTE della
+    guardia e non e' aggirabile (la conversazione e' virtualizzata).
+
+    Ordine dei controlli scelto per costo crescente: prima quelli che non
+    toccano il DOM.
+    """
+    from app.config import settings
+    from app.services import wa_optout
+
+    # 1. Quarantena post-riconnessione (contratto §3.4.2). Costo zero, e
+    #    copre la finestra in cui QUALUNQUE lettura sarebbe inaffidabile.
+    #    ATTENZIONE: 15 minuti e' un valore STIMATO, non misurato -- si
+    #    rimisura quando il selettore SYNC_INDICATOR verra' catturato.
+    quarantena_s = float(settings.wa_resync_quarantine_min) * 60
+    if browser_avviato_da_s < quarantena_s:
+        return EsitoGuardia(False, "quarantena_risync")
+
+    # 2. Indicatore di sincronizzazione. Oggi torna sempre 'unknown' e
+    #    'unknown' NON vale 'synced': semplicemente non e' un segnale.
+    #    'syncing' invece blocca -- e blocchera' da solo il giorno in cui il
+    #    selettore sara' catalogato, senza toccare questo codice.
+    if await pom.sync_state() == "syncing":
+        return EsitoGuardia(False, "sincronizzazione_in_corso")
+
+    # 3. Caricare la cronologia FA PARTE della guardia: senza, nel DOM
+    #    restano ~17 messaggi degli ultimi minuti e uno STOP di venti minuti
+    #    prima non esiste (misurato in M0).
+    info = await pom.load_history(minimo=int(settings.wa_guard_history_min))
+
+    # 4. Incoerenza DB<->DOM: se avevamo gia' scritto a questo contatto e il
+    #    DOM mostra zero messaggi, la chat non e' sincronizzata. Vale una
+    #    query e chiude la falla piu' pericolosa che ci resta aperta.
+    if gia_scritto_prima and info.after == 0:
+        return EsitoGuardia(False, "incoerenza_db_dom")
+
+    # 5. Coda inbound. None = CECITA' (nessuna bolla agganciata, o righe
+    #    malformate): non e' silenzio, e non si invia. [] = silenzio vero.
+    coda = await pom.read_inbound_tail(n=int(settings.wa_guard_tail_n))
+    if coda is None:
+        return EsitoGuardia(False, "coda_non_agganciata")
+
+    for testo in coda:
+        if wa_optout.looks_like_stop(testo):
+            return EsitoGuardia(False, "optout", prova=testo[:300])
+
+    # Una risposta qualsiasi ferma la sequenza (SDD 7.4, decisione 24/07),
+    # ma NON e' questa funzione a marcarlo: qui si dice solo che c'e'.
+    if coda:
+        return EsitoGuardia(False, "ha_risposto", prova=coda[-1][:300])
+
+    return EsitoGuardia(True, "silenzio")
