@@ -29,6 +29,16 @@ async def client_real_db():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
     app.dependency_overrides.clear()
+    # Questa fixture committa scritture VERE a DB (e' il punto: get_db non
+    # e' overridden). Senza reset, un test che halta lascia wa_halted=True
+    # per il prossimo test che usa questa fixture -- oggi mascherato perche'
+    # test_wa_worker.py monkeypatcha is_wa_halted ovunque, ma e' una
+    # protezione accidentale di un altro file, non una garanzia.
+    from app.database import AsyncSessionLocal
+    from app.services import bot_state_service as bss
+    async with AsyncSessionLocal() as db:
+        await bss.resume_wa(by="qa-teardown", db=db)
+        await db.commit()
 
 
 @pytest.mark.asyncio
