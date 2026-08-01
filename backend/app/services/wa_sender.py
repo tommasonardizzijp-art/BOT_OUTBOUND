@@ -7,6 +7,7 @@ in cui M1 ha sbagliato una guardia, il difetto era nel giudizio, non nel
 DOM.
 """
 from dataclasses import dataclass
+from datetime import datetime
 
 from loguru import logger
 
@@ -182,3 +183,260 @@ def prepara_testo(step, contact, campaign) -> tuple[str, str]:
         testo = f"{testo}\n\n{cta}"
 
     return testo, variante
+
+
+@dataclass
+class EsitoInvio:
+    stato: str      # 'sent' | 'queued' | 'skipped' | 'failed' | 'opted_out' | 'replied'
+    motivo: str
+
+
+async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
+                           browser_avviato_da_s: float) -> EsitoInvio:
+    """Invia UN messaggio a UN contatto, con tutte le guardie. Non decide
+    cap, finestra oraria o kill-switch: quelli li ha gia' verificati la
+    mini-sessione (Task 11) prima di chiamare qui.
+
+    Il numero in chiaro esiste solo dentro questa funzione, in memoria, il
+    tempo di aprire la chat (P12): si decifra qui e non si logga mai --
+    tutti i log usano mask_phone.
+    """
+    from sqlalchemy import func, select
+
+    from app.config import settings
+    from app.models.wa import WaContactStatus, WaMessage, WaMessageStatus
+    from app.services import wa_number_manager, wa_optout
+    from app.utils import events
+    from app.utils.crypto import decrypt
+    from app.utils.phone_pseudonym import mask_phone
+
+    e164 = decrypt(contact.encrypted_phone)
+    masked = mask_phone(e164)
+
+    # --- apertura chat -----------------------------------------------------
+    apertura = valuta_apertura(await pom.open_chat(e164))
+    if not apertura.puo_inviare:
+        logger.info(f"[WA] {masked}: apertura -> {apertura.motivo} "
+                    f"(colpa_nostra={apertura.colpa_nostra})")
+        if apertura.esito_contatto == "skipped":
+            await _marca_contatto(db, cc, WaContactStatus.skipped,
+                                  errore=apertura.motivo)
+            return EsitoInvio("skipped", apertura.motivo)
+        if apertura.colpa_nostra:
+            return EsitoInvio("queued", apertura.motivo)
+        # ambiguo (ricerca senza risultati): conta il fallimento, non brucia
+        await _incrementa_fallimento(db, cc, apertura.motivo)
+        return EsitoInvio("queued", apertura.motivo)
+
+    # --- guardia pre-invio -------------------------------------------------
+    gia_scritto = bool(await db.scalar(
+        select(func.count(WaMessage.id)).where(
+            WaMessage.contact_id == contact.id,
+            WaMessage.status == WaMessageStatus.sent,
+        )
+    ))
+    guardia = await guardia_pre_invio(pom, gia_scritto_prima=gia_scritto,
+                                      browser_avviato_da_s=browser_avviato_da_s)
+    if not guardia.puo_inviare:
+        return await _esito_guardia_negativa(db, cc, contact, campaign, guardia, masked)
+
+    # --- testo -------------------------------------------------------------
+    try:
+        testo, variante = prepara_testo(step, contact, campaign)
+    except Exception as exc:
+        logger.error(f"[WA] {masked}: render fallito ({type(exc).__name__}) -- "
+                     "il contatto va in failed, il numero continua")
+        await _incrementa_fallimento(db, cc, f"render:{type(exc).__name__}")
+        return EsitoInvio("failed", "render")
+
+    msg = WaMessage(campaign_id=campaign.id, contact_id=contact.id,
+                    wa_number_id=number.id, step_index=step.step_index,
+                    template_variant=variante, rendered_text=testo,
+                    status=WaMessageStatus.sending)
+    db.add(msg)
+    await db.commit()
+
+    # --- RILETTURA TOCTOU: fra guardia e invio passano ~20s misurati -------
+    # Non si ricarica la cronologia (gia' fatta dalla guardia): costa poco ed
+    # e' l'unica difesa contro uno STOP arrivato nel frattempo.
+    coda2 = await pom.read_inbound_tail(n=int(settings.wa_guard_tail_n))
+    if coda2 is None:
+        msg.status = WaMessageStatus.skipped
+        msg.error = "coda_non_agganciata_seconda_lettura"
+        await db.commit()
+        return EsitoInvio("queued", "cecita_toctou")
+    for testo_in in coda2:
+        if wa_optout.looks_like_stop(testo_in):
+            msg.status = WaMessageStatus.skipped
+            msg.error = "stop_nella_finestra_toctou"
+            await db.commit()
+            await wa_optout.persist_wa_optout(db, contact.id, prova=testo_in,
+                                              campaign_id=campaign.id)
+            await _incrementa_contatore_campagna(db, campaign.id, "opted_out")
+            logger.warning(f"[WA] {masked}: STOP arrivato nella finestra TOCTOU, "
+                           "invio annullato")
+            return EsitoInvio("opted_out", "stop_toctou")
+
+    # --- invio -------------------------------------------------------------
+    try:
+        await pom.send_text(testo)
+    except Exception as exc:
+        msg.status = WaMessageStatus.failed
+        msg.error = f"{type(exc).__name__}: {exc}"[:500]
+        await db.commit()
+        await _incrementa_fallimento(db, cc, "send_text")
+        await _incrementa_contatore_campagna(db, campaign.id, "failed")
+        logger.error(f"[WA] {masked}: invio fallito ({type(exc).__name__})")
+        return EsitoInvio("failed", "send_text")
+
+    tick = await pom.read_last_tick()
+    msg.status = WaMessageStatus.sent
+    msg.sent_at = datetime.utcnow()
+    msg.delivery_check = _delivery_da_tick(tick)
+    await db.commit()
+
+    # chat_title si impara qui, ma SOLO se e' un nome: se e' un numero,
+    # salvarlo metterebbe PII in chiaro a DB (P12, contratto §4.1).
+    await _impara_chat_title(db, pom, contact)
+
+    await wa_number_manager.record_wa_sent(db, number.id)
+    await _incrementa_contatore_campagna(db, campaign.id, "sent")
+    await _avanza_contatto(db, cc, campaign, step)
+    contact.last_contacted_at = datetime.utcnow()
+    await db.commit()
+
+    events.emit(campaign.id, "wa.message.sent",
+                f"inviato a {masked} (variante {variante}, spunta {tick})")
+    logger.info(f"[WA] {masked}: inviato, spunta={tick}")
+    return EsitoInvio("sent", "ok")
+
+
+def _delivery_da_tick(tick: str):
+    """La spunta e' testo LOCALIZZATO IN ITALIANO (SDD A4, Q39): un cliente
+    con interfaccia in altra lingua la rompe. Non e' un gate -- e'
+    best-effort e finisce solo in delivery_check."""
+    from app.models.wa import WaDeliveryCheck
+    t = (tick or "").lower()
+    if "letto" in t:
+        return WaDeliveryCheck.double_tick
+    if "consegnato" in t:
+        return WaDeliveryCheck.single_tick
+    if "orolog" in t or "attesa" in t:
+        return WaDeliveryCheck.clock
+    return WaDeliveryCheck.none
+
+
+async def _impara_chat_title(db, pom, contact) -> None:
+    """Il titolo serve al watcher di M4 per agganciare le risposte. Si
+    salva SOLO se e' un nome: title_is_number distingue i contatti non in
+    rubrica (8 su 68 misurati in M0), e per quelli il matching usa gia'
+    phone_hmac."""
+    if contact.chat_title:
+        return
+    try:
+        righe = await pom.scan_chat_list()
+    except Exception as exc:
+        logger.debug(f"chat_title non appreso ({type(exc).__name__}): non e' un errore")
+        return
+    if righe and not righe[0].title_is_number and righe[0].title:
+        contact.chat_title = righe[0].title[:200]
+        await db.commit()
+
+
+async def _incrementa_contatore_campagna(db, campaign_id: str, campo: str) -> None:
+    """UPDATE ... SET x = x + 1 in SQL (contratto §4.2). Mai leggere,
+    sommare e riscrivere: con due worker si perdono conteggi in silenzio."""
+    from sqlalchemy import update
+    from app.models.wa import WaCampaign
+    colonna = getattr(WaCampaign, campo)
+    await db.execute(update(WaCampaign).where(WaCampaign.id == campaign_id)
+                     .values({campo: colonna + 1}))
+    await db.commit()
+
+
+async def _marca_contatto(db, cc, stato, *, errore: str | None = None) -> None:
+    cc.status = stato
+    cc.last_error = errore
+    cc.next_action_at = None
+    cc.locked_by = None
+    cc.locked_at = None
+    await db.commit()
+
+
+async def _incrementa_fallimento(db, cc, motivo: str) -> None:
+    """failure_count + rinvio a 6 ore (contratto §3.3). Oltre soglia il
+    contatto diventa non-raggiungibile: e' l'unica via per cui M3 scrive un
+    DNC 'unreachable'."""
+    from datetime import timedelta
+    from app.config import settings
+    from app.models.wa import WaContactStatus, WaDncReason
+    from sqlalchemy import select
+    from app.models.wa import WaContact
+
+    cc.failure_count = (cc.failure_count or 0) + 1
+    cc.last_error = motivo[:500]
+    cc.next_action_at = datetime.utcnow() + timedelta(hours=6)
+    if cc.failure_count >= int(settings.wa_max_failures_per_contact):
+        cc.status = WaContactStatus.skipped
+        cc.next_action_at = None
+        contact = await db.scalar(select(WaContact).where(WaContact.id == cc.contact_id))
+        if contact is not None:
+            contact.do_not_contact = True
+            contact.dnc_reason = (WaDncReason.invalid_number
+                                  if motivo == "ricerca_senza_risultati"
+                                  else WaDncReason.unreachable)
+    await db.commit()
+
+
+async def _avanza_contatto(db, cc, campaign, step) -> None:
+    """Dopo un invio riuscito: current_step avanza e il contatto si chiude
+    se non ci sono altri step. In MVP c'e' solo lo step 0, quindi la strada
+    normale e' 'completed' -- ma la query sullo step successivo e' gia'
+    qui, cosi' M4 accende il multi-step senza toccare questa funzione."""
+    from datetime import timedelta
+    from sqlalchemy import select
+    from app.models.wa import WaContactStatus, WaSequenceStep
+
+    cc.current_step = step.step_index
+    prossimo = await db.scalar(
+        select(WaSequenceStep)
+        .where(WaSequenceStep.campaign_id == campaign.id,
+               WaSequenceStep.step_index == step.step_index + 1)
+    )
+    if prossimo is None:
+        cc.status = WaContactStatus.completed
+        cc.next_action_at = None
+    else:
+        cc.status = WaContactStatus.in_sequence
+        cc.next_action_at = datetime.utcnow() + timedelta(days=int(prossimo.wait_days or 0))
+    cc.locked_by = None
+    cc.locked_at = None
+    await db.commit()
+
+
+async def _esito_guardia_negativa(db, cc, contact, campaign, guardia, masked: str) -> EsitoInvio:
+    """Traduce l'esito della guardia in stato del contatto. Le tre uscite
+    non sono equivalenti: 'optout' e 'ha_risposto' sono verita' sul
+    contatto, tutto il resto e' un limite NOSTRO e lascia la riga queued."""
+    from app.models.wa import WaContactStatus
+    from app.services import wa_optout
+
+    if guardia.motivo == "optout":
+        await wa_optout.persist_wa_optout(db, contact.id, prova=guardia.prova or "",
+                                          campaign_id=campaign.id)
+        await _incrementa_contatore_campagna(db, campaign.id, "opted_out")
+        logger.warning(f"[WA] {masked}: STOP in coda, invio annullato")
+        return EsitoInvio("opted_out", "stop")
+
+    if guardia.motivo == "ha_risposto":
+        cc.status = WaContactStatus.replied
+        cc.next_action_at = None
+        cc.locked_by = None
+        cc.locked_at = None
+        await db.commit()
+        logger.info(f"[WA] {masked}: ha gia' risposto, la sequenza si ferma qui")
+        return EsitoInvio("replied", "ha_risposto")
+
+    logger.warning(f"[WA] {masked}: guardia negativa ({guardia.motivo}) -- "
+                   "il contatto resta queued, non e' colpa sua")
+    return EsitoInvio("queued", guardia.motivo)

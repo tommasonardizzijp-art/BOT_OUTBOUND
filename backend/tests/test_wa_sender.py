@@ -259,3 +259,146 @@ def test_placeholder_presente_viene_valorizzato():
     testo, _ = wa_sender.prepara_testo(
         step, _contact(attributes={"ultimo_ordine": "10/01/2026"}), _campaign())
     assert "10/01/2026" in testo and "Marco" in testo
+
+
+async def _scenario_invio(db_session, e164: str = "+393331112223"):
+    """Tenant + numero + contatto + campagna running + step 0, tutto a DB.
+    Deliberatamente locale a questo file: i test devono restare eseguibili
+    anche se factories_wa.py (M2/PR-0) cambia forma."""
+    import uuid
+    from app.models.tenant import Tenant
+    from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                               WaCampaignType, WaContact, WaContactStatus, WaNumber,
+                               WaSendCondition, WaSequenceStep)
+    from app.utils.crypto import encrypt
+    from app.utils.phone_pseudonym import hmac_phone
+
+    tenant = Tenant(id=str(uuid.uuid4()), name="T", status="active")
+    db_session.add(tenant)
+    await db_session.flush()
+    number = WaNumber(id=str(uuid.uuid4()), tenant_id=tenant.id, label="n",
+                      phone_hmac=f"n-{uuid.uuid4()}", encrypted_phone=encrypt("+390000000000"))
+    contact = WaContact(id=str(uuid.uuid4()), tenant_id=tenant.id,
+                        phone_hmac=hmac_phone(e164), encrypted_phone=encrypt(e164),
+                        display_name="Marco")
+    db_session.add_all([number, contact])
+    await db_session.flush()
+    campaign = WaCampaign(id=str(uuid.uuid4()), tenant_id=tenant.id,
+                          wa_number_id=number.id, name="c",
+                          campaign_type=WaCampaignType.marketing,
+                          status=WaCampaignStatus.running, optout_enabled=True,
+                          optout_cta="Scrivi STOP per non ricevere piu' messaggi.")
+    db_session.add(campaign)
+    await db_session.flush()
+    step = WaSequenceStep(id=str(uuid.uuid4()), campaign_id=campaign.id, step_index=0,
+                          template_a="Ciao {nome}, promo attiva.",
+                          send_condition=WaSendCondition.always, wait_days=0)
+    cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id,
+                           contact_id=contact.id, status=WaContactStatus.queued,
+                           current_step=-1)
+    db_session.add_all([step, cc])
+    await db_session.commit()
+    return {"tenant": tenant, "number": number, "contact": contact,
+            "campaign": campaign, "step": step, "cc": cc}
+
+
+_NON_PASSATO = object()  # sentinella: distingue "non passato" (usa tail) da
+                          # "passato esplicitamente None" (simula cecita').
+
+
+class _PomInvio(_PomFinto):
+    """Estende il doppio con il composer: registra cosa e' stato digitato e
+    permette di far comparire uno STOP TRA la guardia e l'invio."""
+    def __init__(self, tail, *, tail_seconda_lettura=_NON_PASSATO, **kw):
+        super().__init__(tail, **kw)
+        self._tail_seconda = tail if tail_seconda_lettura is _NON_PASSATO else tail_seconda_lettura
+        self._letture = 0
+        self.inviato = None
+        self.tick = "Consegnato"
+
+    async def read_inbound_tail(self, n: int = 40):
+        self._letture += 1
+        return self._tail if self._letture == 1 else self._tail_seconda
+
+    async def open_chat(self, e164: str):
+        from app.browser.whatsapp_page import OpenResult
+        return OpenResult(True, 100.0, "cronologia:div[data-id]:30")
+
+    async def send_text(self, text: str):
+        self.inviato = text
+
+    async def read_last_tick(self):
+        return self.tick
+
+
+@pytest.mark.asyncio
+async def test_stop_arrivato_nella_finestra_toctou_annulla_l_invio(db_session, monkeypatch):
+    """La guardia non aveva visto nulla; nei 20 secondi successivi arriva
+    STOP. La seconda lettura lo intercetta e il messaggio NON parte."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    pom = _PomInvio([], tail_seconda_lettura=["STOP"])
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert pom.inviato is None
+    assert esito.stato == "opted_out"
+
+
+@pytest.mark.asyncio
+async def test_cecita_nella_seconda_lettura_annulla_l_invio(db_session, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    pom = _PomInvio([], tail_seconda_lettura=None)
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    assert pom.inviato is None
+    assert esito.stato == "queued"      # colpa nostra: il contatto non si brucia
+
+
+@pytest.mark.asyncio
+async def test_invio_riuscito_scrive_messaggio_stato_e_contatori(db_session, monkeypatch):
+    from app.config import settings
+    from sqlalchemy import select
+    from app.models.wa import WaMessage, WaMessageStatus, WaContactStatus
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    pom = _PomInvio([])
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert esito.stato == "sent"
+    assert pom.inviato is not None and "STOP" in pom.inviato   # CTA step 0
+    msg = await db_session.scalar(select(WaMessage).where(
+        WaMessage.contact_id == ctx["contact"].id))
+    assert msg.status == WaMessageStatus.sent
+    assert msg.delivery_check is not None
+    assert msg.rendered_text == pom.inviato
+    await db_session.refresh(ctx["cc"])
+    assert ctx["cc"].status == WaContactStatus.completed   # MVP: 1 solo step
+    assert ctx["cc"].current_step == 0
+    await db_session.refresh(ctx["campaign"])
+    assert ctx["campaign"].sent == 1
+    await db_session.refresh(ctx["number"])
+    assert ctx["number"].sent_today == 1
+
+
+@pytest.mark.asyncio
+async def test_il_numero_in_chiaro_non_finisce_mai_nei_log(db_session, monkeypatch, caplog):
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session, e164="+393421460077")
+    pom = _PomInvio([])
+    with caplog.at_level("DEBUG"):
+        await wa_sender.invia_a_contatto(
+            db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+            contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    assert "+393421460077" not in caplog.text
+    assert "3421460077" not in caplog.text
