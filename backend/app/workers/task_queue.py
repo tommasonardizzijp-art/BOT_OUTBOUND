@@ -375,7 +375,10 @@ class WorkerSettings:
         func(browser_bio_account_task, max_tries=10000),
         # Fan-out risoluzione import via browser: stessa disciplina defer del bio browser.
         func(browser_import_account_task, max_tries=10000),
-        wa_send_task,
+        # wa_send_task rischedula via Retry(defer) fra mini-sessioni (Fix A,
+        # review finale round 2): ogni break e' un "try" agli occhi di ARQ,
+        # il default 5 fermerebbe un numero attivo dopo poche ore.
+        func(wa_send_task, max_tries=10000),
     ]
     cron_jobs = []
     queue_name = ARQ_MAIN_QUEUE

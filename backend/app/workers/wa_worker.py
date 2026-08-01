@@ -327,24 +327,27 @@ async def _campagna_attiva_del_numero(number_id: str):
         )
 
 
-async def _rischedula(number_id: str, *, defer_seconds: int) -> None:
-    """Rimette in coda wa_send_task sullo stesso numero dopo il break: la
-    pausa fra mini-sessioni non si fa dormendo dentro il job (lezione
-    job_timeout della Fase Bio), si fa rischedulando su ARQ."""
-    redis = await arq.create_pool(arq_redis_settings())
-    try:
-        await redis.enqueue_job("wa_send_task", number_id,
-                                _job_id=wa_send_job_id(number_id),
-                                _defer_by=defer_seconds)
-    finally:
-        await redis.aclose()
-
-
 async def wa_send_task(ctx: dict, number_id: str) -> None:
     """Task ARQ. Esce SEMPRE presto: la pausa fra mini-sessioni non si fa
     dormendo dentro il job (lezione job_timeout della Fase Bio), si fa
-    rischedulando."""
+    rischedulando.
+
+    La rischedulazione e' un `Retry(defer=...)` sollevato da QUESTA
+    invocazione, non un `enqueue_job` con lo stesso `_job_id` chiamato da
+    dentro il job ancora in esecuzione (bug review finale, round 2): la
+    chiave Redis `arq:job:{job_id}` resta viva fino a `finish_job`, che gira
+    DOPO il return della coroutine, quindi un `enqueue_job` con lo stesso id
+    fatto da qui dentro trova la chiave gia' presente e ARQ lo scarta in
+    silenzio come duplicato (`None`, nessuna eccezione) -- il numero manda
+    una mini-sessione e poi non invia mai piu' finche' un umano non richiama
+    enqueue_wa_workers a mano. `Retry` sidesteppa il problema: non chiama
+    enqueue_job, fa rischedulare il job CORRENTE al worker ARQ dopo che la
+    coroutine e' uscita (stesso calco di browser_bio.py dichiarato nel
+    docstring del modulo, vedi browser_bio_account_task in task_queue.py).
+    Richiede max_tries alto in WorkerSettings: ogni break e' un "try" agli
+    occhi di ARQ."""
     from arq.jobs import Job          # noqa: F401  (documenta la dipendenza)
+    from arq.worker import Retry
     from app.services import wa_timing
 
     esito = await esegui_mini_sessione(number_id)
@@ -358,7 +361,7 @@ async def wa_send_task(ctx: dict, number_id: str) -> None:
     # cap_esaurito / fuori_finestra / completata -> si riprende dopo il break.
     break_s = wa_timing.wa_session_break_seconds(
         await _campagna_attiva_del_numero(number_id))
-    await _rischedula(number_id, defer_seconds=int(break_s))
+    raise Retry(defer=int(break_s))
 
 
 async def enqueue_wa_workers(campaign_id: str) -> int:

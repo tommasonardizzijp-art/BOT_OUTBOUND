@@ -427,8 +427,16 @@ async def test_17_fuori_finestra_rilascia_il_lock(db_session, monkeypatch):
 @pytest.mark.asyncio
 async def test_18_wa_send_task_rischedula_con_il_break_non_subito(db_session, monkeypatch):
     """QA item 18: dopo un'uscita per cap/finestra/completamento, wa_send_task
-    rischedula con il break (minuti), non con un retry immediato."""
-    catturato = {}
+    rischedula con il break (minuti) via Retry(defer=...), non con un retry
+    immediato.
+
+    NON piu' _rischedula/enqueue_job (Fix A, review finale round 2): un
+    enqueue_job con lo stesso _job_id chiamato da DENTRO il job ancora in
+    esecuzione viene scartato in silenzio da ARQ (dedup sulla chiave
+    arq:job:{job_id}, cancellata solo dopo il return della coroutine) -- il
+    numero mandava una mini-sessione e basta. Retry evita enqueue_job del
+    tutto: e' il worker ARQ a rimettere in coda lo stesso job dopo l'uscita."""
+    from arq.worker import Retry
 
     async def _fake_mini(number_id):
         return {"inviati": 0, "falliti": 0, "saltati": 0, "motivo": "cap_esaurito"}
@@ -439,30 +447,19 @@ async def test_18_wa_send_task_rischedula_con_il_break_non_subito(db_session, mo
     monkeypatch.setattr(wa_worker, "_campagna_attiva_del_numero", _fake_campagna)
     monkeypatch.setattr(wa_worker.wa_timing, "wa_session_break_seconds", lambda c: 1234.0)
 
-    async def _fake_rischedula(number_id, *, defer_seconds):
-        catturato["number_id"] = number_id
-        catturato["defer_seconds"] = defer_seconds
-    monkeypatch.setattr(wa_worker, "_rischedula", _fake_rischedula)
-
-    await wa_worker.wa_send_task({}, "num-x")
-    assert catturato == {"number_id": "num-x", "defer_seconds": 1234}
+    with pytest.raises(Retry) as exc_info:
+        await wa_worker.wa_send_task({}, "num-x")
+    assert exc_info.value.defer_score == 1234000   # ms
 
 
 @pytest.mark.asyncio
 async def test_18b_wa_send_task_non_rischedula_su_motivi_terminali(db_session, monkeypatch):
-    chiamato = {"n": 0}
-
-    async def _fake_rischedula(number_id, *, defer_seconds):
-        chiamato["n"] += 1
-    monkeypatch.setattr(wa_worker, "_rischedula", _fake_rischedula)
-
     for motivo in ("send_disabled", "wa_halted", "numero_non_attivo",
                    "guasti_consecutivi", "niente_da_fare"):
         async def _fake_mini(number_id, _m=motivo):
             return {"motivo": _m}
         monkeypatch.setattr(wa_worker, "esegui_mini_sessione", _fake_mini)
-        await wa_worker.wa_send_task({}, "num-x")
-    assert chiamato["n"] == 0
+        await wa_worker.wa_send_task({}, "num-x")   # non deve sollevare Retry
 
 
 @pytest.mark.asyncio
@@ -633,6 +630,79 @@ async def test_d20_due_enqueue_job_stesso_job_id_arq_scarta_il_duplicato(db_sess
         await redis.zrem("arq:queue", job_id)
         await redis.delete(f"arq:job:{job_id}")
     finally:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fix_a_retry_rischedula_dove_enqueue_job_verrebbe_scartato(
+        db_session, monkeypatch, _redis_o_skip):
+    """Fix A (review finale round 2), prova empirica contro Redis vero --
+    non mock di _rischedula, che e' esattamente perche' il bug era passato
+    inosservato nei test 18/18b prima di questo fix.
+
+    Parte 1 riproduce il bug ORIGINALE per prova diretta: un enqueue_job
+    manuale con lo stesso _job_id di un job la cui chiave arq:job:{job_id} e'
+    ancora viva (qui simulata dal primo enqueue, che scrive quella chiave)
+    torna None -- ARQ lo scarta in silenzio come duplicato, nessuna
+    eccezione. E' esattamente quello che faceva _rischedula chiamata da
+    dentro wa_send_task ancora in esecuzione (la chiave del job CORRENTE non
+    e' ancora stata ripulita da finish_job, che gira solo dopo il return
+    della coroutine).
+
+    Parte 2 prova che il fix elimina il problema alla radice: si fa girare
+    wa_send_task DAVVERO attraverso arq.worker.Worker.run_job (non la
+    coroutine nuda chiamata a mano) sullo STESSO job_id/stessa chiave viva
+    di sopra, con un motivo non terminale -- e si verifica via l'API di
+    stato ARQ reale (Job.status()) che il job e' 'deferred' (rischedulato
+    con score futuro, non fallito ne' droppato) e che la sua chiave
+    arq:job:{job_id} e' ancora presente: la rischedulazione e' riuscita
+    SENZA passare da enqueue_job, quindi il dedup della Parte 1 non si
+    presenta mai."""
+    import time
+    import arq
+    from arq.jobs import Job, JobStatus
+    from arq.worker import Worker, func
+    from app.services.work_enqueue import arq_redis_settings, ARQ_MAIN_QUEUE
+
+    job_id = f"wa:send:test-fix-a-{uuid.uuid4().hex[:8]}"
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        # --- Parte 1: riproduce il bug originale ---
+        job1 = await redis.enqueue_job("wa_send_task", "fake-number-id", _job_id=job_id)
+        assert job1 is not None   # il primo enqueue riesce, scrive arq:job:{job_id}
+
+        job2 = await redis.enqueue_job("wa_send_task", "fake-number-id", _job_id=job_id)
+        assert job2 is None   # dedup silenzioso: ARQ non riaccoda, nessuna eccezione
+
+        # --- Parte 2: il fix (Retry) rischedula lo STESSO job senza mai
+        # chiamare enqueue_job, quindi il dedup di sopra non si presenta ---
+        async def _fake_mini(number_id):
+            return {"inviati": 1, "falliti": 0, "saltati": 0, "motivo": "cap_esaurito"}
+        monkeypatch.setattr(wa_worker, "esegui_mini_sessione", _fake_mini)
+
+        async def _fake_campagna(number_id):
+            return None
+        monkeypatch.setattr(wa_worker, "_campagna_attiva_del_numero", _fake_campagna)
+        monkeypatch.setattr(wa_worker.wa_timing, "wa_session_break_seconds", lambda c: 5.0)
+
+        worker = Worker(
+            functions=[func(wa_worker.wa_send_task, name="wa_send_task", max_tries=10000)],
+            redis_pool=redis,
+            queue_name=ARQ_MAIN_QUEUE,
+            handle_signals=False,
+        )
+        score = int(time.time() * 1000)
+        await worker.run_job(job_id, score)
+
+        status = await Job(job_id, redis, _queue_name=ARQ_MAIN_QUEUE).status()
+        assert status == JobStatus.deferred   # rischedulato, non fallito/droppato
+
+        ancora_viva = await redis.exists(f"arq:job:{job_id}")
+        assert ancora_viva == 1   # la chiave dell'esecuzione corrente non e' stata cancellata
+    finally:
+        await redis.zrem(ARQ_MAIN_QUEUE, job_id)
+        await redis.delete(f"arq:job:{job_id}", f"arq:result:{job_id}",
+                           f"arq:in-progress:{job_id}", f"arq:retry:{job_id}")
         await redis.aclose()
 
 

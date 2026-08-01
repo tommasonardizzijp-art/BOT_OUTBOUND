@@ -86,28 +86,21 @@ async def test_recover_wa_sending_riporta_a_queued_i_messaggi_appesi(db_session)
     assert ctx["cc"].locked_by is None
 
 
-class _FakeRedisEnqueue:
-    """Stesso fake minimale di test_wa_number_manager.test_apply_and_release_wa_cooldown:
-    registra la enqueue_job invece di aprire un pool Redis vero."""
-    def __init__(self, calls):
-        self._calls = calls
-
-    async def enqueue_job(self, task, *args, **kwargs):
-        self._calls["task"] = task
-        self._calls["args"] = args
-        self._calls["kwargs"] = kwargs
-        return object()   # job non-None: enqueue_wa_workers lo conta come riuscito
-
-    async def aclose(self):
-        pass
-
-
 @pytest.mark.asyncio
 async def test_wa_send_task_rischedula_dopo_il_break_su_motivo_non_terminale(monkeypatch):
     """cap_esaurito / fuori_finestra / completata -> si riprende dopo il
     break: non e' un motivo che chiude la sessione (contrario ai motivi
-    testati sotto), quindi wa_send_task deve rimettersi in coda da solo
-    sullo STESSO job_id (FM11) col defer del break."""
+    testati sotto), quindi wa_send_task deve sollevare Retry(defer=...) col
+    defer del break (FM11 -- ARQ rischedula lo STESSO job dopo che questa
+    invocazione e' uscita).
+
+    NON piu' un enqueue_job manuale con lo stesso _job_id (Fix A, review
+    finale round 2): chiamato da dentro il job ancora in esecuzione,
+    tornerebbe None in silenzio -- la chiave arq:job:{job_id} scritta
+    all'enqueue originale resta viva fino a finish_job, che gira DOPO il
+    return di questa coroutine, quindi ARQ vede il job "gia' in coda" e
+    scarta il duplicato. Retry evita il problema: non chiama enqueue_job."""
+    from arq.worker import Retry
     from app.workers import wa_worker
 
     async def _fake_mini_sessione(number_id):
@@ -115,25 +108,17 @@ async def test_wa_send_task_rischedula_dopo_il_break_su_motivo_non_terminale(mon
     monkeypatch.setattr(wa_worker, "esegui_mini_sessione", _fake_mini_sessione)
     monkeypatch.setattr(wa_worker.wa_timing, "wa_session_break_seconds", lambda campaign: 42.0)
 
-    calls = {}
-    async def _fake_pool(*a, **kw):
-        return _FakeRedisEnqueue(calls)
-    monkeypatch.setattr(wa_worker.arq, "create_pool", _fake_pool)
-
-    await wa_worker.wa_send_task({}, "num-1")
-
-    assert calls["task"] == "wa_send_task"
-    assert calls["args"] == ("num-1",)
-    assert calls["kwargs"]["_job_id"] == wa_worker.wa_send_job_id("num-1")
-    assert calls["kwargs"]["_defer_by"] == 42
+    with pytest.raises(Retry) as exc_info:
+        await wa_worker.wa_send_task({}, "num-1")
+    assert exc_info.value.defer_score == 42000   # ms
 
 
 @pytest.mark.asyncio
 async def test_wa_send_task_non_rischedula_su_motivo_terminale(monkeypatch):
     """send_disabled / wa_halted / numero_non_attivo / guasti_consecutivi /
-    niente_da_fare -> la sessione si chiude e basta: rimettersi in coda
-    subito significherebbe ririprovare un kill-switch attivo o un numero
-    fermato per guasto, ignorando il motivo per cui si e' fermato."""
+    niente_da_fare -> la sessione si chiude e basta: nessun Retry, altrimenti
+    si ririproverebbe un kill-switch attivo o un numero fermato per guasto,
+    ignorando il motivo per cui si e' fermato."""
     from app.workers import wa_worker
 
     async def _fake_mini_sessione(number_id):
@@ -146,5 +131,5 @@ async def test_wa_send_task_non_rischedula_su_motivo_terminale(monkeypatch):
         raise AssertionError("non deve aprire un pool Redis su motivo terminale")
     monkeypatch.setattr(wa_worker.arq, "create_pool", _fake_pool)
 
-    await wa_worker.wa_send_task({}, "num-1")
+    await wa_worker.wa_send_task({}, "num-1")   # non deve sollevare Retry
     assert chiamato["si"] is False
