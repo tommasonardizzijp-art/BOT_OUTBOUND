@@ -715,3 +715,82 @@ async def test_l48_null_byte_scritto_e_riletto_da_sqlite_senza_rompere(db_sessio
     msg = await db_session.scalar(
         select(WaMessage).where(WaMessage.contact_id == ctx["contact"].id))
     assert "test" in msg.rendered_text and "fine" in msg.rendered_text
+
+
+# ---------------------------------------------------------------------------
+# Decisione 2 (Tommaso, round1 post-review): il discriminatore §3.3 non e'
+# implementato stanotte -- resta un contatore semplice. In compenso, quando
+# quel contatore fa scattare la DNC 'invalid_number' via il percorso
+# ambiguo "ricerca_senza_risultati", un alert Telegram avvisa un umano cosi'
+# puo' controllare nel tempo se e' un bug reale o un vero non-raggiungibile.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_soglia_ricerca_senza_risultati_avvisa_telegram(db_session, monkeypatch):
+    from app.config import settings
+    from app.models.wa import WaContact, WaDncReason
+    from app.services import notifier
+
+    ctx = await _scenario_invio(db_session)
+    ctx["cc"].failure_count = int(settings.wa_max_failures_per_contact) - 1
+    await db_session.commit()
+
+    chiamate = []
+    async def _fake_send(message, level="info", **kw):
+        chiamate.append((message, level))
+    monkeypatch.setattr(notifier, "send_telegram", _fake_send)
+
+    await wa_sender._incrementa_fallimento(db_session, ctx["cc"], "ricerca_senza_risultati")
+
+    await db_session.refresh(ctx["contact"])
+    assert ctx["contact"].dnc_reason == WaDncReason.invalid_number
+    assert len(chiamate) == 1
+    message, level = chiamate[0]
+    assert message.startswith("WhatsApp: ")
+    assert ctx["contact"].id[:8] in message      # id opaco, non il numero
+    e164 = "+393331112223"
+    assert e164 not in message and e164.lstrip("+") not in message
+
+
+@pytest.mark.asyncio
+async def test_soglia_altri_motivi_non_avvisano_telegram(db_session, monkeypatch):
+    """L'alert e' specifico del percorso ambiguo 'ricerca_senza_risultati':
+    altre cause di DNC (es. render fallito ripetuto) non devono generare
+    rumore Telegram, non sono la stessa incertezza."""
+    from app.config import settings
+    from app.services import notifier
+
+    ctx = await _scenario_invio(db_session)
+    ctx["cc"].failure_count = int(settings.wa_max_failures_per_contact) - 1
+    await db_session.commit()
+
+    chiamate = []
+    async def _fake_send(message, level="info", **kw):
+        chiamate.append((message, level))
+    monkeypatch.setattr(notifier, "send_telegram", _fake_send)
+
+    await wa_sender._incrementa_fallimento(db_session, ctx["cc"], "render:ValueError")
+
+    assert chiamate == []
+
+
+@pytest.mark.asyncio
+async def test_ricerca_senza_risultati_sotto_soglia_non_avvisa(db_session, monkeypatch):
+    """Il contatore sale ma non arriva ancora alla soglia DNC: nessun
+    alert, non c'e' ancora nessuna decisione ambigua presa sul contatto."""
+    from app.config import settings
+    from app.services import notifier
+
+    ctx = await _scenario_invio(db_session)
+    ctx["cc"].failure_count = 0
+    await db_session.commit()
+    assert int(settings.wa_max_failures_per_contact) > 1   # precondizione del test
+
+    chiamate = []
+    async def _fake_send(message, level="info", **kw):
+        chiamate.append((message, level))
+    monkeypatch.setattr(notifier, "send_telegram", _fake_send)
+
+    await wa_sender._incrementa_fallimento(db_session, ctx["cc"], "ricerca_senza_risultati")
+
+    assert chiamate == []

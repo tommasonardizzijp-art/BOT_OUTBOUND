@@ -390,26 +390,45 @@ async def _marca_contatto(db, cc, stato, *, errore: str | None = None) -> None:
 async def _incrementa_fallimento(db, cc, motivo: str) -> None:
     """failure_count + rinvio a 6 ore (contratto §3.3). Oltre soglia il
     contatto diventa non-raggiungibile: e' l'unica via per cui M3 scrive un
-    DNC 'unreachable'."""
+    DNC 'unreachable'.
+
+    Il discriminatore del contratto §3.3 (2 tentativi in sessioni diverse +
+    altri contatti aperti con successo, prima di concludere "non esiste su
+    WhatsApp") NON e' implementato: questo resta un contatore semplice a
+    soglia. Decisione di Tommaso (round1 post-review, non build-tonight):
+    quando la soglia scatta specificamente per 'ricerca_senza_risultati'
+    (l'unico percorso ambiguo -- gli altri motivi sono guasti nostri gia'
+    accertati) si avvisa un umano via Telegram, cosi' puo' rivedere questi
+    casi nel tempo e distinguere un bug reale da un vero non-raggiungibile."""
     from datetime import timedelta
     from app.config import settings
     from app.models.wa import WaContactStatus, WaDncReason
+    from app.services import notifier
     from sqlalchemy import select
     from app.models.wa import WaContact
 
     cc.failure_count = (cc.failure_count or 0) + 1
     cc.last_error = motivo[:500]
     cc.next_action_at = datetime.utcnow() + timedelta(hours=6)
+    dnc_ambiguo = False
     if cc.failure_count >= int(settings.wa_max_failures_per_contact):
         cc.status = WaContactStatus.skipped
         cc.next_action_at = None
         contact = await db.scalar(select(WaContact).where(WaContact.id == cc.contact_id))
         if contact is not None:
             contact.do_not_contact = True
-            contact.dnc_reason = (WaDncReason.invalid_number
-                                  if motivo == "ricerca_senza_risultati"
+            dnc_ambiguo = motivo == "ricerca_senza_risultati"
+            contact.dnc_reason = (WaDncReason.invalid_number if dnc_ambiguo
                                   else WaDncReason.unreachable)
     await db.commit()
+
+    if dnc_ambiguo:
+        await notifier.send_telegram(
+            f"WhatsApp: contatto {cc.contact_id[:8]} marcato non raggiungibile "
+            f"dopo {cc.failure_count} ricerche senza risultati -- discriminatore "
+            "§3.3 non implementato, verifica manuale consigliata (potrebbe essere "
+            "un bug, non un vero non-raggiungibile).",
+            level="warning")
 
 
 async def _avanza_contatto(db, cc, campaign, step) -> None:
