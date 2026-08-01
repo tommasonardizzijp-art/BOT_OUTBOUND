@@ -75,6 +75,7 @@ def _init_test_db():
     from app.config import settings
     from app.database import Base
     from app.utils.db_dialect import to_async_database_url
+    import app.models  # noqa: F401 - registra tutti i modelli in Base
 
     async def _create():
         eng = create_async_engine(to_async_database_url(settings.database_url))
