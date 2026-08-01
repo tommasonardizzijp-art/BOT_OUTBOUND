@@ -284,6 +284,202 @@ async def test_adv43_resume_senza_halt_precedente_e_no_op_pulito(client_real_db)
 
 
 @pytest.mark.asyncio
+async def test_resume_campagna_paused_rimette_running_e_accoda(db_session, monkeypatch):
+    """Caso principale: campagna paused (es. dal cron wa_session_healthcheck)
+    torna running e il worker viene riaccodato."""
+    from app.api import wa_ops
+    from app.models.wa import WaCampaignStatus
+
+    ctx = await _scenario_claim(db_session)
+    ctx["campaign"].status = WaCampaignStatus.paused
+    await db_session.commit()
+
+    accodati = {"n": 0}
+
+    async def _fake_enqueue(campaign_id):
+        accodati["n"] += 1
+        return 1
+    monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
+
+    esito = await wa_ops.resume_campaign(ctx["campaign"].id, db=db_session)
+    assert esito == {"resumed": True, "accodati": 1}
+    assert accodati["n"] == 1
+
+    await db_session.refresh(ctx["campaign"])
+    assert ctx["campaign"].status == WaCampaignStatus.running
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stato", ["draft", "running", "completed", "stopped", "error"])
+async def test_resume_campagna_non_paused_non_tocca_nulla(db_session, monkeypatch, stato):
+    """Su qualunque stato diverso da paused, resume e' un no-op idempotente:
+    non scrive lo stato e non accoda nulla."""
+    from app.api import wa_ops
+    from app.models.wa import WaCampaignStatus
+
+    ctx = await _scenario_claim(db_session)
+    stato_enum = WaCampaignStatus(stato)
+    ctx["campaign"].status = stato_enum
+    await db_session.commit()
+
+    accodati = {"n": 0}
+
+    async def _fake_enqueue(campaign_id):
+        accodati["n"] += 1
+        return 1
+    monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
+
+    esito = await wa_ops.resume_campaign(ctx["campaign"].id, db=db_session)
+    assert esito == {"resumed": False,
+                     "motivo": f"campagna in stato {stato}, non paused"}
+    assert accodati["n"] == 0
+
+    await db_session.refresh(ctx["campaign"])
+    assert ctx["campaign"].status == stato_enum
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stato_numero", ["qr_required", "cooldown", "suspended", "retired"])
+async def test_resume_campagna_paused_con_numero_non_active_non_flippa(db_session, monkeypatch, stato_numero):
+    """Review finale (Major): il caso reale di pausa e' quasi sempre
+    sessione WhatsApp caduta -> numero non-active. Se il resume flippasse
+    comunque la campagna a running, produrrebbe una campagna 'running'
+    fantasma senza job attivo (il worker rifiuta l'invio su numero
+    non-active e non ri-schedula). Deve rifiutarsi, non solo il worker a
+    valle."""
+    from app.api import wa_ops
+    from app.models.wa import WaCampaignStatus, WaNumberStatus
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant, status=WaNumberStatus(stato_numero))
+    campaign, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.paused)
+    await db_session.commit()
+
+    accodati = {"n": 0}
+
+    async def _fake_enqueue(campaign_id):
+        accodati["n"] += 1
+        return 1
+    monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
+
+    esito = await wa_ops.resume_campaign(campaign.id, db=db_session)
+    assert esito == {"resumed": False, "motivo": f"numero in stato {stato_numero}, non active"}
+    assert accodati["n"] == 0
+
+    await db_session.refresh(campaign)
+    assert campaign.status == WaCampaignStatus.paused
+
+
+@pytest.mark.asyncio
+async def test_resume_campagna_paused_enqueue_fallisce_non_perde_lo_stato(db_session, monkeypatch):
+    """Review finale (Major): db.commit() dello stato avviene prima
+    dell'enqueue fallibile su Redis. Se Redis e' giu' in quel momento,
+    l'eccezione non deve risalire come 500: lo stato e' gia' scritto (non
+    e' un problema di sicurezza, la campagna resta comunque 'ferma' finche'
+    nessun job la muove), la risposta deve dirlo onestamente invece di
+    fingere un errore totale."""
+    from app.api import wa_ops
+    from app.models.wa import WaCampaignStatus
+
+    ctx = await _scenario_claim(db_session)
+    ctx["campaign"].status = WaCampaignStatus.paused
+    await db_session.commit()
+
+    async def _fake_enqueue_boom(campaign_id):
+        raise ConnectionError("redis giu'")
+    monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue_boom)
+
+    esito = await wa_ops.resume_campaign(ctx["campaign"].id, db=db_session)
+    assert esito["resumed"] is True
+    assert esito["accodati"] == 0
+    assert "redis giu'" in esito["errore_accodamento"]
+
+    await db_session.refresh(ctx["campaign"])
+    assert ctx["campaign"].status == WaCampaignStatus.running
+
+
+@pytest.mark.asyncio
+async def test_resume_campaign_id_inesistente_torna_404(db_session):
+    """Stesso pattern esatto di kick: mai un 500 da un NoneType a valle."""
+    import uuid
+    from fastapi import HTTPException
+    from app.api import wa_ops
+
+    with pytest.raises(HTTPException) as exc:
+        await wa_ops.resume_campaign(str(uuid.uuid4()), db=db_session)
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "campagna inesistente"
+
+
+@pytest.mark.asyncio
+async def test_resume_due_volte_di_fila_e_idempotente(db_session, monkeypatch):
+    """Adversarial: due resume in sequenza sulla stessa campagna. Il primo
+    la fa ripartire e accoda; il secondo la trova gia' running e si
+    comporta come il ramo non-paused (resumed False, nessun secondo
+    accodamento) -- niente doppio riavvio di un worker gia' vivo."""
+    from app.api import wa_ops
+    from app.models.wa import WaCampaignStatus
+
+    ctx = await _scenario_claim(db_session)
+    ctx["campaign"].status = WaCampaignStatus.paused
+    await db_session.commit()
+
+    accodati = {"n": 0}
+
+    async def _fake_enqueue(campaign_id):
+        accodati["n"] += 1
+        return 1
+    monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
+
+    primo = await wa_ops.resume_campaign(ctx["campaign"].id, db=db_session)
+    assert primo == {"resumed": True, "accodati": 1}
+    assert accodati["n"] == 1
+
+    secondo = await wa_ops.resume_campaign(ctx["campaign"].id, db=db_session)
+    assert secondo == {"resumed": False, "motivo": "campagna in stato running, non paused"}
+    assert accodati["n"] == 1   # non e' salito: nessun secondo accodamento
+
+
+@pytest.mark.asyncio
+async def test_adv_resume_id_inesistente_via_http_e_404_pulito(client_real_db):
+    import uuid
+    r = await client_real_db.post(f"/api/wa/ops/campaigns/{uuid.uuid4()}/resume")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "campagna inesistente"
+
+
+@pytest.mark.asyncio
+async def test_adv_resume_via_http_reale_persiste_a_db(client_real_db, monkeypatch):
+    """Roundtrip API vero (get_db non overridden, sessione reale come
+    client_real_db): verifica che lo stato scritto sopravviva oltre la
+    request, non solo nella sessione della response."""
+    from app.database import AsyncSessionLocal
+    from app.models.wa import WaCampaignStatus
+    from app.api import wa_ops
+
+    async def _fake_enqueue(campaign_id):
+        return 1
+    monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
+
+    async with AsyncSessionLocal() as db:
+        ctx = await _scenario_claim(db)
+        ctx["campaign"].status = WaCampaignStatus.paused
+        await db.commit()
+        campaign_id = ctx["campaign"].id
+
+    r = await client_real_db.post(f"/api/wa/ops/campaigns/{campaign_id}/resume")
+    assert r.status_code == 200
+    assert r.json() == {"resumed": True, "accodati": 1}
+
+    async with AsyncSessionLocal() as db_check:
+        from sqlalchemy import select
+        from app.models.wa import WaCampaign
+        camp = await db_check.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
+        assert camp.status == WaCampaignStatus.running
+
+
+@pytest.mark.asyncio
 async def test_adv44_status_letto_mentre_halt_e_resume_girano_concorrenti(client_real_db):
     """PASS = nessun 500 su nessuna delle tre, e /status non torna mai un
     valore che non corrisponde a NESSUno stato effettivamente scritto."""
