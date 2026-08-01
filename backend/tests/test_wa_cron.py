@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timedelta
 
 import pytest
+import pytest_asyncio
 
 
 async def _scenario_claim(db_session, e164: str = "+393331112223", contatti: int = 1):
@@ -220,3 +221,57 @@ def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():
                    "recover_sending", "telegram_commands"):
         assert atteso in nomi, f"{atteso} sparita dai cron IG"
     assert "wa_session_healthcheck" in nomi
+
+
+@pytest_asyncio.fixture
+async def _redis_o_skip():
+    """Redis reale e' un requisito duro per questo test: se non e'
+    raggiungibile (es. CI senza servizio Redis), skip esplicito con motivo
+    chiaro invece di un rosso che sembra una regressione. Duplicata da
+    test_wa_worker.py/test_wa_ops_api.py (conftest.py e' congelato, §8.1)."""
+    import arq
+    from app.services.work_enqueue import arq_redis_settings
+    try:
+        pool = await arq.create_pool(arq_redis_settings())
+        await pool.ping()
+        await pool.aclose()
+    except Exception as exc:
+        pytest.skip(f"Redis non raggiungibile, test saltato: {type(exc).__name__}: {exc}")
+
+
+@pytest.mark.asyncio
+async def test_fix_c_wa_send_job_is_active_vero_contro_redis_reale(_redis_o_skip):
+    """Fix 1 (review finale round 1, Critical C1) era testato SOLO
+    mockando _wa_send_job_is_active stessa (monkeypatch.setattr(cron_worker,
+    "_wa_send_job_is_active", ...) nei due test sopra) -- zero garanzia che
+    l'implementazione REALE interroghi Redis/ARQ correttamente. Se avesse un
+    bug (nome funzione sbagliato, JobStatus confrontato male, queue_name
+    sbagliato), il test-suite non se ne accorgerebbe: il fake la sostituisce
+    del tutto.
+
+    Qui si enqueua un vero wa_send_task su Redis vero con _job_id reale
+    (wa_send_job_id) e si chiama la funzione REALE (non mockata): un numero
+    con job queued deve risultare attivo, uno mai enqueuato no."""
+    import arq
+    from app.services.work_enqueue import arq_redis_settings, ARQ_MAIN_QUEUE
+    from app.workers import cron_worker
+    from app.workers.wa_worker import wa_send_job_id
+
+    number_id_attivo = f"test-fix-c-attivo-{uuid.uuid4().hex[:8]}"
+    number_id_libero = f"test-fix-c-libero-{uuid.uuid4().hex[:8]}"
+    job_id = wa_send_job_id(number_id_attivo)
+
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        job = await redis.enqueue_job("wa_send_task", number_id_attivo, _job_id=job_id)
+        assert job is not None   # sanity: l'enqueue e' riuscito
+
+        attivo = await cron_worker._wa_send_job_is_active(redis, number_id_attivo)
+        assert attivo is True
+
+        libero = await cron_worker._wa_send_job_is_active(redis, number_id_libero)
+        assert libero is False
+    finally:
+        await redis.zrem(ARQ_MAIN_QUEUE, job_id)
+        await redis.delete(f"arq:job:{job_id}")
+        await redis.aclose()
