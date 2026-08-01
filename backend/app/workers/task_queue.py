@@ -7,6 +7,7 @@ from app.workers.bio_worker import scrape_bios_task
 from app.workers.message_worker import run_campaign_task
 from app.workers.import_worker import resolve_imports_task
 from app.workers.lead_qualification_worker import qualify_leads_task
+from app.workers.wa_worker import wa_send_task
 
 
 async def pre_generate_messages_task(ctx: dict, campaign_id: str) -> None:
@@ -374,6 +375,7 @@ class WorkerSettings:
         func(browser_bio_account_task, max_tries=10000),
         # Fan-out risoluzione import via browser: stessa disciplina defer del bio browser.
         func(browser_import_account_task, max_tries=10000),
+        wa_send_task,
     ]
     cron_jobs = []
     queue_name = ARQ_MAIN_QUEUE

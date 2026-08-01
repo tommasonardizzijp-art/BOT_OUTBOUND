@@ -270,3 +270,116 @@ async def _ferma_numero_per_guasto(db, number_id: str, campaign_id: str, n: int)
         f"WhatsApp: numero fermato dopo {n} guasti consecutivi "
         f"(probabile DOM cambiato). Campagna in error, contatti NON bruciati.",
         level="error")
+
+
+def wa_send_job_id(number_id: str) -> str:
+    """Un solo job di invio per numero (SDD Q2: max 1 campagna running per
+    numero). ARQ scarta il duplicato da solo -- FM11."""
+    return f"wa:send:{number_id}"
+
+
+async def _campagna_attiva_del_numero(number_id: str):
+    """La campagna `running` sul numero, se c'e' -- usata solo per leggere
+    gli override per-campagna del break (session_break_seconds legge i campi
+    break_min/max_minutes da qui, con getattr: None e' un fallback valido se
+    la campagna e' finita nel frattempo)."""
+    from app.database import AsyncSessionLocal
+    from app.models.wa import WaCampaign, WaCampaignStatus
+
+    async with AsyncSessionLocal() as db:
+        return await db.scalar(
+            select(WaCampaign).where(WaCampaign.wa_number_id == number_id,
+                                     WaCampaign.status == WaCampaignStatus.running)
+        )
+
+
+async def _rischedula(number_id: str, *, defer_seconds: int) -> None:
+    """Rimette in coda wa_send_task sullo stesso numero dopo il break: la
+    pausa fra mini-sessioni non si fa dormendo dentro il job (lezione
+    job_timeout della Fase Bio), si fa rischedulando su ARQ."""
+    import arq
+    from app.services.work_enqueue import arq_redis_settings
+
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        await redis.enqueue_job("wa_send_task", number_id,
+                                _job_id=wa_send_job_id(number_id),
+                                _defer_by=defer_seconds)
+    finally:
+        await redis.aclose()
+
+
+async def wa_send_task(ctx: dict, number_id: str) -> None:
+    """Task ARQ. Esce SEMPRE presto: la pausa fra mini-sessioni non si fa
+    dormendo dentro il job (lezione job_timeout della Fase Bio), si fa
+    rischedulando."""
+    from arq.jobs import Job          # noqa: F401  (documenta la dipendenza)
+    from app.services import wa_timing
+
+    esito = await esegui_mini_sessione(number_id)
+
+    if esito["motivo"] in ("send_disabled", "wa_halted", "numero_non_attivo",
+                           "guasti_consecutivi", "niente_da_fare"):
+        logger.info(f"[WA] {number_id}: sessione chiusa ({esito['motivo']}), "
+                    "nessuna rischedulazione automatica")
+        return
+
+    # cap_esaurito / fuori_finestra / completata -> si riprende dopo il break.
+    break_s = wa_timing.wa_session_break_seconds(
+        await _campagna_attiva_del_numero(number_id))
+    await _rischedula(number_id, defer_seconds=int(break_s))
+
+
+async def enqueue_wa_workers(campaign_id: str) -> int:
+    """Fan-out: un job per numero della campagna (in MVP il numero e' uno).
+    Stessa forma di work_enqueue.enqueue_dm_workers_with_redis."""
+    import arq
+    from app.database import AsyncSessionLocal
+    from app.models.wa import WaCampaign
+    from app.services.work_enqueue import arq_redis_settings
+
+    async with AsyncSessionLocal() as db:
+        campaign = await db.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
+        if campaign is None:
+            return 0
+        number_ids = [campaign.wa_number_id]
+
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        n = 0
+        for number_id in number_ids:
+            job = await redis.enqueue_job("wa_send_task", number_id,
+                                          _job_id=wa_send_job_id(number_id))
+            if job is not None:
+                n += 1
+        return n
+    finally:
+        await redis.aclose()
+
+
+async def recover_wa_sending_on_startup() -> int:
+    """FM14: al riavvio, i wa_messages rimasti 'sending' sono lavoro appeso.
+    NESSUNA chiamata al browser per capire se erano partiti: potevano
+    esserlo, e rimetterli in coda li manderebbe due volte. Si marcano
+    failed e si rilasciano i lock -- stessa scelta gia' fatta sul canale
+    Instagram."""
+    from app.database import AsyncSessionLocal
+    from app.models.wa import (WaCampaignContact, WaMessage, WaMessageStatus)
+
+    async with AsyncSessionLocal() as db:
+        appesi = (await db.execute(
+            select(WaMessage).where(WaMessage.status == WaMessageStatus.sending)
+        )).scalars().all()
+        for msg in appesi:
+            msg.status = WaMessageStatus.failed
+            msg.error = "recovery: processo interrotto durante l'invio (stato reale ignoto)"
+        await db.execute(
+            update(WaCampaignContact)
+            .where(WaCampaignContact.locked_by.is_not(None))
+            .values(locked_by=None, locked_at=None)
+        )
+        await db.commit()
+        if appesi:
+            logger.warning(f"[WA] recovery avvio: {len(appesi)} messaggi 'sending' "
+                           "chiusi come failed (stato reale ignoto)")
+        return len(appesi)
