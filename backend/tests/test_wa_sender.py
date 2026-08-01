@@ -184,3 +184,18 @@ async def test_sync_state_synced_non_e_richiesto_ma_syncing_blocca(monkeypatch):
         pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
     assert esito.puo_inviare is False
     assert esito.motivo == "sincronizzazione_in_corso"
+
+
+@pytest.mark.asyncio
+async def test_scroll_mai_tentato_blocca(monkeypatch):
+    """HistoryInfo.ok=False vuol dire che il box del pannello non e' stato
+    trovato e NESSUNO scroll e' stato tentato: 'after' e' solo cio' che
+    c'era gia' nel DOM, non uno storico validato. Stesso principio di
+    cecita'!=silenzio, applicato al caricamento della cronologia."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    pom = _PomFinto([], history_ok=False)
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "storico_non_caricato"

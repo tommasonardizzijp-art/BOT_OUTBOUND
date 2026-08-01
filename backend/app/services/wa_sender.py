@@ -101,7 +101,7 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
     from app.config import settings
     from app.services import wa_optout
 
-    # 1. Quarantena post-riconnessione (contratto §3.4.2). Costo zero, e
+    # 1. Quarantena post-riconnessione (contratto sez. 3.4.2). Costo zero, e
     #    copre la finestra in cui QUALUNQUE lettura sarebbe inaffidabile.
     #    ATTENZIONE: 15 minuti e' un valore STIMATO, non misurato -- si
     #    rimisura quando il selettore SYNC_INDICATOR verra' catturato.
@@ -120,6 +120,13 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
     #    restano ~17 messaggi degli ultimi minuti e uno STOP di venti minuti
     #    prima non esiste (misurato in M0).
     info = await pom.load_history(minimo=int(settings.wa_guard_history_min))
+
+    # 3b. Scroll mai tentato (box del pannello non trovato): 'after' e' solo
+    #     cio' che c'era gia' nel DOM prima della chiamata, non uno storico
+    #     validato -- stesso principio del punto 5, un segnale illeggibile
+    #     non e' un segnale sicuro.
+    if not info.ok:
+        return EsitoGuardia(False, "storico_non_caricato")
 
     # 4. Incoerenza DB<->DOM: se avevamo gia' scritto a questo contatto e il
     #    DOM mostra zero messaggi, la chat non e' sincronizzata. Vale una
