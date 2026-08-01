@@ -580,6 +580,34 @@ async def test_d20_due_enqueue_job_stesso_job_id_arq_scarta_il_duplicato(db_sess
 
 
 @pytest.mark.asyncio
+async def test_ferma_numero_per_guasto_applica_cooldown_redis(db_session, monkeypatch):
+    """Fix 3 (review finale I4): _ferma_numero_per_guasto scriveva
+    WaNumber.status=cooldown a DB ma non chiamava mai apply_wa_cooldown --
+    senza la chiave Redis con TTL, il prossimo health-check
+    (release_expired_wa_cooldowns) la trova gia' "scaduta" e rimette il
+    numero active da solo entro 30 min, annullando lo stop FM2."""
+    from app.services import wa_number_manager as wnm
+
+    ctx = await _scenario_claim(db_session)
+
+    chiamate = []
+
+    async def _fake_apply(number_id, *, minutes):
+        chiamate.append((number_id, minutes))
+    monkeypatch.setattr(wnm, "apply_wa_cooldown", _fake_apply)
+
+    await wa_worker._ferma_numero_per_guasto(
+        db_session, ctx["number"].id, ctx["campaign"].id, 3)
+
+    assert len(chiamate) == 1
+    numero_chiamato, minuti = chiamate[0]
+    assert numero_chiamato == ctx["number"].id
+    # deve richiedere un intervento umano, non auto-risolversi come i
+    # cooldown brevi di routine (che sono nell'ordine dei minuti/30min)
+    assert minuti >= 60
+
+
+@pytest.mark.asyncio
 async def test_d21_claim_confine_esatto_lock_timeout(db_session, monkeypatch):
     """Adversarial #21: 19min59s ancora fresco (rowcount=0), 20min01s stale
     (rowcount=1) -- nessuno scarto silenzioso di un secondo."""

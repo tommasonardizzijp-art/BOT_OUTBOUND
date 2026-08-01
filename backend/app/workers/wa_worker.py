@@ -26,6 +26,15 @@ from app.services.work_enqueue import arq_redis_settings
 # Contratto §3.2.
 MAX_GUASTI_CONSECUTIVI = 3
 
+# Cooldown Redis applicato quando FM2 ferma il numero (Fix 3, review finale
+# I4): diverso dai cooldown BREVI usati altrove per blocchi soft di
+# routine, perche' qui serve un UMANO che legga l'alert Telegram (gia'
+# inviato sotto) e controlli il DOM/selettore -- non un timer che si
+# auto-risolve. 4 ore e' una scelta arbitraria ma documentata: abbastanza
+# lunga da non auto-riattivarsi prima che qualcuno se ne accorga, abbastanza
+# corta da non lasciare il numero morto per giorni se l'alert viene perso.
+FM2_COOLDOWN_MINUTES = 4 * 60
+
 
 async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
     """Prende UNA riga pronta per questo numero e la marca sotto lock.
@@ -257,7 +266,7 @@ async def _ferma_numero_per_guasto(db, number_id: str, campaign_id: str, n: int)
     error; i contatti restano queued perche' NON e' colpa loro. Un selettore
     rotto non deve bruciare una lista (SDD 11)."""
     from app.models.wa import WaCampaign, WaCampaignStatus, WaNumber, WaNumberStatus
-    from app.services import notifier
+    from app.services import notifier, wa_number_manager
     from app.utils import events
 
     await db.execute(update(WaNumber).where(WaNumber.id == number_id)
@@ -265,6 +274,12 @@ async def _ferma_numero_per_guasto(db, number_id: str, campaign_id: str, n: int)
     await db.execute(update(WaCampaign).where(WaCampaign.id == campaign_id)
                      .values(status=WaCampaignStatus.error))
     await db.commit()
+    # Senza questa chiamata la chiave Redis con TTL non esiste: il prossimo
+    # health-check (release_expired_wa_cooldowns) trova il numero in
+    # status='cooldown', non trova la chiave, conclude che il cooldown e'
+    # "scaduto" e lo rimette 'active' da solo entro 30 min -- annullando lo
+    # stop (Fix 3, review finale I4).
+    await wa_number_manager.apply_wa_cooldown(number_id, minutes=FM2_COOLDOWN_MINUTES)
     events.emit(campaign_id, "wa.number.stopped",
                 f"{n} guasti consecutivi: numero fermato, contatti intatti",
                 level="error")
