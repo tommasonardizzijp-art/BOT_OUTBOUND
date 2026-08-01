@@ -7,11 +7,16 @@ import pytest
 from app.workers import wa_worker
 
 
-async def _scenario_claim(db_session, e164: str = "+393331112223"):
+async def _scenario_claim(db_session, e164: str = "+393331112223", contatti: int = 1):
     """Tenant + numero + contatto + campagna running + step 0, tutto a DB.
     Identico a _scenario_invio del Task 8 (test_wa_sender.py) piu'
     next_action_at nel passato sulla riga wa_campaign_contacts: copiato
-    apposta invece di importato, cosi' questo file resta leggibile da solo."""
+    apposta invece di importato, cosi' questo file resta leggibile da solo.
+
+    `contatti` (default 1, retro-compatibile con i test di Task 10) crea N
+    contatti/righe wa_campaign_contacts DISTINTI sulla stessa campagna: serve
+    a Task 11 per provare l'escalation "guasti su chat diverse" (MAX_GUASTI_
+    CONSECUTIVI), che deve restare vera anche con piu' di una chat nel pool."""
     from app.models.tenant import Tenant
     from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                                WaCampaignType, WaContact, WaContactStatus, WaNumber,
@@ -25,10 +30,7 @@ async def _scenario_claim(db_session, e164: str = "+393331112223"):
     number = WaNumber(id=str(uuid.uuid4()), tenant_id=tenant.id, label="n",
                       phone_hmac=f"n-{uuid.uuid4()}", encrypted_phone=encrypt("+390000000000"),
                       status=WaNumberStatus.active)
-    contact = WaContact(id=str(uuid.uuid4()), tenant_id=tenant.id,
-                        phone_hmac=hmac_phone(e164), encrypted_phone=encrypt(e164),
-                        display_name="Marco")
-    db_session.add_all([number, contact])
+    db_session.add(number)
     await db_session.flush()
     campaign = WaCampaign(id=str(uuid.uuid4()), tenant_id=tenant.id,
                           wa_number_id=number.id, name="c",
@@ -40,14 +42,28 @@ async def _scenario_claim(db_session, e164: str = "+393331112223"):
     step = WaSequenceStep(id=str(uuid.uuid4()), campaign_id=campaign.id, step_index=0,
                           template_a="Ciao {nome}, promo attiva.",
                           send_condition=WaSendCondition.always, wait_days=0)
-    cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id,
-                           contact_id=contact.id, status=WaContactStatus.queued,
-                           current_step=-1,
-                           next_action_at=datetime.utcnow() - timedelta(minutes=1))
-    db_session.add_all([step, cc])
+    db_session.add(step)
+    await db_session.flush()
+
+    contacts, ccs = [], []
+    for i in range(contatti):
+        e = e164 if i == 0 else f"{e164}{i}"
+        c = WaContact(id=str(uuid.uuid4()), tenant_id=tenant.id,
+                     phone_hmac=hmac_phone(e), encrypted_phone=encrypt(e),
+                     display_name="Marco")
+        db_session.add(c)
+        await db_session.flush()
+        cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id,
+                               contact_id=c.id, status=WaContactStatus.queued,
+                               current_step=-1,
+                               next_action_at=datetime.utcnow() - timedelta(minutes=1))
+        db_session.add(cc)
+        contacts.append(c)
+        ccs.append(cc)
     await db_session.commit()
-    return {"tenant": tenant, "number": number, "contact": contact,
-            "campaign": campaign, "step": step, "cc": cc}
+    return {"tenant": tenant, "number": number, "contact": contacts[0],
+            "campaign": campaign, "step": step, "cc": ccs[0],
+            "contacts": contacts, "ccs": ccs}
 
 
 @pytest.mark.asyncio
@@ -142,3 +158,131 @@ async def test_claim_ignora_contatto_oltre_soglia_fallimenti(db_session, monkeyp
     await db_session.commit()
     assert await wa_worker.claim_next_wa_contact(
         db_session, number_id=ctx["number"].id, worker_id="w1") is None
+
+
+async def _mini_sessione_con_doppi(db_session, monkeypatch, *, contatti=1,
+                                   budget=True, ora_corrente=12,
+                                   fake_invio=None, halted_getter=None):
+    """Esercita esegui_mini_sessione con browser/POM/orologio finti.
+    Il browser vero e' esercitato SOLO nel Task 15 (prova dal vivo): qui si
+    prova la LOGICA, che e' dove hanno abitato tutti i difetti di M1."""
+    import contextlib
+    from app.config import settings
+    from app.services import bot_state_service as bss, wa_number_manager as wnm
+    from app.services.wa_sender import EsitoInvio
+
+    monkeypatch.setattr(settings, "wa_send_enabled", True)
+
+    async def _halted(db=None):
+        return halted_getter() if halted_getter else False
+    monkeypatch.setattr(bss, "is_wa_halted", _halted)
+
+    async def _budget(*a, **kw):
+        return budget
+    monkeypatch.setattr(wnm, "has_wa_send_budget", _budget)
+
+    @contextlib.asynccontextmanager
+    async def _ctx(*a, **kw):
+        class _Ctx:
+            async def new_page(self):
+                class _P:
+                    async def goto(self, *a, **kw): return None
+                return _P()
+        yield _Ctx()
+    monkeypatch.setattr(wa_worker, "_open_wa_browser", _ctx)
+    monkeypatch.setattr(wa_worker, "_ora_locale_corrente", lambda: ora_corrente)
+    monkeypatch.setattr(wa_worker, "WhatsAppWebPage", lambda page: object())
+
+    async def _invio(*a, **kw):
+        return EsitoInvio("sent", "ok")
+    monkeypatch.setattr(wa_worker.wa_sender, "invia_a_contatto",
+                        fake_invio or _invio)
+    monkeypatch.setattr(wa_worker.wa_timing, "wa_send_delay_seconds", lambda: 0.0)
+    monkeypatch.setattr(wa_worker.wa_timing, "wa_session_message_count", lambda c: contatti)
+
+    ctx = await _scenario_claim(db_session, contatti=contatti)
+    return await wa_worker.esegui_mini_sessione(ctx["number"].id)
+
+
+@pytest.mark.asyncio
+async def test_send_enabled_false_non_apre_nemmeno_il_browser(db_session, monkeypatch):
+    """Il master switch sta SOPRA tutto: a false non si apre un browser,
+    non si claima una riga, non si tocca niente."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_send_enabled", False)
+    aperto = {"si": False}
+
+    def _boom(*a, **kw):
+        aperto["si"] = True
+        raise AssertionError("browser aperto con WA_SEND_ENABLED=false")
+
+    monkeypatch.setattr(wa_worker, "_open_wa_browser", _boom)
+    esito = await wa_worker.esegui_mini_sessione("num-x")
+    assert esito["motivo"] == "send_disabled"
+    assert aperto["si"] is False
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_wa_ferma_la_sessione(db_session, monkeypatch):
+    from app.config import settings
+    from app.services import bot_state_service as bss
+    monkeypatch.setattr(settings, "wa_send_enabled", True)
+
+    async def _halted(db=None):
+        return True
+    monkeypatch.setattr(bss, "is_wa_halted", _halted)
+    esito = await wa_worker.esegui_mini_sessione("num-x")
+    assert esito["motivo"] == "wa_halted"
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_acceso_a_meta_sessione_interrompe_dopo_il_messaggio_corrente(
+        db_session, monkeypatch):
+    """FM15: tutto si ferma entro il job corrente. Non a meta' di un invio:
+    dopo quello in corso."""
+    stato = {"halted": False, "inviati": 0}
+
+    async def _fake_invio(*a, **kw):
+        stato["inviati"] += 1
+        stato["halted"] = True      # qualcuno preme il kill-switch adesso
+        from app.services.wa_sender import EsitoInvio
+        return EsitoInvio("sent", "ok")
+
+    esito = await _mini_sessione_con_doppi(
+        db_session, monkeypatch, fake_invio=_fake_invio,
+        halted_getter=lambda: stato["halted"], contatti=5)
+    assert stato["inviati"] == 1
+    assert esito["motivo"] == "wa_halted"
+
+
+@pytest.mark.asyncio
+async def test_cap_raggiunto_esce_con_defer_e_non_marca_i_contatti(db_session, monkeypatch):
+    """Cap non e' un fallimento dei contatti: le righe restano queued."""
+    esito = await _mini_sessione_con_doppi(
+        db_session, monkeypatch, budget=False, contatti=3)
+    assert esito["motivo"] == "cap_esaurito"
+    assert esito["inviati"] == 0
+    assert esito["falliti"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fuori_finestra_oraria_non_invia(db_session, monkeypatch):
+    esito = await _mini_sessione_con_doppi(
+        db_session, monkeypatch, ora_corrente=4, contatti=3)
+    assert esito["motivo"] == "fuori_finestra"
+
+
+@pytest.mark.asyncio
+async def test_tre_guasti_nostri_consecutivi_fermano_il_numero(db_session, monkeypatch):
+    """FM2: selettori rotti -> stop invii del numero e campagna in error.
+    I contatti NON diventano failed: e' colpa nostra."""
+    from app.services.wa_sender import EsitoInvio
+
+    async def _sempre_guasto(*a, **kw):
+        return EsitoInvio("queued", "casella-ricerca-non-trovata")
+
+    esito = await _mini_sessione_con_doppi(
+        db_session, monkeypatch, fake_invio=_sempre_guasto, contatti=5)
+    assert esito["motivo"] == "guasti_consecutivi"
+    assert esito["inviati"] == 0
+    assert esito["falliti"] == 0
