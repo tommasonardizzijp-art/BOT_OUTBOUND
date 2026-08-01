@@ -19,17 +19,26 @@ from app.browser.whatsapp_page import OpenResult
 # smette di riconoscerli e cade nel ramo fail-closed (colpa nostra), che e'
 # il fallimento giusto.
 _SEGNALI_CHAT_INESISTENTE = (
-    "nessuna-cronologia:nessun-messaggio-nel-pannello",
     "nessuna-cronologia:sezione-chat-vuota:nessuna-conversazione-esistente",
     "nessuna-cronologia:nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione",
 )
 
 # Segnali che dicono "la pagina non era nello stato che ci aspettavamo":
 # infrastruttura nostra. Il contatto NON si tocca.
+#
+# 'nessun-messaggio-nel-pannello' e' qui, non sopra (decisione Tommaso
+# round1, escalation whole-branch review item (c)): whatsapp_page.py lo
+# emette SOLO dopo aver gia' trovato e cliccato una chat esistente nei
+# risultati di ricerca -- il segnale dice "nessun messaggio renderizzato in
+# 5s" (un pannello lento su cronologie vecchie e' un evento reale), non
+# "questa chat non esiste". Un contatto presente a DB e' gia' evidenza che
+# dovrebbe avere storico vero (l'ingest di M2 lo ha validato): non si
+# scarta il contatto per un rendering lento, si ritenta.
 _SEGNALI_COLPA_NOSTRA = (
     "nessuna-cronologia:casella-ricerca-non-trovata",
     "nessuna-cronologia:ricerca-non-svuotata",
     "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio",
+    "nessuna-cronologia:nessun-messaggio-nel-pannello",
 )
 
 _SEGNALE_RICERCA_VUOTA = "nessuna-cronologia:nessun-risultato-di-ricerca"
