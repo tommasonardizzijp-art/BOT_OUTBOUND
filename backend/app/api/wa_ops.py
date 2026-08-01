@@ -40,12 +40,14 @@ async def wa_ops_status(db=Depends(get_db)) -> dict:
 @router.post("/halt")
 async def wa_ops_halt(body: HaltRequest, db=Depends(get_db)) -> dict:
     await bot_state_service.halt_wa(reason=body.reason, by="api", db=db)
+    await db.commit()
     return {"wa_halted": True, "reason": body.reason}
 
 
 @router.post("/resume")
 async def wa_ops_resume(db=Depends(get_db)) -> dict:
     await bot_state_service.resume_wa(by="api", db=db)
+    await db.commit()
     return {"wa_halted": False}
 
 
