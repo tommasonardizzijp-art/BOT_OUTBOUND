@@ -70,9 +70,11 @@ async def _scenario_messaggio_sending(db_session):
 @pytest.mark.asyncio
 async def test_recover_wa_sending_riporta_a_queued_i_messaggi_appesi(db_session):
     """FM14: il PC si riavvia a meta' invio. Un wa_messages 'sending' senza
-    processo vivo e' lavoro appeso: si riapre, non si perde."""
+    processo vivo e' lavoro appeso: il messaggio va failed e il contatto
+    corrispondente si ferma (skipped), mai riprovato per questo tentativo
+    ambiguo (decisione Tommaso round1)."""
     from sqlalchemy import select
-    from app.models.wa import WaMessage, WaMessageStatus
+    from app.models.wa import WaContactStatus, WaMessage, WaMessageStatus
     from app.workers.wa_worker import recover_wa_sending_on_startup
 
     ctx = await _scenario_messaggio_sending(db_session)
@@ -84,6 +86,35 @@ async def test_recover_wa_sending_riporta_a_queued_i_messaggi_appesi(db_session)
     assert "recovery" in (msg.error or "")
     await db_session.refresh(ctx["cc"])
     assert ctx["cc"].locked_by is None
+    assert ctx["cc"].status == WaContactStatus.skipped
+    await db_session.refresh(ctx["contact"])
+    assert ctx["contact"].do_not_contact is False
+
+
+def test_on_startup_registrato_chiama_la_recovery_wa(monkeypatch):
+    """La recovery FM14 esisteva ed era testata da Task 3, ma nessuno la
+    chiamava in produzione (I3, whole-branch review). Decisione Tommaso
+    round1: deve girare ad OGNI avvio del worker ARQ, in aggiunta -- non al
+    posto -- della guardia IG gia' esistente."""
+    import asyncio
+    from app.workers import task_queue
+
+    chiamato = {"wa": False, "ig": False}
+
+    async def _fake_wa():
+        chiamato["wa"] = True
+        return 0
+    monkeypatch.setattr(task_queue, "recover_wa_sending_on_startup", _fake_wa)
+
+    async def _fake_ig():
+        chiamato["ig"] = True
+        return {"campaigns_paused": 0, "locks_released": 0, "leases_released": 0}
+    monkeypatch.setattr("app.services.work_enqueue.pause_active_work_on_startup", _fake_ig)
+
+    asyncio.run(task_queue.on_startup({}))
+
+    assert chiamato["wa"] is True
+    assert chiamato["ig"] is True
 
 
 @pytest.mark.asyncio

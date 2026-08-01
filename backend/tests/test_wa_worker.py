@@ -506,7 +506,9 @@ async def test_18b_wa_send_task_non_rischedula_su_motivi_terminali(db_session, m
 @pytest.mark.asyncio
 async def test_20_recovery_avvio_chiude_i_sending_appesi(db_session):
     """QA item 20: nessuna chiamata al browser, i messaggi 'sending' vanno
-    failed e i lock si rilasciano."""
+    failed e il contatto legato a quel messaggio si ferma (skipped, non
+    rieleggibile) -- decisione Tommaso round1: mai riprovare un invio di
+    cui non si sa se e' partito davvero."""
     from app.models.tenant import Tenant
     from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                                WaCampaignType, WaContact, WaContactStatus, WaMessage,
@@ -544,6 +546,51 @@ async def test_20_recovery_avvio_chiude_i_sending_appesi(db_session):
 
     await db_session.refresh(cc)
     assert cc.locked_by is None and cc.locked_at is None
+    assert cc.status == WaContactStatus.skipped
+    assert cc.next_action_at is None
+
+    await db_session.refresh(contact)
+    assert contact.do_not_contact is False   # ambiguo per QUESTO tentativo, non DNC
+
+
+@pytest.mark.asyncio
+async def test_20b_recovery_non_tocca_contatti_senza_messaggio_appeso(db_session):
+    """Il lock-release generico (per worker morti senza invio in corso) e'
+    gia' compito del health-check periodico (cron_worker, timeout diverso).
+    La recovery di avvio deve toccare SOLO i contatti legati a un
+    wa_messages 'sending': un altro contatto lockato ma senza messaggio
+    appeso deve restare esattamente com'era."""
+    from app.models.tenant import Tenant
+    from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                               WaCampaignType, WaContact, WaContactStatus, WaNumber)
+
+    tenant = Tenant(id=str(uuid.uuid4()), name="T20b", status="active")
+    db_session.add(tenant)
+    await db_session.flush()
+    contact = WaContact(id=str(uuid.uuid4()), tenant_id=tenant.id,
+                        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e")
+    number = WaNumber(id=str(uuid.uuid4()), tenant_id=tenant.id, label="n",
+                      phone_hmac=f"h2-{uuid.uuid4()}", encrypted_phone="e")
+    db_session.add_all([contact, number])
+    await db_session.flush()
+    campaign = WaCampaign(id=str(uuid.uuid4()), tenant_id=tenant.id, wa_number_id=number.id,
+                          name="c20b", campaign_type=WaCampaignType.followup,
+                          status=WaCampaignStatus.running)
+    db_session.add(campaign)
+    await db_session.flush()
+    locked_at = datetime.utcnow()
+    cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
+                           status=WaContactStatus.queued, current_step=-1,
+                           locked_by="worker-vivo-ma-lento", locked_at=locked_at)
+    db_session.add(cc)
+    await db_session.commit()
+
+    n = await wa_worker.recover_wa_sending_on_startup()
+    assert n == 0
+
+    await db_session.refresh(cc)
+    assert cc.locked_by == "worker-vivo-ma-lento"   # NON toccato
+    assert cc.status == WaContactStatus.queued
 
 
 @pytest.mark.asyncio

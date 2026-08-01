@@ -420,13 +420,26 @@ async def enqueue_wa_workers(campaign_id: str) -> int:
 
 
 async def recover_wa_sending_on_startup() -> int:
-    """FM14: al riavvio, i wa_messages rimasti 'sending' sono lavoro appeso.
-    NESSUNA chiamata al browser per capire se erano partiti: potevano
-    esserlo, e rimetterli in coda li manderebbe due volte. Si marcano
-    failed e si rilasciano i lock -- stessa scelta gia' fatta sul canale
-    Instagram."""
+    """FM14: al riavvio, i wa_messages rimasti 'sending' sono lavoro appeso
+    di cui non si sa se e' partito davvero (il processo puo' essere caduto
+    fra send_text() riuscito e il commit che lo registra 'sent'). Decisione
+    esplicita di Tommaso (round1 post-review): MAI riprovare in dubbio --
+    meglio un messaggio che non parte che uno che parte due volte.
+
+    Il messaggio si marca failed (il dato resta onesto). SOLO il
+    wa_campaign_contacts legato a QUEL messaggio (via campaign_id +
+    contact_id) va fermato in modo terminale (skipped, non rieleggibile):
+    NON si tocca do_not_contact, perche' il contatto potrebbe essere
+    perfettamente raggiungibile -- e' solo questo UN tentativo di consegna
+    ad essere ambiguo, una campagna futura puo' riprovarci.
+
+    Non si rilasciano gli altri lock stantii qui: quello e' compito del
+    health-check periodico (cron_worker.wa_health_check, timeout
+    wa_lock_timeout_min), che copre un caso diverso (worker morto senza un
+    invio in corso) e ha gia' la sua logica -- non va duplicata ne'
+    ristretta da questa funzione."""
     from app.database import AsyncSessionLocal
-    from app.models.wa import (WaCampaignContact, WaMessage, WaMessageStatus)
+    from app.models.wa import WaCampaignContact, WaContactStatus, WaMessage, WaMessageStatus
 
     async with AsyncSessionLocal() as db:
         appesi = (await db.execute(
@@ -435,13 +448,21 @@ async def recover_wa_sending_on_startup() -> int:
         for msg in appesi:
             msg.status = WaMessageStatus.failed
             msg.error = "recovery: processo interrotto durante l'invio (stato reale ignoto)"
-        await db.execute(
-            update(WaCampaignContact)
-            .where(WaCampaignContact.locked_by.is_not(None))
-            .values(locked_by=None, locked_at=None)
-        )
+            await db.execute(
+                update(WaCampaignContact)
+                .where(WaCampaignContact.campaign_id == msg.campaign_id,
+                       WaCampaignContact.contact_id == msg.contact_id)
+                .values(status=WaContactStatus.skipped,
+                       next_action_at=None,
+                       locked_by=None,
+                       locked_at=None,
+                       last_error="recovery: stato di invio ambiguo dopo un riavvio, "
+                                  "contatto fermato per sicurezza -- verificare "
+                                  "manualmente se il messaggio e' arrivato")
+            )
         await db.commit()
         if appesi:
             logger.warning(f"[WA] recovery avvio: {len(appesi)} messaggi 'sending' "
-                           "chiusi come failed (stato reale ignoto)")
+                           "chiusi come failed, altrettanti contatti fermati "
+                           "(skipped, non riprovati -- verifica manuale consigliata)")
         return len(appesi)
