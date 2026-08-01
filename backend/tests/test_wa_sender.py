@@ -402,3 +402,181 @@ async def test_il_numero_in_chiaro_non_finisce_mai_nei_log(db_session, monkeypat
             contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
     assert "+393421460077" not in caplog.text
     assert "3421460077" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# QA M3 (Task 15 Step 3) -- adversarial gruppi A, C, D, G, I.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("coda_malformata", [
+    [{"foo": "bar"}],
+    [None],
+    [{"text": None}],
+])
+async def test_a2_righe_malformate_in_coda_non_sollevano(coda_malformata):
+    """Adversarial #2: qualunque riga in coda (anche illeggibile) fa
+    scattare fail-closed 'ha_risposto', mai un crash e mai un invio."""
+    pom = _PomFinto(coda_malformata)
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "ha_risposto"
+
+
+@pytest.mark.asyncio
+async def test_a3_scan_chat_list_solleva_non_rompe_invio_gia_riuscito(db_session, monkeypatch):
+    """Adversarial #3: un guasto nell'apprendimento del titolo non deve mai
+    far fallire un invio gia' avvenuto."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+
+    class _PomRotto(_PomInvio):
+        async def scan_chat_list(self):
+            raise RuntimeError("DOM cambiato")
+
+    pom = _PomRotto([])
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    assert esito.stato == "sent"
+    await db_session.refresh(ctx["contact"])
+    assert ctx["contact"].chat_title is None
+
+
+def test_a4_ok_true_con_signal_vuota_non_si_fida_del_solo_ok():
+    """Adversarial #4: ok=True da solo non basta, serve 'cronologia:' come
+    prefisso catalogato."""
+    esito = wa_sender.valuta_apertura(OpenResult(True, 1.0, ""))
+    assert esito.puo_inviare is False
+    assert esito.motivo == "segnale_non_catalogato"
+    assert esito.colpa_nostra is True
+    assert esito.esito_contatto is None
+
+
+@pytest.mark.asyncio
+async def test_c14_quarantena_e_costo_zero_nessuna_chiamata_al_pom(monkeypatch):
+    """Adversarial #14: la quarantena blocca PRIMA di toccare il DOM."""
+    from unittest.mock import AsyncMock
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 15)
+    pom = AsyncMock()
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=30.0)
+    assert esito.motivo == "quarantena_risync"
+    pom.load_history.assert_not_called()
+    pom.sync_state.assert_not_called()
+    pom.read_inbound_tail.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_c15_sync_syncing_blocca_prima_del_passo_piu_caro(monkeypatch):
+    """Adversarial #15: sync_state='syncing' blocca prima di load_history/
+    read_inbound_tail (il passo piu' caro)."""
+    from unittest.mock import AsyncMock
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    pom = AsyncMock()
+    pom.sync_state.return_value = "syncing"
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.motivo == "sincronizzazione_in_corso"
+    pom.load_history.assert_not_called()
+    pom.read_inbound_tail.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_d18_risposta_normale_nella_seconda_lettura_non_blocca(db_session, monkeypatch):
+    """Adversarial #18: la rilettura TOCTOU controlla SOLO cecita' e STOP,
+    non risposte generiche -- il messaggio parte comunque (contratto §3.5,
+    rischio residuo dichiarato)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    pom = _PomInvio([], tail_seconda_lettura=["scherzavo, tutto ok"])
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    assert pom.inviato is not None
+    assert esito.stato == "sent"
+
+
+@pytest.mark.asyncio
+async def test_g28_invia_a_contatto_su_opted_out_non_solleva(db_session, monkeypatch):
+    """Adversarial #28: bypass diretto del claim (simula un futuro bug di
+    chiamata) -- documenta il gap noto: invia_a_contatto non ri-legge
+    opted_out, quella difesa vive SOLO nella query di claim (contratto
+    §7.3). PASS = nessuna eccezione non gestita."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    ctx["contact"].opted_out = True
+    await db_session.commit()
+    pom = _PomInvio([])
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    assert esito.stato in ("sent", "queued", "skipped", "opted_out", "failed", "replied")
+
+
+@pytest.mark.asyncio
+async def test_i33_nessuna_sequenza_di_9_cifre_nel_log(db_session, monkeypatch, caplog):
+    """Adversarial #33: zero occorrenze di una sequenza di 9+ cifre in
+    tutto il log del run, generalizzato oltre il numero di test fisso."""
+    import re
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session, e164="+393331239876")
+    pom = _PomInvio([])
+    # INFO, non DEBUG: a DEBUG l'echo grezzo del driver sqlite logga i bind
+    # param delle query, incluso il TESTO CIFRATO del telefono -- una
+    # sequenza di cifre nel ciphertext e' rumore statistico, non una fuga di
+    # PII (il numero in chiaro non e' mai nei log applicativi, verificato
+    # sotto). L'invariante riguarda il logging applicativo (P12), non l'echo
+    # SQL che in produzione non e' comunque attivo.
+    with caplog.at_level("INFO"):
+        await wa_sender.invia_a_contatto(
+            db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+            contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    assert re.search(r"\d{9,}", caplog.text) is None
+
+
+@pytest.mark.asyncio
+async def test_i34_rendered_text_non_contiene_mai_il_numero(db_session, monkeypatch):
+    """Adversarial #34."""
+    from sqlalchemy import select
+    from app.config import settings
+    from app.models.wa import WaMessage
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    e164 = "+393339998877"
+    ctx = await _scenario_invio(db_session, e164=e164)
+    pom = _PomInvio([])
+    await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    msg = await db_session.scalar(
+        select(WaMessage).where(WaMessage.contact_id == ctx["contact"].id))
+    assert e164 not in msg.rendered_text
+    assert e164.lstrip("+") not in msg.rendered_text
+
+
+@pytest.mark.asyncio
+async def test_i35_chat_title_mai_salvato_come_numero(db_session, monkeypatch):
+    """Adversarial #35: title_is_number=True -> chat_title resta NULL."""
+    from app.browser.whatsapp_page import ChatRow
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+
+    class _PomNumero(_PomInvio):
+        async def scan_chat_list(self):
+            return [ChatRow(position=0, title="+391234567890", title_is_number=True,
+                            unread_count=0, preview="", last_is_outbound=False)]
+
+    pom = _PomNumero([])
+    await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    await db_session.refresh(ctx["contact"])
+    assert ctx["contact"].chat_title is None

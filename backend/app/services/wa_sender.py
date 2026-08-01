@@ -147,8 +147,11 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
 
     # Una risposta qualsiasi ferma la sequenza (SDD 7.4, decisione 24/07),
     # ma NON e' questa funzione a marcarlo: qui si dice solo che c'e'.
+    # coda[-1] non e' garantito stringa (righe malformate del POM finiscono
+    # comunque qui, fail-closed): str() prima dello slice evita un crash su
+    # un dict/None dove serve solo una prova leggibile nel log.
     if coda:
-        return EsitoGuardia(False, "ha_risposto", prova=coda[-1][:300])
+        return EsitoGuardia(False, "ha_risposto", prova=str(coda[-1])[:300])
 
     return EsitoGuardia(True, "silenzio")
 
