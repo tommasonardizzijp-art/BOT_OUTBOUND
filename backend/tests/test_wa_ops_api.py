@@ -164,8 +164,25 @@ async def test_11_resume_via_api_reale_persiste_a_db(client_real_db):
         assert await bss.is_wa_halted(db_check) is False
 
 
+@pytest_asyncio.fixture
+async def _redis_o_skip():
+    """Redis reale e' un requisito duro per questo test (QA item 12): se
+    non e' raggiungibile (es. CI senza servizio Redis), skip esplicito con
+    motivo chiaro invece di un rosso che sembra una regressione. Duplicata
+    in test_wa_worker.py (stesso motivo di _scenario_claim: conftest.py e'
+    congelato dopo PR-0, contratto §8.1)."""
+    import arq
+    from app.services.work_enqueue import arq_redis_settings
+    try:
+        pool = await arq.create_pool(arq_redis_settings())
+        await pool.ping()
+        await pool.aclose()
+    except Exception as exc:
+        pytest.skip(f"Redis non raggiungibile, test saltato: {type(exc).__name__}: {exc}")
+
+
 @pytest.mark.asyncio
-async def test_12_kick_su_campagna_running_accoda_job_vero_su_redis(db_session):
+async def test_12_kick_su_campagna_running_accoda_job_vero_su_redis(db_session, _redis_o_skip):
     """QA item 12: kick reale (no mock) contro redis vero, verifica diretta
     sulla coda ARQ che il job wa:send:<number_id> esista."""
     import arq

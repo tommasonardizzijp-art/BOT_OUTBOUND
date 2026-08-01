@@ -145,13 +145,21 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
         if wa_optout.looks_like_stop(testo):
             return EsitoGuardia(False, "optout", prova=testo[:300])
 
+    # Righe malformate (non stringa): il POM di oggi (_righe_ben_formate,
+    # whatsapp_page.py) le filtra gia' a monte tornando None -- questo ramo
+    # esiste in difesa di un POM futuro che non lo faccia piu'. E' colpa
+    # NOSTRA (lettura rotta), non una verita' sul contatto: fail-closed su
+    # un motivo dedicato che NON e' "ha_risposto", altrimenti il contatto
+    # verrebbe marcato replied (terminale, irreversibile) per un nostro
+    # difetto di lettura, e guasti_consecutivi si azzererebbe disarmando
+    # l'escalation FM2 proprio quando il DOM e' meno affidabile.
+    if any(not isinstance(t, str) for t in coda):
+        return EsitoGuardia(False, "coda_malformata")
+
     # Una risposta qualsiasi ferma la sequenza (SDD 7.4, decisione 24/07),
     # ma NON e' questa funzione a marcarlo: qui si dice solo che c'e'.
-    # coda[-1] non e' garantito stringa (righe malformate del POM finiscono
-    # comunque qui, fail-closed): str() prima dello slice evita un crash su
-    # un dict/None dove serve solo una prova leggibile nel log.
     if coda:
-        return EsitoGuardia(False, "ha_risposto", prova=str(coda[-1])[:300])
+        return EsitoGuardia(False, "ha_risposto", prova=coda[-1][:300])
 
     return EsitoGuardia(True, "silenzio")
 

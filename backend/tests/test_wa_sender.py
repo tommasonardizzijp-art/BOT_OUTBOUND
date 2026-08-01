@@ -416,12 +416,38 @@ async def test_il_numero_in_chiaro_non_finisce_mai_nei_log(db_session, monkeypat
 ])
 async def test_a2_righe_malformate_in_coda_non_sollevano(coda_malformata):
     """Adversarial #2: qualunque riga in coda (anche illeggibile) fa
-    scattare fail-closed 'ha_risposto', mai un crash e mai un invio."""
+    scattare fail-closed su 'coda_malformata' -- MAI un crash, MAI un invio,
+    e MAI 'ha_risposto': quel motivo marca il contatto 'replied' (terminale)
+    e azzera guasti_consecutivi, disarmando l'escalation FM2 per un difetto
+    di lettura che e' colpa nostra, non una verita' sul contatto (trovato in
+    review, corretto dopo la prima versione di questo test)."""
     pom = _PomFinto(coda_malformata)
     esito = await wa_sender.guardia_pre_invio(
         pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
     assert esito.puo_inviare is False
-    assert esito.motivo == "ha_risposto"
+    assert esito.motivo == "coda_malformata"
+
+
+@pytest.mark.asyncio
+async def test_a2b_coda_malformata_in_invia_a_contatto_non_marca_replied(
+        db_session, monkeypatch):
+    """Verifica end-to-end (Task 8): il contatto resta 'queued', NON
+    diventa 'replied', e l'esito e' 'queued' (guasto nostro -> in
+    esegui_mini_sessione incrementa guasti_consecutivi, contratto §3.2)."""
+    from app.config import settings
+    from app.models.wa import WaContactStatus
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    pom = _PomInvio([{"foo": "bar"}])
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert esito.stato == "queued"
+    assert esito.motivo == "coda_malformata"
+    await db_session.refresh(ctx["cc"])
+    assert ctx["cc"].status == WaContactStatus.queued
 
 
 @pytest.mark.asyncio
