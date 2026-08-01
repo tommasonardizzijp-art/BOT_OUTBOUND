@@ -254,6 +254,15 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
     # --- testo -------------------------------------------------------------
     try:
         testo, variante = prepara_testo(step, contact, campaign)
+    except ValueError as exc:
+        # prepara_testo solleva ValueError SOLO per optout_cta vuota con
+        # optout_enabled=True: un errore di CONFIGURAZIONE della campagna,
+        # identico per OGNI contatto -- colpa nostra (Fix 2, review finale
+        # C2), non un problema di questo contatto. 'queued' arma FM2 invece
+        # di bruciare la lista come DNC dopo 3 giri.
+        logger.error(f"[WA] {masked}: config campagna invalida ({exc}) -- "
+                     "il contatto non si tocca, il numero continua")
+        return EsitoInvio("queued", "config_campagna")
     except Exception as exc:
         logger.error(f"[WA] {masked}: render fallito ({type(exc).__name__}) -- "
                      "il contatto va in failed, il numero continua")
@@ -292,13 +301,17 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
     try:
         await pom.send_text(testo)
     except Exception as exc:
+        # send_text che solleva = composer non trovato = DOM/selettore
+        # cambiato = ESATTAMENTE FM2, colpa nostra (Fix 2, review finale
+        # C2). Prima tornava 'failed' e _incrementa_fallimento marcava DNC
+        # dopo 3 giri per un selettore rotto; 'queued' arma l'escalation
+        # del numero (contratto §11) invece di bruciare la lista.
         msg.status = WaMessageStatus.failed
         msg.error = f"{type(exc).__name__}: {exc}"[:500]
         await db.commit()
-        await _incrementa_fallimento(db, cc, "send_text")
         await _incrementa_contatore_campagna(db, campaign.id, "failed")
         logger.error(f"[WA] {masked}: invio fallito ({type(exc).__name__})")
-        return EsitoInvio("failed", "send_text")
+        return EsitoInvio("queued", "send_text")
 
     tick = await pom.read_last_tick()
     msg.status = WaMessageStatus.sent

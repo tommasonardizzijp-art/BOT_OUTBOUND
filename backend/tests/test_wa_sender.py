@@ -608,6 +608,90 @@ async def test_i35_chat_title_mai_salvato_come_numero(db_session, monkeypatch):
     assert ctx["contact"].chat_title is None
 
 
+# ---------------------------------------------------------------------------
+# Fix 2 (review finale whole-branch, Critical C2): "failed" da
+# invia_a_contatto azzerava guasti_consecutivi (FM2 mai armato). send_text
+# fallito (selettore/DOM cambiato) e ValueError di configurazione campagna
+# (optout_cta vuota) sono "colpa nostra": ora tornano 'queued', non 'failed'.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_send_text_fallito_non_brucia_il_contatto_arma_fm2(db_session, monkeypatch):
+    """send_text che solleva = composer non trovato = DOM cambiato =
+    ESATTAMENTE FM2, colpa nostra. Prima tornava 'failed' e
+    _incrementa_fallimento marcava DNC dopo 3 giri per un selettore rotto,
+    e wa_worker azzerava guasti_consecutivi su 'failed' -- l'escalation non
+    scattava mai."""
+    from app.config import settings
+    from app.models.wa import WaContactStatus
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+
+    class _PomRompeInvio(_PomInvio):
+        async def send_text(self, text):
+            raise RuntimeError("composer non trovato")
+
+    pom = _PomRompeInvio([])
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert esito.stato == "queued"
+    await db_session.refresh(ctx["cc"])
+    assert ctx["cc"].failure_count == 0
+    assert ctx["cc"].status == WaContactStatus.queued
+    await db_session.refresh(ctx["contact"])
+    assert ctx["contact"].do_not_contact is False
+
+
+@pytest.mark.asyncio
+async def test_config_optout_cta_vuota_non_brucia_il_contatto(db_session, monkeypatch):
+    """ValueError di prepara_testo per optout_cta vuota e' un errore di
+    CONFIGURAZIONE della campagna, identico per ogni contatto -- colpa
+    nostra, non deve armare il DNC di questo (o nessun) contatto."""
+    from app.config import settings
+    from app.models.wa import WaContactStatus
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    ctx["campaign"].optout_cta = "   "
+    await db_session.commit()
+    pom = _PomInvio([])
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert esito.stato == "queued"
+    await db_session.refresh(ctx["cc"])
+    assert ctx["cc"].failure_count == 0
+    assert ctx["cc"].status == WaContactStatus.queued
+    await db_session.refresh(ctx["contact"])
+    assert ctx["contact"].do_not_contact is False
+
+
+@pytest.mark.asyncio
+async def test_render_error_per_contatto_resta_failed(db_session, monkeypatch):
+    """Contro-prova: un TemplateRenderError (placeholder mancante per QUESTO
+    contatto) resta 'failed' per-contatto -- non e' un problema di
+    configurazione della campagna, e' il dato di questo contatto. Non deve
+    cambiare col Fix 2."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    ctx["step"].template_a = "Ciao {nome}, ultimo ordine {ultimo_ordine}."
+    ctx["contact"].attributes = {}
+    await db_session.commit()
+    pom = _PomInvio([])
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert esito.stato == "failed"
+    await db_session.refresh(ctx["cc"])
+    assert ctx["cc"].failure_count == 1
+
+
 @pytest.mark.asyncio
 async def test_l48_null_byte_scritto_e_riletto_da_sqlite_senza_rompere(db_session, monkeypatch):
     """Adversarial #48: round-trip DB vero (SQLite), non solo rendering in
