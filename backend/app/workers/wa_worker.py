@@ -17,7 +17,7 @@ async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
     """Prende UNA riga pronta per questo numero e la marca sotto lock.
     Ritorna (cc, contact, campaign, step) oppure None.
 
-    La SELECT e' la query di eleggibilita' del contratto §7.3: se cambia
+    La SELECT e' la query di eleggibilita' del contratto sez. 7.3: se cambia
     qui, cambia il contratto -- non e' un dettaglio di implementazione, e'
     l'interfaccia su cui M2 costruisce le proprie righe.
     """
