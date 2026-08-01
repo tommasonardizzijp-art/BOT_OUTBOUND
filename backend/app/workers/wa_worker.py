@@ -10,6 +10,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import arq
 from loguru import logger
 from sqlalchemy import or_, select, update
 
@@ -17,6 +18,7 @@ from app.browser.whatsapp_page import WhatsAppWebPage
 from app.config import settings
 from app.services import wa_sender, wa_timing
 from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
+from app.services.work_enqueue import arq_redis_settings
 
 # Quanti guasti NOSTRI consecutivi (selettori, pagina in stato inatteso) su
 # chat diverse fermano il numero. Tre: sotto si rischia di fermarsi per un
@@ -297,9 +299,6 @@ async def _rischedula(number_id: str, *, defer_seconds: int) -> None:
     """Rimette in coda wa_send_task sullo stesso numero dopo il break: la
     pausa fra mini-sessioni non si fa dormendo dentro il job (lezione
     job_timeout della Fase Bio), si fa rischedulando su ARQ."""
-    import arq
-    from app.services.work_enqueue import arq_redis_settings
-
     redis = await arq.create_pool(arq_redis_settings())
     try:
         await redis.enqueue_job("wa_send_task", number_id,
@@ -333,10 +332,8 @@ async def wa_send_task(ctx: dict, number_id: str) -> None:
 async def enqueue_wa_workers(campaign_id: str) -> int:
     """Fan-out: un job per numero della campagna (in MVP il numero e' uno).
     Stessa forma di work_enqueue.enqueue_dm_workers_with_redis."""
-    import arq
     from app.database import AsyncSessionLocal
     from app.models.wa import WaCampaign
-    from app.services.work_enqueue import arq_redis_settings
 
     async with AsyncSessionLocal() as db:
         campaign = await db.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
