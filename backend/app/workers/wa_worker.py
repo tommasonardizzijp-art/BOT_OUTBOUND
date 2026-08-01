@@ -205,6 +205,15 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                     esito["motivo"] = "niente_da_fare"
                     break
                 cc, contact, campaign, step = preso
+                # Catturati SUBITO: un rollback piu' sotto (Fix B, review
+                # finale round 2) espira tutti gli oggetti ORM della
+                # sessione -- rileggere cc.id/campaign.id DOPO quel rollback
+                # dichiara un lazy-load implicito che l'AsyncSession non
+                # puo' eseguire fuori da un await esplicito (MissingGreenlet).
+                # Gli id, letti ora mentre gli oggetti sono ancora "freschi",
+                # restano validi indipendentemente da cosa succede alla
+                # sessione dopo.
+                cc_id, contact_id, campaign_id = cc.id, contact.id, campaign.id
 
                 if quanti is None:
                     quanti = wa_timing.wa_session_message_count(campaign)
@@ -212,12 +221,12 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                 ora = _ora_locale_corrente()
                 inizio, fine = wa_timing.effective_wa_active_hours(campaign)
                 if not (inizio <= ora < fine):
-                    await _rilascia_lock(db, cc)
+                    await _rilascia_lock(db, cc_id)
                     esito["motivo"] = "fuori_finestra"
                     break
 
                 if not await wa_number_manager.has_wa_send_budget(db, number, campaign):
-                    await _rilascia_lock(db, cc)
+                    await _rilascia_lock(db, cc_id)
                     esito["motivo"] = "cap_esaurito"
                     break
 
@@ -237,9 +246,25 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                     # 'queued': stesso ramo del guasto nostro qui sotto,
                     # rilascia il lock e arma FM2. Nessun numero in chiaro:
                     # solo l'id opaco del contatto.
+                    #
+                    # Rollback PRIMA di tutto (review finale round 2, gap
+                    # residuo su Fix 4): se l'eccezione viene da un
+                    # db.commit() fallito dentro invia_a_contatto, la
+                    # AsyncSession resta in stato must-rollback -- la
+                    # prossima istruzione che tocca db (_rilascia_lock, qui
+                    # sotto) solleverebbe PendingRollbackError FUORI da
+                    # questo except, ripresentando I7 identico per la classe
+                    # di eccezione piu' citata nel finding originale.
+                    # Difensivo (stesso pattern di browser_bio._resilient_
+                    # release e bot_state_service.halt/resume): un rollback
+                    # su una sessione gia' pulita e' un no-op innocuo.
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
                     logger.error(f"[WA] invia_a_contatto: eccezione imprevista su "
-                                f"contatto {contact.id} (cc={cc.id}): "
-                                f"{type(exc).__name__}: {exc}")
+                                f"contatto {contact_id} (cc={cc_id}): "
+                                f"{type(exc).__name__}")
                     res = wa_sender.EsitoInvio("queued", f"eccezione:{type(exc).__name__}")
                 processati += 1
 
@@ -253,11 +278,11 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                     esito["falliti"] += 1
                     guasti_consecutivi = 0
                 else:  # 'queued' = guasto nostro, il contatto non si tocca
-                    await _rilascia_lock(db, cc)
+                    await _rilascia_lock(db, cc_id)
                     guasti_consecutivi += 1
 
                 if guasti_consecutivi >= MAX_GUASTI_CONSECUTIVI:
-                    await _ferma_numero_per_guasto(db, number_id, campaign.id,
+                    await _ferma_numero_per_guasto(db, number_id, campaign_id,
                                                    guasti_consecutivi)
                     esito["motivo"] = "guasti_consecutivi"
                     break
@@ -270,9 +295,14 @@ async def esegui_mini_sessione(number_id: str) -> dict:
     return esito
 
 
-async def _rilascia_lock(db, cc) -> None:
+async def _rilascia_lock(db, cc_id: str) -> None:
+    """Prende l'id, non l'oggetto ORM: dopo un rollback (Fix B, review
+    finale round 2) l'oggetto e' expired e rileggerne un attributo qui
+    dentro solleverebbe un lazy-load implicito (MissingGreenlet in
+    AsyncSession). L'id e' un valore semplice, indipendente dallo stato
+    della sessione."""
     from app.models.wa import WaCampaignContact
-    await db.execute(update(WaCampaignContact).where(WaCampaignContact.id == cc.id)
+    await db.execute(update(WaCampaignContact).where(WaCampaignContact.id == cc_id)
                      .values(locked_by=None, locked_at=None))
     await db.commit()
 

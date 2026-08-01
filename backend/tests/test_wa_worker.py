@@ -349,6 +349,47 @@ async def test_eccezione_imprevista_in_invia_a_contatto_non_rompe_la_mini_sessio
     assert cc.locked_by is None and cc.locked_at is None
 
 
+@pytest.mark.asyncio
+async def test_fix_b_rollback_dopo_eccezione_evita_pendingrollbackerror(
+        db_session, monkeypatch):
+    """Fix B (review finale round 2, gap residuo su Fix 4/I7): quando
+    l'eccezione IMPREVISTA da invia_a_contatto viene da un db.commit()
+    fallito -- uno dei due trigger nominati nel finding originale, non un
+    RuntimeError qualsiasi -- la AsyncSession resta genuinamente in stato
+    'pending rollback'. Senza un rollback esplicito PRIMA di
+    _rilascia_lock, la prima istruzione successiva che tocca db avrebbe
+    sollevato PendingRollbackError FUORI da questo except, ripresentando
+    I7 identico proprio per la classe di eccezione piu' citata.
+
+    Qui si forza un commit fallito VERO (PK duplicata su wa_contacts, non
+    un'eccezione inventata): e' lo stesso stato di sessione che lascerebbe
+    un commit fallito dentro invia_a_contatto."""
+    from sqlalchemy import select
+    from app.models.wa import WaCampaignContact, WaContact
+
+    async def _fake_invio_commit_fallito(db, pom, *, contact, **kw):
+        dup = WaContact(id=contact.id, tenant_id=contact.tenant_id,
+                        phone_hmac="dup-hmac", encrypted_phone="dup",
+                        display_name="dup")
+        db.add(dup)
+        await db.commit()   # IntegrityError: PK duplicata -> pending-rollback
+
+    ctx_out: dict = {}
+    esito = await _mini_sessione_con_doppi(
+        db_session, monkeypatch, fake_invio=_fake_invio_commit_fallito,
+        contatti=1, _ctx_out=ctx_out)
+
+    # Se PendingRollbackError fosse sfuggita da _rilascia_lock, non saremmo
+    # arrivati qui: esegui_mini_sessione l'avrebbe propagata fuori. Con un
+    # solo contatto (sotto MAX_GUASTI_CONSECUTIVI) la sessione chiude
+    # regolarmente come 'completata', non come guasto.
+    assert esito["motivo"] == "completata"
+
+    cc = await db_session.scalar(
+        select(WaCampaignContact).where(WaCampaignContact.id == ctx_out["cc"].id))
+    assert cc.locked_by is None and cc.locked_at is None
+
+
 # ---------------------------------------------------------------------------
 # QA M3 (Task 15 Step 3): items funzionali 7, 15, 17, 18, 20, 22 e
 # adversarial D20/D21, G26/G27.
