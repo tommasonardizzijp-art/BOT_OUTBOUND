@@ -151,6 +151,32 @@ async def test_due_worker_concorrenti_non_prendono_la_stessa_riga(db_session):
 
 
 @pytest.mark.asyncio
+async def test_claim_current_step_zero_avanza_a_step_uno_non_ristagna(db_session):
+    """Fix 5 (review finale, dormiente ma un-liner): (cc.current_step or -1)
+    ha la trappola falsy-zero di Python -- con current_step=0 (contatto che
+    ha GIA' completato lo step 0), '0 or -1' vale -1 (0 e' falsy), quindi
+    -1+1=0 riseleziona lo STESSO step 0 invece di avanzare all'1. Dormiente
+    sotto l'MVP a singolo step, ma un vincolo di codice fragile da lasciare
+    documentato invece che corretto."""
+    from app.models.wa import WaContactStatus, WaSendCondition, WaSequenceStep
+
+    ctx = await _scenario_claim(db_session)
+    step1 = WaSequenceStep(id=str(uuid.uuid4()), campaign_id=ctx["campaign"].id,
+                           step_index=1, template_a="Secondo messaggio.",
+                           send_condition=WaSendCondition.always, wait_days=3)
+    db_session.add(step1)
+    ctx["cc"].current_step = 0
+    ctx["cc"].status = WaContactStatus.in_sequence
+    await db_session.commit()
+
+    preso = await wa_worker.claim_next_wa_contact(
+        db_session, number_id=ctx["number"].id, worker_id="w1")
+    assert preso is not None
+    _, _, _, step = preso
+    assert step.step_index == 1
+
+
+@pytest.mark.asyncio
 async def test_claim_ignora_contatto_oltre_soglia_fallimenti(db_session, monkeypatch):
     from app.config import settings
     monkeypatch.setattr(settings, "wa_max_failures_per_contact", 3)

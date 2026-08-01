@@ -98,7 +98,8 @@ async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
     step = await db.scalar(
         select(WaSequenceStep).where(
             WaSequenceStep.campaign_id == campaign.id,
-            WaSequenceStep.step_index == (cc.current_step or -1) + 1,
+            WaSequenceStep.step_index == (
+                cc.current_step if cc.current_step is not None else -1) + 1,
         )
     )
     if step is None:
