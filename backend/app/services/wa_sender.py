@@ -155,7 +155,7 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
 def prepara_testo(step, contact, campaign) -> tuple[str, str]:
     """(testo pronto da digitare, variante 'a'..'d').
 
-    Il rendering vero sta in wa_template.py, che e' di M2 (contratto §2.4):
+    Il rendering vero sta in wa_template.py, che e' di M2 (contratto sez. 2.4):
     qui si sceglie la variante, si rende, e si appende la CTA di opt-out --
     che il renderer NON deve conoscere, perche' e' una regola di campagna,
     non di template.
@@ -177,7 +177,7 @@ def prepara_testo(step, contact, campaign) -> tuple[str, str]:
         if not cta:
             raise ValueError(
                 "Campagna con optout_enabled=True e optout_cta vuota: non si "
-                "manda marketing senza via d'uscita (contratto §2.1)."
+                "manda marketing senza via d'uscita (contratto sez. 2.1)."
             )
         testo = f"{testo}\n\n{cta}"
 
