@@ -43,7 +43,7 @@ class EsitoApertura:
 
 
 def valuta_apertura(res: OpenResult) -> EsitoApertura:
-    """Traduce (ok, signal) del POM nella decisione. Contratto §3.1-3.2.
+    """Traduce (ok, signal) del POM nella decisione. Contratto sez. 3.1-3.2.
 
     Fail-closed su tutto cio' che non e' riconosciuto: un segnale nuovo
     (POM aggiornato, WhatsApp cambiato) non deve mai finire nel ramo che
@@ -70,7 +70,7 @@ def valuta_apertura(res: OpenResult) -> EsitoApertura:
         return EsitoApertura(False, None, signal.split(":", 1)[1], True)
 
     if signal == _SEGNALE_RICERCA_VUOTA:
-        # Ambiguo: lo scioglie il chiamante col contesto di sessione (§3.3).
+        # Ambiguo: lo scioglie il chiamante col contesto di sessione (sez. 3.3).
         return EsitoApertura(False, None, "ricerca_senza_risultati", False)
 
     logger.error(f"valuta_apertura: segnale non catalogato {signal!r} -- "
