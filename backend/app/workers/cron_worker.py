@@ -2,9 +2,10 @@
 
 Run: arq app.workers.cron_worker.CronWorkerSettings
 """
+import arq
 from arq import cron
 
-from app.services.work_enqueue import ARQ_CRON_QUEUE, arq_redis_settings
+from app.services.work_enqueue import ARQ_CRON_QUEUE, ARQ_MAIN_QUEUE, arq_redis_settings
 from app.services.wa_session import check_session
 from app.workers.task_queue import (
     check_replies,
@@ -15,6 +16,28 @@ from app.workers.task_queue import (
 )
 
 
+async def _wa_send_job_is_active(redis, number_id: str) -> bool:
+    """True se wa_send_task per questo numero e' 'queued' o 'in_progress' su
+    ARQ (Fix 1, review finale C1): il worker di invio potrebbe avere in quel
+    momento il browser aperto sullo STESSO profilo Chromium del
+    health-check. _open_wa_browser (M1, frozen) cancella SingletonLock/
+    Cookie/Socket del profilo come parte del suo cleanup: il guardiano OS
+    che impedirebbe un secondo Chromium concorrente sparisce, quindi il
+    secondo avvio APRE DAVVERO invece di fallire -- corruzione profilo,
+    sessione WhatsApp persa, QR da far riscansionare al cliente.
+
+    'deferred' NON conta come attivo: nessun browser e' aperto finche' il
+    job non viene pescato dalla coda, e trattarlo come attivo fermerebbe il
+    health-check quasi sempre (dopo ogni mini-sessione c'e' sempre un
+    wa_send_task deferred in attesa del break)."""
+    from arq.jobs import Job, JobStatus
+    from app.workers.wa_worker import wa_send_job_id
+
+    job = Job(wa_send_job_id(number_id), redis, _queue_name=ARQ_MAIN_QUEUE)
+    status = await job.status()
+    return status in (JobStatus.queued, JobStatus.in_progress)
+
+
 async def wa_session_healthcheck(ctx: dict) -> dict:
     """Ogni 30 minuti nelle ore attive (SDD Q56): per ogni numero non
     ritirato, guarda se la sessione e' viva; se e' caduta mette in pausa le
@@ -22,7 +45,8 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
 
     Il check apre il browser headless (check_session, M1): e' l'operazione
     piu' cara di questo cron, ed e' il motivo per cui gira su un cron
-    dedicato e non dentro il worker di invio.
+    dedicato e non dentro il worker di invio. Prima di aprirlo si verifica
+    che wa_send_task non stia gia' usando lo stesso profilo (Fix 1).
     """
     from app.database import AsyncSessionLocal
     from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
@@ -33,7 +57,8 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
     from loguru import logger
     from sqlalchemy import select, update
 
-    esito = {"controllati": 0, "caduti": 0, "cooldown_rilasciati": 0, "lock_rilasciati": 0}
+    esito = {"controllati": 0, "caduti": 0, "cooldown_rilasciati": 0,
+             "lock_rilasciati": 0, "saltati_invio_attivo": 0}
 
     async with AsyncSessionLocal() as db:
         numeri = (await db.execute(
@@ -43,28 +68,38 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
         )).scalars().all()
         ids = [n.id for n in numeri]
 
-    for number_id in ids:
-        esito["controllati"] += 1
-        try:
-            stato = await check_session(number_id)
-        except Exception as exc:
-            logger.error(f"[WA] health-check {number_id} fallito: {type(exc).__name__}")
-            continue
-        if stato == WaNumberStatus.active:
-            continue
-        esito["caduti"] += 1
-        async with AsyncSessionLocal() as db:
-            await db.execute(
-                update(WaCampaign)
-                .where(WaCampaign.wa_number_id == number_id,
-                       WaCampaign.status == WaCampaignStatus.running)
-                .values(status=WaCampaignStatus.paused)
-            )
-            await db.commit()
-        await notifier.send_telegram(
-            f"WhatsApp: numero {number_id[:8]} -> {stato.value}. "
-            "Campagne in pausa. Serve un nuovo QR (lo scansiona il cliente).",
-            level="error")
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        for number_id in ids:
+            if await _wa_send_job_is_active(redis, number_id):
+                esito["saltati_invio_attivo"] += 1
+                logger.info(f"[WA] health-check {number_id[:8]} saltato: "
+                           "wa_send_task attivo sullo stesso profilo")
+                continue
+
+            esito["controllati"] += 1
+            try:
+                stato = await check_session(number_id)
+            except Exception as exc:
+                logger.error(f"[WA] health-check {number_id} fallito: {type(exc).__name__}")
+                continue
+            if stato == WaNumberStatus.active:
+                continue
+            esito["caduti"] += 1
+            async with AsyncSessionLocal() as db:
+                await db.execute(
+                    update(WaCampaign)
+                    .where(WaCampaign.wa_number_id == number_id,
+                           WaCampaign.status == WaCampaignStatus.running)
+                    .values(status=WaCampaignStatus.paused)
+                )
+                await db.commit()
+            await notifier.send_telegram(
+                f"WhatsApp: numero {number_id[:8]} -> {stato.value}. "
+                "Campagne in pausa. Serve un nuovo QR (lo scansiona il cliente).",
+                level="error")
+    finally:
+        await redis.aclose()
 
     esito["cooldown_rilasciati"] = len(await wa_number_manager.release_expired_wa_cooldowns())
 

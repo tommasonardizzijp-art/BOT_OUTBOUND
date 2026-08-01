@@ -136,6 +136,77 @@ async def test_19_healthcheck_avvisa_telegram_su_sessione_caduta(db_session, mon
     assert "WhatsApp" in chiamate[0][0]
 
 
+@pytest.mark.asyncio
+async def test_healthcheck_salta_numero_con_wa_send_task_attivo(db_session, monkeypatch):
+    """Fix 1 (review finale, Critical): cron health-check e worker di invio
+    sono due processi ARQ separati che possono aprire lo STESSO profilo
+    Chromium in parallelo (_open_wa_browser cancella i lock OS del profilo
+    come parte del suo cleanup, quindi il secondo avvio SUCCEDE invece di
+    fallire -- corruzione profilo, sessione WA persa). Se wa_send_task e'
+    queued/in_progress per un numero, l'health-check lo salta invece di
+    chiamare check_session su quello stesso numero."""
+    from app.models.wa import WaNumberStatus
+    from app.workers import cron_worker
+
+    ctx = await _scenario_claim(db_session)
+
+    chiamati = []
+
+    async def _fake_check(number_id):
+        chiamati.append(number_id)
+        return WaNumberStatus.active
+    monkeypatch.setattr(cron_worker, "check_session", _fake_check)
+
+    async def _fake_job_attivo(redis, number_id):
+        return number_id == ctx["number"].id
+    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
+
+    class _FakeRedis:
+        async def aclose(self):
+            pass
+
+    async def _fake_pool(*a, **kw):
+        return _FakeRedis()
+    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
+
+    esito = await cron_worker.wa_session_healthcheck({})
+    assert ctx["number"].id not in chiamati
+    assert esito["saltati_invio_attivo"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_controlla_numero_senza_job_attivo(db_session, monkeypatch):
+    """Contro-prova: un numero SENZA wa_send_task attivo viene controllato
+    normalmente -- il fix non deve fermare tutto il health-check."""
+    from app.models.wa import WaNumberStatus
+    from app.workers import cron_worker
+
+    ctx = await _scenario_claim(db_session)
+
+    chiamati = []
+
+    async def _fake_check(number_id):
+        chiamati.append(number_id)
+        return WaNumberStatus.active
+    monkeypatch.setattr(cron_worker, "check_session", _fake_check)
+
+    async def _fake_job_attivo(redis, number_id):
+        return False
+    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
+
+    class _FakeRedis:
+        async def aclose(self):
+            pass
+
+    async def _fake_pool(*a, **kw):
+        return _FakeRedis()
+    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
+
+    esito = await cron_worker.wa_session_healthcheck({})
+    assert ctx["number"].id in chiamati
+    assert esito["saltati_invio_attivo"] == 0
+
+
 def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():
     """Non-regressione: cron_worker.py e' condiviso con Instagram in
     produzione. Ogni entry di cron_jobs e' un arq.cron.CronJob: il nome
