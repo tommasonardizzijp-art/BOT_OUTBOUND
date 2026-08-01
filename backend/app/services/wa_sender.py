@@ -150,3 +150,35 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
         return EsitoGuardia(False, "ha_risposto", prova=coda[-1][:300])
 
     return EsitoGuardia(True, "silenzio")
+
+
+def prepara_testo(step, contact, campaign) -> tuple[str, str]:
+    """(testo pronto da digitare, variante 'a'..'d').
+
+    Il rendering vero sta in wa_template.py, che e' di M2 (contratto §2.4):
+    qui si sceglie la variante, si rende, e si appende la CTA di opt-out --
+    che il renderer NON deve conoscere, perche' e' una regola di campagna,
+    non di template.
+    """
+    from app.services.wa_template import pick_wa_template, render_wa_template
+
+    template, variante = pick_wa_template(step)
+    testo = render_wa_template(
+        template,
+        display_name=getattr(contact, "display_name", None),
+        attributes=getattr(contact, "attributes", None),
+    )
+
+    # CTA solo sul PRIMO messaggio della sequenza (SDD 7.2): ripeterla a
+    # ogni step la trasforma in rumore, e l'obbligo ePrivacy riguarda il
+    # primo contatto della campagna.
+    if step.step_index == 0 and getattr(campaign, "optout_enabled", False):
+        cta = (getattr(campaign, "optout_cta", None) or "").strip()
+        if not cta:
+            raise ValueError(
+                "Campagna con optout_enabled=True e optout_cta vuota: non si "
+                "manda marketing senza via d'uscita (contratto §2.1)."
+            )
+        testo = f"{testo}\n\n{cta}"
+
+    return testo, variante

@@ -199,3 +199,63 @@ async def test_scroll_mai_tentato_blocca(monkeypatch):
         pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
     assert esito.puo_inviare is False
     assert esito.motivo == "storico_non_caricato"
+
+
+from types import SimpleNamespace
+
+
+def _step(**over):
+    base = dict(step_index=0, template_a="Ciao {nome}, promo attiva.",
+                template_b=None, template_c=None, template_d=None)
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _campaign(**over):
+    base = dict(optout_enabled=True, optout_cta="Scrivi STOP per non ricevere piu' messaggi.")
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _contact(**over):
+    base = dict(display_name="Marco", attributes=None)
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_cta_appesa_solo_allo_step_zero():
+    testo, variante = wa_sender.prepara_testo(_step(step_index=0), _contact(), _campaign())
+    assert testo.endswith("Scrivi STOP per non ricevere piu' messaggi.")
+    assert variante == "a"
+
+    testo2, _ = wa_sender.prepara_testo(_step(step_index=1), _contact(), _campaign())
+    assert "STOP" not in testo2
+
+
+def test_cta_non_appesa_se_optout_disabilitato():
+    testo, _ = wa_sender.prepara_testo(
+        _step(), _contact(), _campaign(optout_enabled=False))
+    assert "STOP" not in testo
+
+
+def test_cta_vuota_con_optout_attivo_solleva():
+    """Una campagna marketing senza via d'uscita non deve partire. M2 lo
+    blocca a 422 in creazione; qui e' la seconda rete, perche' i dati a DB
+    possono essere stati scritti prima di quella validazione."""
+    with pytest.raises(ValueError):
+        wa_sender.prepara_testo(_step(), _contact(),
+                                _campaign(optout_cta="   "))
+
+
+def test_placeholder_mancante_solleva_e_non_manda_messaggio_monco():
+    from app.services.wa_template import TemplateRenderError
+    step = _step(template_a="Ciao {nome}, il tuo ultimo ordine e' del {ultimo_ordine}.")
+    with pytest.raises(TemplateRenderError):
+        wa_sender.prepara_testo(step, _contact(attributes={}), _campaign())
+
+
+def test_placeholder_presente_viene_valorizzato():
+    step = _step(template_a="Ciao {nome}, ultimo ordine {ultimo_ordine}.")
+    testo, _ = wa_sender.prepara_testo(
+        step, _contact(attributes={"ultimo_ordine": "10/01/2026"}), _campaign())
+    assert "10/01/2026" in testo and "Marco" in testo
