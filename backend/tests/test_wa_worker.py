@@ -209,6 +209,10 @@ async def _mini_sessione_con_doppi(db_session, monkeypatch, *, contatti=1,
         return budget
     monkeypatch.setattr(wnm, "has_wa_send_budget", _budget)
 
+    async def _cooldown_noop(*a, **kw):
+        return None
+    monkeypatch.setattr(wnm, "apply_wa_cooldown", _cooldown_noop)
+
     @contextlib.asynccontextmanager
     async def _ctx(*a, **kw):
         class _Ctx:

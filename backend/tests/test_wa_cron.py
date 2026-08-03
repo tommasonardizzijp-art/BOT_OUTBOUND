@@ -69,6 +69,18 @@ async def test_healthcheck_mette_in_pausa_le_campagne_del_numero_caduto(db_sessi
         return WaNumberStatus.qr_required
     monkeypatch.setattr(cron_worker, "check_session", _fake_check)
 
+    async def _fake_job_attivo(redis, number_id):
+        return False
+    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
+
+    class _FakeRedis:
+        async def aclose(self):
+            pass
+
+    async def _fake_pool(*a, **kw):
+        return _FakeRedis()
+    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
+
     await cron_worker.wa_session_healthcheck({})
     await db_session.refresh(ctx["campaign"])
     assert ctx["campaign"].status == WaCampaignStatus.paused
@@ -84,6 +96,18 @@ async def test_healthcheck_non_tocca_le_campagne_se_la_sessione_e_viva(db_sessio
     async def _fake_check(number_id):
         return WaNumberStatus.active
     monkeypatch.setattr(cron_worker, "check_session", _fake_check)
+
+    async def _fake_job_attivo(redis, number_id):
+        return False
+    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
+
+    class _FakeRedis:
+        async def aclose(self):
+            pass
+
+    async def _fake_pool(*a, **kw):
+        return _FakeRedis()
+    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
 
     await cron_worker.wa_session_healthcheck({})
     await db_session.refresh(ctx["campaign"])
@@ -104,6 +128,18 @@ async def test_healthcheck_rilascia_i_lock_stale(db_session, monkeypatch):
     async def _fake_check(number_id):
         return WaNumberStatus.active
     monkeypatch.setattr(cron_worker, "check_session", _fake_check)
+
+    async def _fake_job_attivo(redis, number_id):
+        return False
+    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
+
+    class _FakeRedis:
+        async def aclose(self):
+            pass
+
+    async def _fake_pool(*a, **kw):
+        return _FakeRedis()
+    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
 
     await cron_worker.wa_session_healthcheck({})
     await db_session.refresh(ctx["cc"])
@@ -129,6 +165,18 @@ async def test_19_healthcheck_avvisa_telegram_su_sessione_caduta(db_session, mon
     async def _fake_telegram(msg, level="info"):
         chiamate.append((msg, level))
     monkeypatch.setattr(notifier, "send_telegram", _fake_telegram)
+
+    async def _fake_job_attivo(redis, number_id):
+        return False
+    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
+
+    class _FakeRedis:
+        async def aclose(self):
+            pass
+
+    async def _fake_pool(*a, **kw):
+        return _FakeRedis()
+    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
 
     esito = await cron_worker.wa_session_healthcheck({})
     assert esito["caduti"] >= 1
