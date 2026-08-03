@@ -5,14 +5,16 @@ SDD §9). Matching contatto, dedup eventi, dispatch opt-out/replied.
 """
 from datetime import datetime
 
+from loguru import logger
 from sqlalchemy import func, select
 
-from app.browser.whatsapp_page import ChatRow
+from app.browser.whatsapp_page import ChatRow, WhatsAppWebPage
 from app.config import settings
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                            WaContact, WaContactStatus, WaInboundEvent,
                            WaMatchedBy, WaNumber, WaNumberStatus)
-from app.services import wa_optout
+from app.services import bot_state_service, wa_optout, wa_profile_lock
+from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
 from app.utils import events
 from app.utils.phone_pseudonym import PhoneNormalizationError, hmac_phone, normalize_e164
 
@@ -166,3 +168,51 @@ async def numeri_da_scansionare(db) -> list[str]:
         .distinct()
     )
     return [r[0] for r in righe.all()]
+
+
+async def scan_number(number_id: str) -> dict:
+    """Una scansione della lista chat per UN numero: apre il browser sotto
+    lucchetto profilo, legge SOLO la sidebar (mai una chat), processa ogni
+    riga con unread>0. Short-lived, nessun sleep lungo."""
+    from app.database import AsyncSessionLocal
+
+    esito = {"scansionate": 0, "optout": 0, "replied": 0, "non_associati": 0, "motivo": None}
+
+    if await bot_state_service.is_wa_halted():
+        esito["motivo"] = "wa_halted"
+        return esito
+
+    async with AsyncSessionLocal() as db:
+        numero = await db.scalar(select(WaNumber).where(WaNumber.id == number_id))
+        if numero is None or numero.status != WaNumberStatus.active:
+            esito["motivo"] = "numero_non_attivo"
+            return esito
+        tenant_id, proxy_url = numero.tenant_id, numero.proxy_url
+
+    try:
+        async with wa_profile_lock.held(number_id):
+            async with _open_wa_browser(number_id, headless=True, proxy_url=proxy_url) as context:
+                page = await context.new_page()
+                await page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
+                pom = WhatsAppWebPage(page)
+                righe = await pom.scan_chat_list()
+    except wa_profile_lock.WaProfileBusy:
+        esito["motivo"] = "profilo_occupato"
+        return esito
+
+    async with AsyncSessionLocal() as db:
+        for row in righe:
+            if row.unread_count <= 0:
+                continue
+            esito["scansionate"] += 1
+            risultato = await process_chat_row(db, tenant_id=tenant_id,
+                                               wa_number_id=number_id, row=row)
+            if risultato["esito"] == "optout":
+                esito["optout"] += 1
+            elif risultato["esito"] == "replied":
+                esito["replied"] += 1
+            elif risultato["esito"] == "non_associato":
+                esito["non_associati"] += 1
+
+    logger.info(f"[WA] reply-scan {number_id}: {esito}")
+    return esito

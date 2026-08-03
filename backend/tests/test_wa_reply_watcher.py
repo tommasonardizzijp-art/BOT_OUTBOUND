@@ -220,3 +220,56 @@ async def test_numeri_da_scansionare_solo_con_lavoro_vivo(db_session):
     ids = await numeri_da_scansionare(db_session)
     assert numero_vivo.id in ids
     assert numero_finito.id not in ids
+
+
+@pytest.mark.asyncio
+async def test_scan_number_processa_le_righe_non_lette(db_session, monkeypatch):
+    from app.services import wa_reply_watcher
+    from app.database import AsyncSessionLocal
+    from tests.factories_wa import make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    await db_session.commit()
+
+    righe_finte = [
+        _row("Marco", preview="ciao", unread=1),
+        _row("Altro", preview="test", unread=0),  # unread=0, va ignorata
+    ]
+
+    class _PomFinto:
+        def __init__(self, page):
+            pass
+
+        async def scan_chat_list(self):
+            return righe_finte
+
+    monkeypatch.setattr(wa_reply_watcher, "WhatsAppWebPage", _PomFinto)
+
+    class _ContextFinto:
+        async def new_page(self):
+            class _PageFinta:
+                async def goto(self, *a, **k):
+                    pass
+            return _PageFinta()
+
+    class _BrowserCtx:
+        def __call__(self, number_id, headless=True, proxy_url=None):
+            return self
+
+        async def __aenter__(self):
+            return _ContextFinto()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(wa_reply_watcher, "_open_wa_browser", _BrowserCtx())
+
+    async def _mai_halted():
+        return False
+    monkeypatch.setattr(wa_reply_watcher.bot_state_service, "is_wa_halted", _mai_halted)
+
+    esito = await wa_reply_watcher.scan_number(numero.id)
+    assert esito["scansionate"] == 1  # solo la riga con unread>0
