@@ -42,7 +42,12 @@ async def test_il_numero_non_e_mai_esposto_in_chiaro(db_session):
     tenant = await make_tenant(db_session)
     await make_number(db_session, tenant, e164="+393421460077")
     await db_session.commit()
-    elenco = await wa_numbers.lista(db=db_session)
+    # Filtrato sul PROPRIO tenant: senza, lista() serializza ogni WaNumber del
+    # DB sqlite condiviso, e altri file di test (test_wa_number_manager,
+    # test_wa_optout, test_wa_worker) inseriscono righe con encrypted_phone
+    # finto ("e", "e1"), che fa esplodere decrypt() con InvalidToken. Il
+    # fallimento dipendeva dall'ordine dei file, quindi appariva e spariva.
+    elenco = await wa_numbers.lista(tenant_id=tenant.id, db=db_session)
     testo = str(elenco)
     assert "3421460077" not in testo
     assert "•" in testo
