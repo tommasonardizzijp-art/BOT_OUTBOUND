@@ -187,19 +187,43 @@ async def test_claim_ignora_contatto_oltre_soglia_fallimenti(db_session, monkeyp
         db_session, number_id=ctx["number"].id, worker_id="w1") is None
 
 
+def _lock_profilo_libero(monkeypatch, renew_recorder: list | None = None):
+    """Lucchetto profilo finto: `wa_profile_lock.held` farebbe un
+    `arq.create_pool` VERO, e senza un demone Redis vivo l'attesa e' di ~50s
+    (conn_retries=10 x conn_retry_delay=2) prima del fallimento -- un test di
+    pura logica non deve dipendere da un'infrastruttura esterna. I test che
+    provano DELIBERATAMENTE la mutua esclusione (fixture _redis_o_skip in
+    test_wa_profile_lock.py) e il ramo WaProfileBusy restano com'erano."""
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def _libero(number_id, *, ttl_min=None):
+        yield "token-di-test"
+    monkeypatch.setattr(wa_worker.wa_profile_lock, "held", _libero)
+
+    async def _renew(number_id, token, *, ttl_min=None):
+        if renew_recorder is not None:
+            renew_recorder.append((number_id, token))
+        return True
+    monkeypatch.setattr(wa_worker.wa_profile_lock, "renew", _renew)
+
+
 async def _mini_sessione_con_doppi(db_session, monkeypatch, *, contatti=1,
                                    budget=True, ora_corrente=12,
                                    fake_invio=None, halted_getter=None,
+                                   renew_recorder: list | None = None,
                                    _ctx_out: dict | None = None):
     """Esercita esegui_mini_sessione con browser/POM/orologio finti.
     Il browser vero e' esercitato SOLO nel Task 15 (prova dal vivo): qui si
-    prova la LOGICA, che e' dove hanno abitato tutti i difetti di M1."""
+    prova la LOGICA, che e' dove hanno abitato tutti i difetti di M1.
+    Anche il lucchetto profilo e' finto (vedi _lock_profilo_libero)."""
     import contextlib
     from app.config import settings
     from app.services import bot_state_service as bss, wa_number_manager as wnm
     from app.services.wa_sender import EsitoInvio
 
     monkeypatch.setattr(settings, "wa_send_enabled", True)
+    _lock_profilo_libero(monkeypatch, renew_recorder)
 
     async def _halted(db=None):
         return halted_getter() if halted_getter else False
@@ -626,6 +650,7 @@ async def test_22_campagna_paused_dal_inizio_esce_niente_da_fare(db_session, mon
         yield _Ctx()
     monkeypatch.setattr(wa_worker, "_open_wa_browser", _ctx_browser)
     monkeypatch.setattr(wa_worker, "WhatsAppWebPage", lambda page: object())
+    _lock_profilo_libero(monkeypatch)
 
     esito = await wa_worker.esegui_mini_sessione(ctx["number"].id)
     assert esito["motivo"] == "niente_da_fare"
@@ -854,6 +879,46 @@ async def test_mini_sessione_salta_se_profilo_occupato(db_session, monkeypatch):
     esito = await wa_worker.esegui_mini_sessione(ctx["number"].id)
     assert esito["motivo"] == "profilo_occupato"
     assert esito["inviati"] == 0
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_rinnova_il_lock_dopo_ogni_messaggio(db_session, monkeypatch):
+    """M4 fixwave C4(a): il TTL del lucchetto va rinnovato mentre la sessione
+    e' viva, altrimenti una sessione piu' lunga del TTL lascia il profilo
+    aperto con il lock gia' scaduto -- e un secondo consumatore aprirebbe
+    legittimamente un secondo Chromium sullo stesso profilo."""
+    rinnovi = []
+    esito = await _mini_sessione_con_doppi(db_session, monkeypatch, contatti=3,
+                                           renew_recorder=rinnovi)
+    assert esito["inviati"] == 3
+    assert len(rinnovi) == 3
+    ctx_number_ids = {n for n, _ in rinnovi}
+    assert len(ctx_number_ids) == 1
+    assert all(token == "token-di-test" for _, token in rinnovi)
+
+
+@pytest.mark.asyncio
+async def test_cap_wall_clock_chiude_la_sessione_prima_del_ttl(db_session, monkeypatch):
+    """M4 fixwave C4(c): oltre il cap la mini-sessione esce pulita con un
+    motivo dedicato, invece di continuare confidando solo nel TTL."""
+    from app.services.wa_sender import EsitoInvio
+
+    # Orologio finto: ogni invio "costa" 100 minuti, quindi al secondo giro il
+    # cap (ttl 90 - margine 5 = 85 min) e' gia' superato.
+    orologio = {"t": 0.0}
+    monkeypatch.setattr(wa_worker.time, "perf_counter", lambda: orologio["t"])
+
+    async def _invio_lentissimo(*a, **kw):
+        orologio["t"] += 100 * 60
+        return EsitoInvio("sent", "ok")
+
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_profile_lock_ttl_min", 90)
+
+    esito = await _mini_sessione_con_doppi(db_session, monkeypatch, contatti=3,
+                                           fake_invio=_invio_lentissimo)
+    assert esito["motivo"] == "timeout_sessione"
+    assert esito["inviati"] == 1
 
 
 @pytest.mark.asyncio

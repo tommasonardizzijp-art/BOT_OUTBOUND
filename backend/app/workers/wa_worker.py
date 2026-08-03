@@ -35,6 +35,14 @@ MAX_GUASTI_CONSECUTIVI = 3
 # corta da non lasciare il numero morto per giorni se l'alert viene perso.
 FM2_COOLDOWN_MINUTES = 4 * 60
 
+# Margine fra il cap wall-clock della mini-sessione e il TTL del lucchetto
+# profilo. La mini-sessione si ferma da sola PRIMA che il lock possa scadere,
+# invece di confidare solo nel TTL: cosi' anche se l'heartbeat non passasse
+# (Redis irraggiungibile) non esiste una finestra in cui il profilo e' aperto
+# ma il lock e' libero. 5 minuti coprono la chiusura del browser piu' il
+# rilascio del lock, che sono secondi.
+MARGINE_CAP_SESSIONE_MIN = 5
+
 
 async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
     """Prende UNA riga pronta per questo numero e la marca sotto lock.
@@ -130,6 +138,15 @@ def _ora_locale_corrente() -> int:
         return datetime.now(timezone(timedelta(hours=1))).hour
 
 
+def _limite_sessione_s() -> float:
+    """Durata massima wall-clock di una mini-sessione, sempre sotto il TTL del
+    lucchetto profilo. Il minimo di 60s evita che una configurazione con TTL
+    piccolo produca un limite nullo o negativo (che chiuderebbe ogni sessione
+    prima del primo messaggio)."""
+    return max(60.0, (int(settings.wa_profile_lock_ttl_min)
+                      - MARGINE_CAP_SESSIONE_MIN) * 60.0)
+
+
 async def esegui_mini_sessione(number_id: str) -> dict:
     """Una mini-sessione di invii per UN numero. Short-lived: apre il
     browser, manda al piu' N messaggi (wa_timing), chiude e lascia che sia
@@ -184,14 +201,24 @@ async def esegui_mini_sessione(number_id: str) -> dict:
     guasti_consecutivi = 0
 
     try:
-        async with wa_profile_lock.held(number_id):
+        async with wa_profile_lock.held(number_id) as lock_token:
             async with _open_wa_browser(number_id, headless=True, proxy_url=proxy_url) as context:
                 page = await context.new_page()
                 await page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
                 pom = WhatsAppWebPage(page)
                 browser_t0 = time.perf_counter()
+                limite_s = _limite_sessione_s()
 
                 while quanti is None or processati < quanti:
+                    # Cap wall-clock: la durata di una sessione ha una coda destra
+                    # lunga (delay lognormale + costo di invio), e sforare il TTL
+                    # del lucchetto significa un secondo Chromium sullo stesso
+                    # profilo. Si esce pulito prima, il worker rischedula dopo il
+                    # break come per qualunque altra sessione conclusa.
+                    if time.perf_counter() - browser_t0 >= limite_s:
+                        esito["motivo"] = "timeout_sessione"
+                        break
+
                     # I cancelli si ricontrollano a OGNI messaggio, non una volta a
                     # inizio sessione: una sessione dura decine di minuti e nel
                     # frattempo puo' cambiare tutto (kill-switch, cap, ora).
@@ -288,6 +315,12 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                                                            guasti_consecutivi)
                             esito["motivo"] = "guasti_consecutivi"
                             break
+
+                    # Heartbeat del lucchetto: rimette il TTL pieno ora che c'e'
+                    # un segno di vita fresco, cosi' la scadenza dipende
+                    # dall'ultimo messaggio e non dalla durata totale prevista
+                    # della sessione (che ha una coda destra lunga). Un EXPIRE.
+                    await wa_profile_lock.renew(number_id, lock_token)
 
                     # Delay lognormale FRA i messaggi, dentro la sessione. Non e' un
                     # "sleep lungo": e' la mediana di 90s che rende il ritmo umano.
@@ -399,7 +432,8 @@ async def wa_send_task(ctx: dict, number_id: str) -> None:
                     f"{settings.wa_lock_busy_retry_s}s")
         raise Retry(defer=int(settings.wa_lock_busy_retry_s))
 
-    # cap_esaurito / fuori_finestra / completata -> si riprende dopo il break.
+    # cap_esaurito / fuori_finestra / timeout_sessione / completata -> si
+    # riprende dopo il break.
     break_s = wa_timing.wa_session_break_seconds(
         await _campagna_attiva_del_numero(number_id))
     raise Retry(defer=int(break_s))

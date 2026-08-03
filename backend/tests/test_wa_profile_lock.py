@@ -48,6 +48,40 @@ async def test_held_non_rilascia_lock_altrui_scaduto(fake_redis):
     assert not await fake_redis.exists("wa:profile-lock:num-1")
 
 
+@pytest.mark.asyncio
+async def test_renew_rimette_il_ttl_pieno(fake_redis, monkeypatch):
+    """L'heartbeat deve spostare la scadenza in avanti: senza, una sessione
+    piu' lunga del TTL lascerebbe il profilo aperto con il lock gia' libero."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_profile_lock_ttl_min", 90)
+
+    async with wa_profile_lock.held("num-1", ttl_min=1) as token:
+        assert await fake_redis.ttl("wa:profile-lock:num-1") <= 60
+        assert await wa_profile_lock.renew("num-1", token) is True
+        assert await fake_redis.ttl("wa:profile-lock:num-1") > 60
+
+
+@pytest.mark.asyncio
+async def test_renew_non_tocca_un_lock_di_altri(fake_redis):
+    """Stesso principio del rilascio: se il TTL e' scaduto e un altro ha gia'
+    preso il lock, il rinnovo del primo non deve prolungare il lock del
+    secondo -- prolungherebbe una sessione altrui a sua insaputa."""
+    await fake_redis.set("wa:profile-lock:num-1", "token-di-un-altro", ex=600)
+    assert await wa_profile_lock.renew("num-1", "il-mio-token-vecchio") is False
+    assert (await fake_redis.get("wa:profile-lock:num-1")).decode() == "token-di-un-altro"
+
+
+@pytest.mark.asyncio
+async def test_renew_non_solleva_se_redis_non_risponde(monkeypatch):
+    """Un blip Redis non deve abbattere una mini-sessione di invio in corso:
+    restano il TTL gia' impostato e il cap wall-clock del chiamante."""
+    async def _pool_rotto(*_a, **_k):
+        raise ConnectionError("redis irraggiungibile")
+    monkeypatch.setattr(wa_profile_lock.arq, "create_pool", _pool_rotto)
+
+    assert await wa_profile_lock.renew("num-1", "token") is False
+
+
 @pytest_asyncio.fixture
 async def _redis_o_skip():
     import arq

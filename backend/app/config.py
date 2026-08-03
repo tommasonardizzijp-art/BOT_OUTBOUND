@@ -355,14 +355,31 @@ class Settings(BaseSettings):
     wa_global_daily_cap: int = 200              # SDD Q70, safety valve macchina
 
     # --- Canale WhatsApp: reply-watcher + opt-out (M4) --------------------
-    # Lucchetto profilo Chromium: TTL generoso per coprire una mini-sessione
-    # di invio nel caso peggiore (wa_session_max_msg=15 * delay mediano
-    # lognormale, coda destra inclusa) senza scadere mentre e' ancora in uso.
-    wa_profile_lock_ttl_min: int = 45
+    # Lucchetto profilo Chromium. Il conto vero di una mini-sessione nel caso
+    # peggiore: wa_session_max_msg=15 messaggi, ciascuno con il delay
+    # lognormale fra i messaggi (mediana 90s, coda destra inclusa) PIU' il
+    # costo di invio+guardia misurato in PoC-2 (~53s/messaggio) -- media ~40
+    # min, deviazione standard ~6 min. A 45 min circa una sessione su cinque
+    # sforava il TTL, e uno sforamento significa un secondo Chromium
+    # legittimamente aperto sullo stesso profilo (profilo corrotto, sessione
+    # WhatsApp persa, QR da far riscansionare al cliente). 90 min mette la
+    # scadenza a ~8 sigma dalla media; la difesa vera restano comunque
+    # l'heartbeat (wa_profile_lock.renew dopo ogni messaggio) e il cap
+    # wall-clock del loop di invio, non questo numero.
+    wa_profile_lock_ttl_min: int = 90
     # Retry breve quando un job di invio trova il profilo occupato (health-
     # check o reply-scan in corso): non e' la fine-sessione (break_s, minuti-
     # decine), e' "riprova fra un attimo".
     wa_lock_busy_retry_s: int = 90
+    # Quanto a lungo dopo l'ultimo invio un numero resta scansionabile dal
+    # reply-watcher per catturare risposte tardive. Serve perche' le campagne
+    # MVP sono a un solo step (SDD Q29): finito l'invio i contatti passano a
+    # 'completed' e il numero non avrebbe piu' "lavoro vivo" proprio quando le
+    # risposte iniziano ad arrivare (ore o giorni dopo). Valore arbitrario ma
+    # delimitato: oltre questa finestra si assume che una risposta non
+    # arrivera' piu' o non e' piu' rilevante operativamente -- un'inclusione
+    # senza limite dei 'completed' farebbe crescere la lista per sempre.
+    wa_reply_scan_window_days: int = 3
 
 
 settings = Settings()
