@@ -150,11 +150,12 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
         return {"esito": "duplicato", "contact_id": contatto.id}
 
     if wa_optout.looks_like_stop(row.preview):
+        gia_optato = bool(contatto.opted_out)
         cc_attiva = await _campagna_attiva_del_contatto(db, contatto.id)
         await wa_optout.persist_wa_optout(
             db, contatto.id, prova=row.preview,
             campaign_id=cc_attiva.campaign_id if cc_attiva else None)
-        if cc_attiva is not None:
+        if cc_attiva is not None and not gia_optato:
             await _incrementa_contatore_campagna(db, cc_attiva.campaign_id, "opted_out")
         db.add(WaInboundEvent(tenant_id=tenant_id, wa_number_id=wa_number_id,
                               contact_id=contatto.id, preview_text=row.preview,

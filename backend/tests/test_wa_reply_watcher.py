@@ -298,6 +298,47 @@ async def test_optout_incrementa_il_contatore_ed_emette_evento(db_session, monke
 
 
 @pytest.mark.asyncio
+async def test_optout_ripetuto_non_reincrementa_il_contatore(db_session, monkeypatch):
+    """N1 (final review): la riga campagna resta 'completed' (stato terminale,
+    persist_wa_optout non la flippa) quindi _campagna_attiva_del_contatto la
+    ritrova per sempre. Una seconda STOP con preview DIVERSA dalla prima
+    scavalca il dedup (che confronta solo l'ultimo evento salvato) e non deve
+    ricontare il contatto gia' opted_out."""
+    from app.services import wa_reply_watcher
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    _lock_profilo_libero(monkeypatch)
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna, contatto,
+                                status=WaContactStatus.completed, current_step=0)
+    await db_session.commit()
+
+    primo = await wa_reply_watcher.process_chat_row(
+        db_session, tenant_id=tenant.id, wa_number_id=numero.id,
+        row=_row("Marco", preview="stop"))
+    assert primo["esito"] == "optout"
+
+    secondo = await wa_reply_watcher.process_chat_row(
+        db_session, tenant_id=tenant.id, wa_number_id=numero.id,
+        row=_row("Marco", preview="ho detto stop, basta"))
+    assert secondo["esito"] == "optout"
+
+    await db_session.refresh(campagna)
+    assert campagna.opted_out == 1
+
+    await db_session.refresh(contatto)
+    assert contatto.opted_out is True
+    assert contatto.do_not_contact is True
+
+
+@pytest.mark.asyncio
 async def test_numero_resta_scansionabile_dopo_la_fine_degli_invii(db_session):
     """Contatti tutti 'completed' ma invio recente: il numero deve restare in
     lista, altrimenti la scansione si spegne proprio quando le risposte
