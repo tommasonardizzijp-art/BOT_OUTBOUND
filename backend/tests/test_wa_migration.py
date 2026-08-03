@@ -13,6 +13,10 @@ config.py (data/bot.db) -- il downgrade droppa tabelle.
 Lo stato "prod gia' a 024" viene fabbricato con i modelli SQLAlchemy REALI
 (create_all filtrato, escludendo le tabelle che la 025 introduce): e' piu'
 fedele di DDL scritto a mano, e non serve rigiocare la catena di migrazioni.
+Le colonne che una migrazione SUCCESSIVA alla 025 aggiunge a una tabella
+GIA' esistente (027 -> bot_state.wa_halted*) vanno tolte a parte: il modello
+corrente le ha gia', ma a "stamp 024" non devono esistere, altrimenti la 027
+duplica la colonna.
 """
 import os
 import sqlite3
@@ -70,6 +74,19 @@ def _seed_pre_025_schema(db_path: Path) -> None:
         Base.metadata.create_all(engine, tables=ig_tables)
     finally:
         engine.dispose()
+
+    # bot_state esiste gia' pre-025 (migrazione 007): la 027 (successiva)
+    # le aggiunge le colonne wa_halted*, che pero' il modello SQLAlchemy
+    # corrente ha gia' -- create_all le avrebbe create qui sopra insieme al
+    # resto della tabella. Le togliamo per fabbricare fedelmente lo stato
+    # "prima della 027".
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for col in ("wa_halted", "wa_halted_reason", "wa_halted_at", "wa_halted_by"):
+            conn.execute(f"ALTER TABLE bot_state DROP COLUMN {col}")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _sqlite_master(db_path: Path) -> list[tuple]:
