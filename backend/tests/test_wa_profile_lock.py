@@ -2,6 +2,7 @@ import asyncio
 import uuid
 
 import pytest
+import pytest_asyncio
 import fakeredis.aioredis
 
 from app.services import wa_profile_lock
@@ -47,20 +48,16 @@ async def test_held_non_rilascia_lock_altrui_scaduto(fake_redis):
     assert not await fake_redis.exists("wa:profile-lock:num-1")
 
 
-@pytest.fixture
-def _redis_o_skip():
+@pytest_asyncio.fixture
+async def _redis_o_skip():
     import arq
     from app.services.work_enqueue import arq_redis_settings
-
-    async def _check():
-        try:
-            pool = await arq.create_pool(arq_redis_settings())
-            await pool.ping()
-            await pool.aclose()
-        except Exception:
-            pytest.skip("Redis non raggiungibile in questo ambiente")
-
-    asyncio.run(_check())
+    try:
+        pool = await arq.create_pool(arq_redis_settings())
+        await pool.ping()
+        await pool.aclose()
+    except Exception:
+        pytest.skip("Redis non raggiungibile in questo ambiente")
 
 
 @pytest.mark.asyncio
