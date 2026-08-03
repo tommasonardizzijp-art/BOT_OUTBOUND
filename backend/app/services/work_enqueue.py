@@ -175,8 +175,22 @@ async def _enqueue_dm_workers_with_redis(redis, campaign_id: str) -> int:
 
     for index, (ca, account_username) in enumerate(campaign_accounts):
         job_id = dm_worker_job_id(campaign_id, ca.account_id)
+        # A worker already running or holding a parked retry (e.g. mid session-break,
+        # waiting to resume) must NOT be wiped: deleting its keys destroys the parked
+        # resume (its arq:job data disappears, the deferred re-run silently vanishes)
+        # while the account_lease it holds in Postgres survives untouched — the next
+        # fresh job then collides with that lease and dies, with nothing left
+        # scheduled to try again. Same guard as `_reenqueue_phase` for scrape/list/bios.
+        job_key, retry_key, in_progress_key = dm_worker_redis_keys(campaign_id, ca.account_id)
+        if await redis.exists(in_progress_key) or await redis.exists(job_key) or await redis.exists(retry_key):
+            logger.info(f"[Enqueue] {job_id} gia' in coda/esecuzione — skip enqueue duplicato")
+            # Counts as enqueued: a worker for this account is already alive/scheduled,
+            # which is the postcondition the caller (e.g. /start) cares about. Not
+            # counting it would make enqueue_campaign_run() report 0 and fail a resume
+            # that is actually fine.
+            enqueued += 1
+            continue
         defer_seconds = dm_startup_stagger_seconds(index)
-        await redis.delete(*dm_worker_redis_keys(campaign_id, ca.account_id))
         await redis.enqueue_job(
             "run_campaign_task",
             campaign_id,
