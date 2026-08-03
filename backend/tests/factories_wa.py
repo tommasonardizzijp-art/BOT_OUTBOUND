@@ -67,11 +67,12 @@ async def make_campaign(db, tenant, number, *, name="Campagna Test",
 
 
 async def make_campaign_contact(db, campaign, contact, *,
-                                status=WaContactStatus.queued) -> WaCampaignContact:
+                                status=WaContactStatus.queued,
+                                current_step: int = -1) -> WaCampaignContact:
     """Rispetta il contratto di consegna §7.1: next_action_at NON e' mai
     NULL su una riga non terminale, e i campi di lock restano vuoti (I1)."""
     cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id,
-                           contact_id=contact.id, status=status, current_step=-1,
+                           contact_id=contact.id, status=status, current_step=current_step,
                            next_action_at=datetime.utcnow(), failure_count=0)
     db.add(cc)
     await db.flush()
