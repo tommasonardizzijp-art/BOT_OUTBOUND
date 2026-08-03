@@ -235,6 +235,16 @@ async def test_wa_reply_scan_gira_solo_sui_numeri_con_lavoro(db_session, monkeyp
                                 status=WaContactStatus.in_sequence)
     await db_session.commit()
 
+    # numeri_da_scansionare mockata a una lista FISSA, come nel test gemello
+    # qui sotto: il DB di test e' condiviso fra i test del file, quindi
+    # un'uguaglianza stretta sul risultato della query reale passa o fallisce a
+    # seconda di quali altri test hanno gia' committato numeri con lavoro vivo.
+    # La selezione vera e' provata in test_wa_reply_watcher.py, contro il suo
+    # scenario isolato.
+    async def _fake_ids(db):
+        return [numero.id]
+    monkeypatch.setattr(cron_worker.wa_reply_watcher, "numeri_da_scansionare", _fake_ids)
+
     chiamate = []
     async def _fake_scan(number_id):
         chiamate.append(number_id)
@@ -295,6 +305,40 @@ async def test_wa_reply_scan_continua_dopo_eccezione_su_un_numero(db_session, mo
 
     assert chiamate == [numero_rotto.id, numero_ok.id]
     assert esito["numeri_scansionati"] == 1
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_continua_dopo_eccezione_generica_su_un_numero(
+        db_session, monkeypatch):
+    """Un guasto che non sia WaProfileBusy (es. un blip Redis dentro held())
+    non deve abortire il run: sotto il loop girano il rilascio dei cooldown
+    scaduti e dei lock stale, che valgono anche se un numero e' irraggiungibile.
+    Prima di questa fix il loop catturava SOLO WaProfileBusy."""
+    from datetime import datetime, timedelta
+    from app.workers import cron_worker
+
+    ctx = await _scenario_claim(db_session)
+    ctx["cc"].locked_by = "worker-morto"
+    ctx["cc"].locked_at = datetime.utcnow() - timedelta(minutes=45)
+    await db_session.commit()
+
+    def _held_rotto(number_id, *, ttl_min=None):
+        raise TimeoutError("redis non risponde")
+    monkeypatch.setattr(cron_worker.wa_profile_lock, "held", _held_rotto)
+
+    async def _fake_check(number_id):
+        raise AssertionError("check_session non deve partire se held() e' fallita")
+    monkeypatch.setattr(cron_worker, "check_session", _fake_check)
+
+    esito = await cron_worker.wa_session_healthcheck({})
+
+    assert esito["controllati"] == 0
+    # Il guasto NON e' un "saltato per invio attivo": quel contatore misura la
+    # contesa legittima sul profilo, non gli errori.
+    assert esito["saltati_invio_attivo"] == 0
+    # La coda del run e' comunque girata: il lock stale e' stato rilasciato.
+    await db_session.refresh(ctx["cc"])
+    assert ctx["cc"].locked_by is None
 
 
 def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():

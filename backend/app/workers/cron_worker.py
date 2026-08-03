@@ -76,6 +76,14 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
             esito["saltati_invio_attivo"] += 1
             logger.info(f"[WA] health-check {number_id[:8]} saltato: "
                        "profilo occupato (invio o reply-scan in corso)")
+        except Exception as exc:
+            # Qualunque altro guasto sul singolo numero (es. un blip Redis in
+            # held()) non deve abortire il run intero: sotto questo loop girano
+            # il rilascio dei cooldown scaduti e dei lock stale, che valgono
+            # anche quando un numero e' irraggiungibile. Stesso pattern
+            # per-numero gia' in uso in wa_reply_scan.
+            logger.error(f"[WA] health-check {number_id[:8]} saltato per un "
+                         f"guasto: {type(exc).__name__}")
 
     esito["cooldown_rilasciati"] = len(await wa_number_manager.release_expired_wa_cooldowns())
 
@@ -95,8 +103,15 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
 
 
 async def wa_reply_scan(ctx: dict) -> dict:
-    """Ogni scan: solo numeri con lavoro vivo (campagna running + contatti
-    queued/in_sequence), stessa finestra oraria degli invii (SDD §7.3).
+    """Ogni scan: solo numeri con lavoro da fare secondo
+    wa_reply_watcher.numeri_da_scansionare (campagna running con contatti
+    queued/in_sequence, oppure un invio recente).
+
+    La schedulazione resta dentro le ore attive come l'health-check, ma qui
+    NON si ricontrolla la finestra oraria a runtime (a differenza di
+    esegui_mini_sessione): una scansione non manda nulla, quindi non c'e'
+    niente da tenere dentro l'orario umano.
+
     Non e' tempo-critico per l'MVP (campagne a 1 messaggio, Q29): serve per
     KPI e per la rete di opt-out, la garanzia vera resta la guardia
     pre-invio (§7.5 punto 7)."""
@@ -111,7 +126,14 @@ async def wa_reply_scan(ctx: dict) -> dict:
         try:
             risultato = await wa_reply_watcher.scan_number(number_id)
         except Exception as exc:
-            logger.error(f"[WA] reply-scan {number_id} fallito: {type(exc).__name__}")
+            # Il messaggio si logga SOLO per RuntimeError: e' l'eccezione con
+            # cui scan_chat_list dice QUALE selettore e' disallineato, e senza
+            # quella diagnosi il log non serve a riparare nulla. Per le altre
+            # resta il solo tipo: potrebbero portarsi dietro una preview di
+            # conversazione (PII).
+            dettaglio = f" -- {exc}" if isinstance(exc, RuntimeError) else ""
+            logger.error(f"[WA] reply-scan {number_id} fallito: "
+                         f"{type(exc).__name__}{dettaglio}")
             continue
         if risultato["motivo"] is None:
             esito["numeri_scansionati"] += 1
