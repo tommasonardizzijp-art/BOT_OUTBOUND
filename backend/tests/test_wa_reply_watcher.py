@@ -191,3 +191,32 @@ async def test_process_row_replied_emette_evento(db_session, monkeypatch):
         row=_row("Marco", preview="ok grazie"))
     assert len(emessi) == 1
     assert emessi[0][0][1] == "wa.reply.received"
+
+
+@pytest.mark.asyncio
+async def test_numeri_da_scansionare_solo_con_lavoro_vivo(db_session):
+    from app.services.wa_reply_watcher import numeri_da_scansionare
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    tenant = await make_tenant(db_session)
+
+    numero_vivo = await make_number(db_session, tenant, label="Vivo")
+    contatto1 = await make_contact(db_session, tenant, e164="+393331111111")
+    campagna1, _ = await make_campaign(db_session, tenant, numero_vivo,
+                                       status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna1, contatto1,
+                                status=WaContactStatus.in_sequence)
+
+    numero_finito = await make_number(db_session, tenant, label="Finito")
+    contatto2 = await make_contact(db_session, tenant, e164="+393332222222")
+    campagna2, _ = await make_campaign(db_session, tenant, numero_finito,
+                                       status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna2, contatto2,
+                                status=WaContactStatus.completed)
+
+    await db_session.commit()
+
+    ids = await numeri_da_scansionare(db_session)
+    assert numero_vivo.id in ids
+    assert numero_finito.id not in ids

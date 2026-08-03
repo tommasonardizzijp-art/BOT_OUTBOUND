@@ -9,8 +9,9 @@ from sqlalchemy import func, select
 
 from app.browser.whatsapp_page import ChatRow
 from app.config import settings
-from app.models.wa import (WaCampaignContact, WaContact, WaContactStatus,
-                           WaInboundEvent, WaMatchedBy)
+from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                           WaContact, WaContactStatus, WaInboundEvent,
+                           WaMatchedBy, WaNumber, WaNumberStatus)
 from app.services import wa_optout
 from app.utils import events
 from app.utils.phone_pseudonym import PhoneNormalizationError, hmac_phone, normalize_e164
@@ -146,3 +147,22 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
                           matched_by=matched_by, processed=True))
     await db.commit()
     return {"esito": "ignorato", "contact_id": contatto.id}
+
+
+async def numeri_da_scansionare(db) -> list[str]:
+    """Solo numeri attivi con almeno una campagna running che ha ancora
+    contatti queued/in_sequence -- non serve scansionare un numero senza
+    lavoro vivo (SDD §7.3: "solo numeri con campagne attive")."""
+    righe = await db.execute(
+        select(WaNumber.id)
+        .join(WaCampaign, WaCampaign.wa_number_id == WaNumber.id)
+        .join(WaCampaignContact, WaCampaignContact.campaign_id == WaCampaign.id)
+        .where(
+            WaNumber.status == WaNumberStatus.active,
+            WaCampaign.status == WaCampaignStatus.running,
+            WaCampaignContact.status.in_([WaContactStatus.queued,
+                                          WaContactStatus.in_sequence]),
+        )
+        .distinct()
+    )
+    return [r[0] for r in righe.all()]
