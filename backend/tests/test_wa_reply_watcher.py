@@ -273,3 +273,69 @@ async def test_scan_number_processa_le_righe_non_lette(db_session, monkeypatch):
 
     esito = await wa_reply_watcher.scan_number(numero.id)
     assert esito["scansionate"] == 1  # solo la riga con unread>0
+
+
+@pytest.mark.asyncio
+async def test_e2e_optout_ferma_tutte_le_campagne_del_contatto(db_session, monkeypatch):
+    """Scenario completo SDD §7.5: STOP su UNA campagna ferma TUTTE le righe
+    non terminali del contatto, in QUALUNQUE campagna del tenant."""
+    from app.services import wa_reply_watcher
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+
+    camp_a, _ = await make_campaign(db_session, tenant, numero, name="A",
+                                    status=WaCampaignStatus.running)
+    camp_b, _ = await make_campaign(db_session, tenant, numero, name="B",
+                                    status=WaCampaignStatus.running)
+    cc_a = await make_campaign_contact(db_session, camp_a, contatto,
+                                       status=WaContactStatus.in_sequence)
+    cc_b = await make_campaign_contact(db_session, camp_b, contatto,
+                                       status=WaContactStatus.queued)
+    await db_session.commit()
+
+    righe_finte = [_row("Marco", preview="stop non scrivermi piu'", unread=1)]
+
+    class _PomFinto:
+        def __init__(self, page):
+            pass
+        async def scan_chat_list(self):
+            return righe_finte
+
+    monkeypatch.setattr(wa_reply_watcher, "WhatsAppWebPage", _PomFinto)
+
+    class _ContextFinto:
+        async def new_page(self):
+            class _PageFinta:
+                async def goto(self, *a, **k):
+                    pass
+            return _PageFinta()
+
+    class _BrowserCtx:
+        def __call__(self, number_id, headless=True, proxy_url=None):
+            return self
+        async def __aenter__(self):
+            return _ContextFinto()
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(wa_reply_watcher, "_open_wa_browser", _BrowserCtx())
+
+    async def _mai_halted():
+        return False
+    monkeypatch.setattr(wa_reply_watcher.bot_state_service, "is_wa_halted", _mai_halted)
+
+    esito = await wa_reply_watcher.scan_number(numero.id)
+    assert esito["optout"] == 1
+
+    await db_session.refresh(contatto)
+    await db_session.refresh(cc_a)
+    await db_session.refresh(cc_b)
+    assert contatto.opted_out is True
+    assert contatto.do_not_contact is True
+    assert cc_a.status == WaContactStatus.opted_out
+    assert cc_b.status == WaContactStatus.opted_out
