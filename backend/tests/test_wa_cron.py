@@ -223,6 +223,57 @@ async def test_wa_reply_scan_gira_solo_sui_numeri_con_lavoro(db_session, monkeyp
     assert esito["numeri_scansionati"] == 1
 
 
+@pytest.mark.asyncio
+async def test_wa_reply_scan_continua_dopo_eccezione_su_un_numero(db_session, monkeypatch):
+    """Un RuntimeError non catturato da scan_number (es. selettori DOM
+    disallineati) su UN numero non deve interrompere il giro: gli altri
+    numeri sani in coda vanno comunque scansionati (try/except per-numero,
+    stesso pattern gia' in uso da wa_session_healthcheck per check_session).
+
+    numeri_da_scansionare e' mockata a una lista FISSA e nota (non la query
+    reale): il DB di test e' condiviso fra i test del file (vedi i commenti
+    sopra sui test healthcheck), quindi un'asserzione stretta sul risultato
+    della query reale sarebbe fragile a residui lasciati da altri test.
+    Qui isoliamo la sola resilienza del loop try/except di wa_reply_scan."""
+    from app.workers import cron_worker
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact
+
+    tenant = await make_tenant(db_session)
+
+    numero_rotto = await make_number(db_session, tenant)
+    contatto_rotto = await make_contact(db_session, tenant)
+    campagna_rotta, _ = await make_campaign(db_session, tenant, numero_rotto,
+                                            status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna_rotta, contatto_rotto,
+                                status=WaContactStatus.in_sequence)
+
+    numero_ok = await make_number(db_session, tenant)
+    contatto_ok = await make_contact(db_session, tenant)
+    campagna_ok, _ = await make_campaign(db_session, tenant, numero_ok,
+                                         status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna_ok, contatto_ok,
+                                status=WaContactStatus.in_sequence)
+    await db_session.commit()
+
+    async def _fake_ids(db):
+        return [numero_rotto.id, numero_ok.id]
+    monkeypatch.setattr(cron_worker.wa_reply_watcher, "numeri_da_scansionare", _fake_ids)
+
+    chiamate = []
+    async def _fake_scan(number_id):
+        chiamate.append(number_id)
+        if number_id == numero_rotto.id:
+            raise RuntimeError("selettore DOM disallineato")
+        return {"scansionate": 1, "optout": 0, "replied": 0, "non_associati": 0, "motivo": None}
+    monkeypatch.setattr(cron_worker.wa_reply_watcher, "scan_number", _fake_scan)
+
+    esito = await cron_worker.wa_reply_scan({})
+
+    assert chiamate == [numero_rotto.id, numero_ok.id]
+    assert esito["numeri_scansionati"] == 1
+
+
 def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():
     """Non-regressione: cron_worker.py e' condiviso con Instagram in
     produzione. Ogni entry di cron_jobs e' un arq.cron.CronJob: il nome
