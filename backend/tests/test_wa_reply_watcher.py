@@ -179,6 +179,9 @@ async def test_process_row_non_associato_sempre_inserito(db_session):
     )).scalars().all()
     assert len(eventi) == 1
     assert eventi[0].contact_id is None
+    # Nessun testo archiviato: su un numero in coesistenza questa riga puo'
+    # essere una chat personale del cliente, e non serve a nessuna decisione.
+    assert eventi[0].preview_text is None
 
 
 @pytest.mark.asyncio
@@ -205,6 +208,140 @@ async def test_process_row_replied_emette_evento(db_session, monkeypatch):
         row=_row("Marco", preview="ok grazie"))
     assert len(emessi) == 1
     assert emessi[0][0][1] == "wa.reply.received"
+
+
+async def _messaggio_inviato(db, campagna, contatto, numero, *, giorni_fa: float):
+    """Una riga wa_messages 'sent' con sent_at nel passato -- e' il segnale su
+    cui numeri_da_scansionare tiene vivo un numero dopo la fine degli invii."""
+    import uuid
+    from datetime import datetime, timedelta
+    from app.models.wa import WaMessage, WaMessageStatus
+
+    msg = WaMessage(id=str(uuid.uuid4()), campaign_id=campagna.id,
+                    contact_id=contatto.id, wa_number_id=numero.id, step_index=0,
+                    template_variant="a", rendered_text="Ciao",
+                    status=WaMessageStatus.sent,
+                    sent_at=datetime.utcnow() - timedelta(days=giorni_fa))
+    db.add(msg)
+    await db.flush()
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_contatto_completed_che_risponde_diventa_replied(db_session, monkeypatch):
+    """Il caso NORMALE dell'MVP: campagne a un solo step (SDD Q29), quindi a
+    invio finito il contatto e' 'completed' e la risposta arriva dopo. Con il
+    watcher che cercava solo 'in_sequence' questo ramo era irraggiungibile:
+    nessun replied, nessun evento, nessun contatore."""
+    from app.services import wa_reply_watcher
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    emessi = []
+    monkeypatch.setattr(wa_reply_watcher.events, "emit",
+                        lambda *a, **k: emessi.append((a, k)))
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    cc = await make_campaign_contact(db_session, campagna, contatto,
+                                     status=WaContactStatus.completed, current_step=0)
+    await db_session.commit()
+
+    esito = await wa_reply_watcher.process_chat_row(
+        db_session, tenant_id=tenant.id, wa_number_id=numero.id,
+        row=_row("Marco", preview="si mi interessa, mi richiami?"))
+    assert esito["esito"] == "replied"
+
+    await db_session.refresh(cc)
+    await db_session.refresh(campagna)
+    assert cc.status == WaContactStatus.replied
+    assert cc.replied_at_step == 0
+    assert campagna.replied == 1
+    assert [a[1] for a, _ in emessi] == ["wa.reply.received"]
+
+
+@pytest.mark.asyncio
+async def test_optout_incrementa_il_contatore_ed_emette_evento(db_session, monkeypatch):
+    """Il ramo opt-out deve fare le stesse due cose del ramo replied: contatore
+    di campagna e evento. L'evento richiede un campaign_id, che prima di questa
+    fix il watcher non trovava quasi mai (cercava solo 'in_sequence')."""
+    from app.services import wa_reply_watcher
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    emessi = []
+    monkeypatch.setattr(wa_reply_watcher.wa_optout.events, "emit",
+                        lambda *a, **k: emessi.append((a, k)))
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna, contatto,
+                                status=WaContactStatus.completed, current_step=0)
+    await db_session.commit()
+
+    esito = await wa_reply_watcher.process_chat_row(
+        db_session, tenant_id=tenant.id, wa_number_id=numero.id,
+        row=_row("Marco", preview="basta non scrivermi piu'"))
+    assert esito["esito"] == "optout"
+
+    await db_session.refresh(campagna)
+    assert campagna.opted_out == 1
+    assert [a[1] for a, _ in emessi] == ["wa.optout"]
+
+
+@pytest.mark.asyncio
+async def test_numero_resta_scansionabile_dopo_la_fine_degli_invii(db_session):
+    """Contatti tutti 'completed' ma invio recente: il numero deve restare in
+    lista, altrimenti la scansione si spegne proprio quando le risposte
+    iniziano ad arrivare."""
+    from app.services.wa_reply_watcher import numeri_da_scansionare
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant, label="Invio finito ieri")
+    contatto = await make_contact(db_session, tenant)
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna, contatto,
+                                status=WaContactStatus.completed)
+    await _messaggio_inviato(db_session, campagna, contatto, numero, giorni_fa=1)
+    await db_session.commit()
+
+    assert numero.id in await numeri_da_scansionare(db_session)
+
+
+@pytest.mark.asyncio
+async def test_numero_esce_dalla_lista_oltre_la_finestra(db_session, monkeypatch):
+    """La finestra e' delimitata di proposito: oltre, un numero senza lavoro
+    vivo esce -- includere i 'completed' per sempre farebbe crescere la lista
+    di scansione senza controllo."""
+    from app.config import settings
+    from app.services.wa_reply_watcher import numeri_da_scansionare
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    monkeypatch.setattr(settings, "wa_reply_scan_window_days", 3)
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant, label="Invio di due settimane fa")
+    contatto = await make_contact(db_session, tenant)
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna, contatto,
+                                status=WaContactStatus.completed)
+    await _messaggio_inviato(db_session, campagna, contatto, numero, giorni_fa=14)
+    await db_session.commit()
+
+    assert numero.id not in await numeri_da_scansionare(db_session)
 
 
 @pytest.mark.asyncio

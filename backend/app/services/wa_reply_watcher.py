@@ -90,14 +90,40 @@ async def _incrementa_contatore_campagna(db, campaign_id: str, campo: str) -> No
 
 
 async def _campagna_attiva_del_contatto(db, contact_id: str) -> WaCampaignContact | None:
-    """La riga wa_campaign_contacts NON terminale del contatto, se c'e' --
+    """La riga wa_campaign_contacts a cui attribuire una risposta, se c'e' --
     usata sia per l'evento opt-out (campaign_id per il log) sia per la
-    transizione a replied."""
+    transizione a replied.
+
+    `completed` e' incluso, non solo `in_sequence`: le campagne MVP sono a un
+    solo step (SDD Q29), quindi appena l'invio finisce il contatto passa a
+    `completed` e non torna mai `in_sequence`. Cercando solo `in_sequence` il
+    ramo replied era irraggiungibile in produzione -- il watcher non marcava
+    mai una risposta, non emetteva l'evento e non incrementava il contatore
+    proprio nello scenario normale (risposta che arriva ore o giorni dopo
+    l'unico messaggio). `queued` copre il caso simmetrico raro: risposta
+    arrivata prima che partisse il nostro invio.
+
+    Ordine per stato e non per data: SDD Q2 ammette max 1 campagna running
+    per numero, quindi in MVP le righe candidate sono realisticamente una
+    sola. Se ce ne fossero piu' d'una (campagne diverse chiuse in momenti
+    diversi), una sequenza ancora viva vale piu' di una gia' chiusa: e'
+    quella che deve fermarsi."""
+    from sqlalchemy import case
+
+    priorita = case(
+        (WaCampaignContact.status == WaContactStatus.in_sequence, 0),
+        (WaCampaignContact.status == WaContactStatus.queued, 1),
+        else_=2,
+    )
     return await db.scalar(
-        select(WaCampaignContact).where(
+        select(WaCampaignContact)
+        .where(
             WaCampaignContact.contact_id == contact_id,
-            WaCampaignContact.status == WaContactStatus.in_sequence,
+            WaCampaignContact.status.in_([WaContactStatus.in_sequence,
+                                          WaContactStatus.completed,
+                                          WaContactStatus.queued]),
         )
+        .order_by(priorita)
     )
 
 
@@ -108,8 +134,14 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
     contatto, matched_by = await match_contact(db, tenant_id, row)
 
     if contatto is None:
+        # Nessun preview_text per una riga non associata: su un numero in
+        # coesistenza la sidebar contiene anche le chat PERSONALI del cliente,
+        # e questa riga non alimenta nessuna decisione (niente opt-out, niente
+        # replied) -- archiviarne il testo sarebbe conservare conversazioni di
+        # terzi senza scopo. Per la diagnostica bastano il numero di righe e
+        # matched_by=none.
         db.add(WaInboundEvent(tenant_id=tenant_id, wa_number_id=wa_number_id,
-                              contact_id=None, preview_text=row.preview,
+                              contact_id=None, preview_text=None,
                               matched_by=WaMatchedBy.none, processed=True))
         await db.commit()
         return {"esito": "non_associato", "contact_id": None}
@@ -122,6 +154,8 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
         await wa_optout.persist_wa_optout(
             db, contatto.id, prova=row.preview,
             campaign_id=cc_attiva.campaign_id if cc_attiva else None)
+        if cc_attiva is not None:
+            await _incrementa_contatore_campagna(db, cc_attiva.campaign_id, "opted_out")
         db.add(WaInboundEvent(tenant_id=tenant_id, wa_number_id=wa_number_id,
                               contact_id=contatto.id, preview_text=row.preview,
                               matched_by=matched_by, processed=True))
@@ -152,10 +186,23 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
 
 
 async def numeri_da_scansionare(db) -> list[str]:
-    """Solo numeri attivi con almeno una campagna running che ha ancora
-    contatti queued/in_sequence -- non serve scansionare un numero senza
-    lavoro vivo (SDD §7.3: "solo numeri con campagne attive")."""
-    righe = await db.execute(
+    """Numeri attivi da scansionare, per due motivi indipendenti.
+
+    (a) Lavoro ancora vivo: almeno una campagna running con contatti
+        queued/in_sequence (SDD §7.3, "solo numeri con campagne attive").
+    (b) Invio recente: almeno un wa_messages.sent_at negli ultimi
+        wa_reply_scan_window_days giorni.
+
+    Senza (b) il criterio (a) da solo spegneva la scansione proprio quando
+    serve: le campagne MVP sono a un solo step (SDD Q29), a invio finito i
+    contatti sono `completed` e il numero uscirebbe dalla lista mentre le
+    risposte devono ancora arrivare. La finestra e' delimitata di proposito:
+    includere i `completed` per sempre farebbe crescere la lista senza
+    controllo."""
+    from datetime import timedelta
+    from app.models.wa import WaMessage
+
+    con_lavoro = await db.execute(
         select(WaNumber.id)
         .join(WaCampaign, WaCampaign.wa_number_id == WaNumber.id)
         .join(WaCampaignContact, WaCampaignContact.campaign_id == WaCampaign.id)
@@ -167,7 +214,22 @@ async def numeri_da_scansionare(db) -> list[str]:
         )
         .distinct()
     )
-    return [r[0] for r in righe.all()]
+
+    finestra = datetime.utcnow() - timedelta(days=int(settings.wa_reply_scan_window_days))
+    con_invio_recente = await db.execute(
+        select(WaMessage.wa_number_id)
+        .join(WaNumber, WaNumber.id == WaMessage.wa_number_id)
+        .where(
+            WaNumber.status == WaNumberStatus.active,
+            WaMessage.sent_at.is_not(None),
+            WaMessage.sent_at >= finestra,
+        )
+        .distinct()
+    )
+
+    # dict.fromkeys: dedup mantenendo un ordine stabile fra le due query.
+    return list(dict.fromkeys([r[0] for r in con_lavoro.all()]
+                              + [r[0] for r in con_invio_recente.all()]))
 
 
 async def scan_number(number_id: str) -> dict:
