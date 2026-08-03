@@ -19,7 +19,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.database import get_db
 from app.models.wa import WaNumber, WaNumberStatus
-from app.services import wa_session
+from app.services import wa_profile_lock, wa_session
 from app.utils.crypto import decrypt, encrypt
 from app.utils.phone_pseudonym import (PhoneNormalizationError, hmac_phone,
                                        mask_phone, normalize_e164)
@@ -43,6 +43,10 @@ CAMPI_MODIFICABILI = {"label", "proxy_url", "daily_cap", "notes"}
 # Stati da cui la riattivazione e' ammessa (contratto §2.2): sono gli unici
 # che un operatore mette a mano e che un operatore deve poter togliere a mano.
 _STATI_RIATTIVABILI = (WaNumberStatus.retired, WaNumberStatus.suspended)
+
+_PROFILO_OCCUPATO = ("il profilo di questo numero e' gia' aperto da un invio, "
+                     "un health-check o una scansione risposte: riprova fra "
+                     "qualche minuto")
 
 
 def _serializza(n: WaNumber) -> dict:
@@ -150,18 +154,32 @@ async def elimina(number_id: str, db=Depends(get_db)) -> dict:
 async def login(number_id: str, db=Depends(get_db)) -> dict:
     """Apre un browser VISIBILE (wa_session.assisted_login, headless=False):
     va lanciato solo quando qualcuno e' davanti allo schermo per inquadrare
-    il QR. Solleva 404 prima di aprire nulla se il numero non esiste."""
+    il QR. Solleva 404 prima di aprire nulla se il numero non esiste.
+
+    Sotto lucchetto profilo come ogni altro consumatore (invio, health-check,
+    reply-scan): senza, bastava un click su "ri-associa" mentre l'health-check
+    teneva il profilo per avere due Chromium sullo stesso profilo. Il TTL e'
+    quello di default, che copre i 180s di polling del QR con margine."""
     await _numero_o_404(db, number_id)
-    stato = await wa_session.assisted_login(number_id)
+    try:
+        async with wa_profile_lock.held(number_id):
+            stato = await wa_session.assisted_login(number_id)
+    except wa_profile_lock.WaProfileBusy:
+        raise HTTPException(409, _PROFILO_OCCUPATO)
     return {"status": stato.value}
 
 
 @router.post("/{number_id}/check")
 async def check(number_id: str, db=Depends(get_db)) -> dict:
     """Health-check headless (wa_session.check_session): legge il DOM vero,
-    non deduce nulla da uno stato in memoria di un run precedente."""
+    non deduce nulla da uno stato in memoria di un run precedente. Sotto
+    lucchetto profilo per lo stesso motivo di `login`."""
     await _numero_o_404(db, number_id)
-    stato = await wa_session.check_session(number_id)
+    try:
+        async with wa_profile_lock.held(number_id):
+            stato = await wa_session.check_session(number_id)
+    except wa_profile_lock.WaProfileBusy:
+        raise HTTPException(409, _PROFILO_OCCUPATO)
     return {"status": stato.value}
 
 
