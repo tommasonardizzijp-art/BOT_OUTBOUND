@@ -2,7 +2,9 @@ import uuid
 from datetime import datetime, timedelta
 
 import pytest
-import pytest_asyncio
+
+from app.models.wa import WaNumberStatus
+from tests.factories_wa import make_number, make_tenant
 
 
 async def _scenario_claim(db_session, e164: str = "+393331112223", contatti: int = 1):
@@ -69,18 +71,6 @@ async def test_healthcheck_mette_in_pausa_le_campagne_del_numero_caduto(db_sessi
         return WaNumberStatus.qr_required
     monkeypatch.setattr(cron_worker, "check_session", _fake_check)
 
-    async def _fake_job_attivo(redis, number_id):
-        return False
-    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
-
-    class _FakeRedis:
-        async def aclose(self):
-            pass
-
-    async def _fake_pool(*a, **kw):
-        return _FakeRedis()
-    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
-
     await cron_worker.wa_session_healthcheck({})
     await db_session.refresh(ctx["campaign"])
     assert ctx["campaign"].status == WaCampaignStatus.paused
@@ -96,18 +86,6 @@ async def test_healthcheck_non_tocca_le_campagne_se_la_sessione_e_viva(db_sessio
     async def _fake_check(number_id):
         return WaNumberStatus.active
     monkeypatch.setattr(cron_worker, "check_session", _fake_check)
-
-    async def _fake_job_attivo(redis, number_id):
-        return False
-    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
-
-    class _FakeRedis:
-        async def aclose(self):
-            pass
-
-    async def _fake_pool(*a, **kw):
-        return _FakeRedis()
-    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
 
     await cron_worker.wa_session_healthcheck({})
     await db_session.refresh(ctx["campaign"])
@@ -128,18 +106,6 @@ async def test_healthcheck_rilascia_i_lock_stale(db_session, monkeypatch):
     async def _fake_check(number_id):
         return WaNumberStatus.active
     monkeypatch.setattr(cron_worker, "check_session", _fake_check)
-
-    async def _fake_job_attivo(redis, number_id):
-        return False
-    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
-
-    class _FakeRedis:
-        async def aclose(self):
-            pass
-
-    async def _fake_pool(*a, **kw):
-        return _FakeRedis()
-    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
 
     await cron_worker.wa_session_healthcheck({})
     await db_session.refresh(ctx["cc"])
@@ -166,18 +132,6 @@ async def test_19_healthcheck_avvisa_telegram_su_sessione_caduta(db_session, mon
         chiamate.append((msg, level))
     monkeypatch.setattr(notifier, "send_telegram", _fake_telegram)
 
-    async def _fake_job_attivo(redis, number_id):
-        return False
-    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
-
-    class _FakeRedis:
-        async def aclose(self):
-            pass
-
-    async def _fake_pool(*a, **kw):
-        return _FakeRedis()
-    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
-
     esito = await cron_worker.wa_session_healthcheck({})
     assert esito["caduti"] >= 1
     assert len(chiamate) >= 1
@@ -186,51 +140,47 @@ async def test_19_healthcheck_avvisa_telegram_su_sessione_caduta(db_session, mon
 
 
 @pytest.mark.asyncio
-async def test_healthcheck_salta_numero_con_wa_send_task_attivo(db_session, monkeypatch):
-    """Fix 1 (review finale, Critical): cron health-check e worker di invio
-    sono due processi ARQ separati che possono aprire lo STESSO profilo
-    Chromium in parallelo (_open_wa_browser cancella i lock OS del profilo
-    come parte del suo cleanup, quindi il secondo avvio SUCCEDE invece di
-    fallire -- corruzione profilo, sessione WA persa). Se wa_send_task e'
-    queued/in_progress per un numero, l'health-check lo salta invece di
-    chiamare check_session su quello stesso numero."""
-    from app.models.wa import WaNumberStatus
+async def test_healthcheck_salta_numero_con_profilo_occupato(db_session, monkeypatch):
     from app.workers import cron_worker
+    from app.services import wa_profile_lock
 
-    ctx = await _scenario_claim(db_session)
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant, status=WaNumberStatus.active)
+    await db_session.commit()
 
-    chiamati = []
+    class _CtxOccupato:
+        def __call__(self, number_id, ttl_min=None):
+            self._number_id = number_id
+            return self
+
+        async def __aenter__(self):
+            raise wa_profile_lock.WaProfileBusy(self._number_id)
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(cron_worker.wa_profile_lock, "held", _CtxOccupato())
 
     async def _fake_check(number_id):
-        chiamati.append(number_id)
-        return WaNumberStatus.active
+        raise AssertionError("check_session non deve essere chiamato se il profilo e' occupato")
     monkeypatch.setattr(cron_worker, "check_session", _fake_check)
 
-    async def _fake_job_attivo(redis, number_id):
-        return number_id == ctx["number"].id
-    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
-
-    class _FakeRedis:
-        async def aclose(self):
-            pass
-
-    async def _fake_pool(*a, **kw):
-        return _FakeRedis()
-    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
-
     esito = await cron_worker.wa_session_healthcheck({})
-    assert ctx["number"].id not in chiamati
+    # >= 1 e non == 1: il DB di test e' condiviso fra i test del file (niente
+    # rollback perche' _scenario_claim/make_number committano davvero), quindi
+    # i numeri creati dai test precedenti sono ancora attivi e vengono anche
+    # loro saltati (il lock e' occupato per QUALSIASI number_id qui).
     assert esito["saltati_invio_attivo"] >= 1
+    assert esito["controllati"] == 0
 
 
 @pytest.mark.asyncio
-async def test_healthcheck_controlla_numero_senza_job_attivo(db_session, monkeypatch):
-    """Contro-prova: un numero SENZA wa_send_task attivo viene controllato
-    normalmente -- il fix non deve fermare tutto il health-check."""
-    from app.models.wa import WaNumberStatus
+async def test_healthcheck_controlla_numero_con_profilo_libero(db_session, monkeypatch):
     from app.workers import cron_worker
 
-    ctx = await _scenario_claim(db_session)
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant, status=WaNumberStatus.active)
+    await db_session.commit()
 
     chiamati = []
 
@@ -239,20 +189,11 @@ async def test_healthcheck_controlla_numero_senza_job_attivo(db_session, monkeyp
         return WaNumberStatus.active
     monkeypatch.setattr(cron_worker, "check_session", _fake_check)
 
-    async def _fake_job_attivo(redis, number_id):
-        return False
-    monkeypatch.setattr(cron_worker, "_wa_send_job_is_active", _fake_job_attivo)
-
-    class _FakeRedis:
-        async def aclose(self):
-            pass
-
-    async def _fake_pool(*a, **kw):
-        return _FakeRedis()
-    monkeypatch.setattr(cron_worker.arq, "create_pool", _fake_pool)
-
     esito = await cron_worker.wa_session_healthcheck({})
-    assert ctx["number"].id in chiamati
+    # numero.id nei chiamati (non esito["controllati"] == 1): il DB di test e'
+    # condiviso fra i test del file, quindi altri numeri gia' committati da
+    # test precedenti vengono controllati anche loro.
+    assert numero.id in chiamati
     assert esito["saltati_invio_attivo"] == 0
 
 
@@ -269,57 +210,3 @@ def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():
                    "recover_sending", "telegram_commands"):
         assert atteso in nomi, f"{atteso} sparita dai cron IG"
     assert "wa_session_healthcheck" in nomi
-
-
-@pytest_asyncio.fixture
-async def _redis_o_skip():
-    """Redis reale e' un requisito duro per questo test: se non e'
-    raggiungibile (es. CI senza servizio Redis), skip esplicito con motivo
-    chiaro invece di un rosso che sembra una regressione. Duplicata da
-    test_wa_worker.py/test_wa_ops_api.py (conftest.py e' congelato, §8.1)."""
-    import arq
-    from app.services.work_enqueue import arq_redis_settings
-    try:
-        pool = await arq.create_pool(arq_redis_settings())
-        await pool.ping()
-        await pool.aclose()
-    except Exception as exc:
-        pytest.skip(f"Redis non raggiungibile, test saltato: {type(exc).__name__}: {exc}")
-
-
-@pytest.mark.asyncio
-async def test_fix_c_wa_send_job_is_active_vero_contro_redis_reale(_redis_o_skip):
-    """Fix 1 (review finale round 1, Critical C1) era testato SOLO
-    mockando _wa_send_job_is_active stessa (monkeypatch.setattr(cron_worker,
-    "_wa_send_job_is_active", ...) nei due test sopra) -- zero garanzia che
-    l'implementazione REALE interroghi Redis/ARQ correttamente. Se avesse un
-    bug (nome funzione sbagliato, JobStatus confrontato male, queue_name
-    sbagliato), il test-suite non se ne accorgerebbe: il fake la sostituisce
-    del tutto.
-
-    Qui si enqueua un vero wa_send_task su Redis vero con _job_id reale
-    (wa_send_job_id) e si chiama la funzione REALE (non mockata): un numero
-    con job queued deve risultare attivo, uno mai enqueuato no."""
-    import arq
-    from app.services.work_enqueue import arq_redis_settings, ARQ_MAIN_QUEUE
-    from app.workers import cron_worker
-    from app.workers.wa_worker import wa_send_job_id
-
-    number_id_attivo = f"test-fix-c-attivo-{uuid.uuid4().hex[:8]}"
-    number_id_libero = f"test-fix-c-libero-{uuid.uuid4().hex[:8]}"
-    job_id = wa_send_job_id(number_id_attivo)
-
-    redis = await arq.create_pool(arq_redis_settings())
-    try:
-        job = await redis.enqueue_job("wa_send_task", number_id_attivo, _job_id=job_id)
-        assert job is not None   # sanity: l'enqueue e' riuscito
-
-        attivo = await cron_worker._wa_send_job_is_active(redis, number_id_attivo)
-        assert attivo is True
-
-        libero = await cron_worker._wa_send_job_is_active(redis, number_id_libero)
-        assert libero is False
-    finally:
-        await redis.zrem(ARQ_MAIN_QUEUE, job_id)
-        await redis.delete(f"arq:job:{job_id}")
-        await redis.aclose()
