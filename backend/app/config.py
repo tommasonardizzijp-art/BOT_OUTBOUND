@@ -354,5 +354,15 @@ class Settings(BaseSettings):
     wa_stop_words: str = "stop,basta,cancellami,non scrivermi,unsubscribe,rimuovimi"
     wa_global_daily_cap: int = 200              # SDD Q70, safety valve macchina
 
+    # --- Canale WhatsApp: reply-watcher + opt-out (M4) --------------------
+    # Lucchetto profilo Chromium: TTL generoso per coprire una mini-sessione
+    # di invio nel caso peggiore (wa_session_max_msg=15 * delay mediano
+    # lognormale, coda destra inclusa) senza scadere mentre e' ancora in uso.
+    wa_profile_lock_ttl_min: int = 45
+    # Retry breve quando un job di invio trova il profilo occupato (health-
+    # check o reply-scan in corso): non e' la fine-sessione (break_s, minuti-
+    # decine), e' "riprova fra un attimo".
+    wa_lock_busy_retry_s: int = 90
+
 
 settings = Settings()
