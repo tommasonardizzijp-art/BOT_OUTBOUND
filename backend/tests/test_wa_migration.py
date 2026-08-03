@@ -13,6 +13,10 @@ config.py (data/bot.db) -- il downgrade droppa tabelle.
 Lo stato "prod gia' a 024" viene fabbricato con i modelli SQLAlchemy REALI
 (create_all filtrato, escludendo le tabelle che la 025 introduce): e' piu'
 fedele di DDL scritto a mano, e non serve rigiocare la catena di migrazioni.
+Le colonne che una migrazione SUCCESSIVA alla 025 aggiunge a una tabella
+GIA' esistente (027 -> bot_state.wa_halted*) vanno tolte a parte: il modello
+corrente le ha gia', ma a "stamp 024" non devono esistere, altrimenti la 027
+duplica la colonna.
 """
 import os
 import sqlite3
@@ -70,6 +74,19 @@ def _seed_pre_025_schema(db_path: Path) -> None:
         Base.metadata.create_all(engine, tables=ig_tables)
     finally:
         engine.dispose()
+
+    # bot_state esiste gia' pre-025 (migrazione 007): la 027 (successiva)
+    # le aggiunge le colonne wa_halted*, che pero' il modello SQLAlchemy
+    # corrente ha gia' -- create_all le avrebbe create qui sopra insieme al
+    # resto della tabella. Le togliamo per fabbricare fedelmente lo stato
+    # "prima della 027".
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for col in ("wa_halted", "wa_halted_reason", "wa_halted_at", "wa_halted_by"):
+            conn.execute(f"ALTER TABLE bot_state DROP COLUMN {col}")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _sqlite_master(db_path: Path) -> list[tuple]:
@@ -181,7 +198,11 @@ def test_025_non_tocca_instagram(migration_db):
     """Confronto sqlite_master pre/post upgrade: ogni oggetto IG pre-esistente
     resta presente con lo STESSO DDL testuale (un ALTER su SQLite riscrive la
     tabella, quindi cambierebbe/sparirebbe la entry); le uniche differenze
-    sono le 9 tabelle nuove (+ i loro indici) e alembic_version."""
+    sono le 9 tabelle nuove (+ i loro indici), alembic_version, e bot_state
+    (027 ci aggiunge il kill-switch wa_halted: ALTER additivo intenzionale su
+    una tabella IG pre-esistente, non una regressione — la sua entry DDL
+    cambia testo per via delle colonne nuove, ma non sparisce ne' cambia
+    struttura di quelle vecchie)."""
     pre = _sqlite_master(migration_db)
     pre_set = set(pre)
     pre_tables = {tbl for (_typ, _name, tbl, _sql) in pre}
@@ -193,7 +214,9 @@ def test_025_non_tocca_instagram(migration_db):
     post_set = set(post)
     post_tables = {tbl for (_typ, _name, tbl, _sql) in post}
 
-    assert pre_set <= post_set, "un oggetto IG preesistente e' sparito o e' cambiato (ALTER?)"
+    pre_excluding_bot_state = {row for row in pre_set if row[2] != "bot_state"}
+    assert pre_excluding_bot_state <= post_set, "un oggetto IG preesistente e' sparito o e' cambiato (ALTER?)"
+    assert any(row[2] == "bot_state" for row in post_set), "bot_state e' sparita del tutto (non solo alterata)"
 
     new_tables = post_tables - pre_tables
     assert new_tables == WA_NEW_TABLES | {"alembic_version"}
