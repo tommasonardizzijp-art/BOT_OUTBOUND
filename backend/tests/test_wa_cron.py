@@ -315,6 +315,7 @@ async def test_healthcheck_continua_dopo_eccezione_generica_su_un_numero(
     scaduti e dei lock stale, che valgono anche se un numero e' irraggiungibile.
     Prima di questa fix il loop catturava SOLO WaProfileBusy."""
     from datetime import datetime, timedelta
+    from app.services import wa_number_manager
     from app.workers import cron_worker
 
     ctx = await _scenario_claim(db_session)
@@ -325,6 +326,13 @@ async def test_healthcheck_continua_dopo_eccezione_generica_su_un_numero(
     def _held_rotto(number_id, *, ttl_min=None):
         raise TimeoutError("redis non risponde")
     monkeypatch.setattr(cron_worker.wa_profile_lock, "held", _held_rotto)
+
+    # Il rilascio cooldown legge Redis: qui non e' l'oggetto del test (lo prova
+    # quello sotto) e senza doppio, con Redis irraggiungibile, costerebbe
+    # l'intera scala di retry di arq tenendo aperta la transazione del test.
+    async def _nessun_cooldown():
+        return []
+    monkeypatch.setattr(wa_number_manager, "release_expired_wa_cooldowns", _nessun_cooldown)
 
     async def _fake_check(number_id):
         raise AssertionError("check_session non deve partire se held() e' fallita")
