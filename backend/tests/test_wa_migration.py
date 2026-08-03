@@ -199,11 +199,10 @@ def test_025_non_tocca_instagram(migration_db):
     resta presente con lo STESSO DDL testuale (un ALTER su SQLite riscrive la
     tabella, quindi cambierebbe/sparirebbe la entry); le uniche differenze
     sono le 9 tabelle nuove (+ i loro indici), alembic_version, e bot_state
-    (la 027, dentro "head", le aggiunge in modo additivo le colonne
-    wa_halted* -- kill-switch per-canale, 027_wa_halted.py -- un ADD COLUMN
-    riscrive comunque il DDL testuale della tabella su SQLite, quindi la
-    entry "pre" di bot_state non sopravvive: e' un cambiamento intenzionale,
-    non una regressione IG)."""
+    (027 ci aggiunge il kill-switch wa_halted: ALTER additivo intenzionale su
+    una tabella IG pre-esistente, non una regressione — la sua entry DDL
+    cambia testo per via delle colonne nuove, ma non sparisce ne' cambia
+    struttura di quelle vecchie)."""
     pre = _sqlite_master(migration_db)
     pre_set = set(pre)
     pre_tables = {tbl for (_typ, _name, tbl, _sql) in pre}
@@ -215,9 +214,9 @@ def test_025_non_tocca_instagram(migration_db):
     post_set = set(post)
     post_tables = {tbl for (_typ, _name, tbl, _sql) in post}
 
-    pre_set_no_bot_state = {row for row in pre_set if row[2] != "bot_state"}
-    assert pre_set_no_bot_state <= post_set, \
-        "un oggetto IG preesistente e' sparito o e' cambiato (ALTER?)"
+    pre_excluding_bot_state = {row for row in pre_set if row[2] != "bot_state"}
+    assert pre_excluding_bot_state <= post_set, "un oggetto IG preesistente e' sparito o e' cambiato (ALTER?)"
+    assert any(row[2] == "bot_state" for row in post_set), "bot_state e' sparita del tutto (non solo alterata)"
 
     new_tables = post_tables - pre_tables
     assert new_tables == WA_NEW_TABLES | {"alembic_version"}
