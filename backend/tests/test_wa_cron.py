@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.models.wa import WaNumberStatus
-from tests.factories_wa import make_number, make_tenant
+from tests.factories_wa import make_contact, make_number, make_tenant
 
 
 async def _scenario_claim(db_session, e164: str = "+393331112223", contatti: int = 1):
@@ -197,6 +197,32 @@ async def test_healthcheck_controlla_numero_con_profilo_libero(db_session, monke
     assert esito["saltati_invio_attivo"] == 0
 
 
+@pytest.mark.asyncio
+async def test_wa_reply_scan_gira_solo_sui_numeri_con_lavoro(db_session, monkeypatch):
+    from app.workers import cron_worker
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna, contatto,
+                                status=WaContactStatus.in_sequence)
+    await db_session.commit()
+
+    chiamate = []
+    async def _fake_scan(number_id):
+        chiamate.append(number_id)
+        return {"scansionate": 0, "optout": 0, "replied": 0, "non_associati": 0, "motivo": None}
+    monkeypatch.setattr(cron_worker.wa_reply_watcher, "scan_number", _fake_scan)
+
+    esito = await cron_worker.wa_reply_scan({})
+    assert chiamate == [numero.id]
+    assert esito["numeri_scansionati"] == 1
+
+
 def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():
     """Non-regressione: cron_worker.py e' condiviso con Instagram in
     produzione. Ogni entry di cron_jobs e' un arq.cron.CronJob: il nome
@@ -210,3 +236,4 @@ def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():
                    "recover_sending", "telegram_commands"):
         assert atteso in nomi, f"{atteso} sparita dai cron IG"
     assert "wa_session_healthcheck" in nomi
+    assert "wa_reply_scan" in nomi

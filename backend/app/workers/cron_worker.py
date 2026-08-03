@@ -5,7 +5,7 @@ Run: arq app.workers.cron_worker.CronWorkerSettings
 from arq import cron
 
 from app.services.work_enqueue import ARQ_CRON_QUEUE, arq_redis_settings
-from app.services import wa_profile_lock
+from app.services import wa_profile_lock, wa_reply_watcher
 from app.services.wa_session import check_session
 from app.workers.task_queue import (
     check_replies,
@@ -94,6 +94,34 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
     return esito
 
 
+async def wa_reply_scan(ctx: dict) -> dict:
+    """Ogni scan: solo numeri con lavoro vivo (campagna running + contatti
+    queued/in_sequence), stessa finestra oraria degli invii (SDD §7.3).
+    Non e' tempo-critico per l'MVP (campagne a 1 messaggio, Q29): serve per
+    KPI e per la rete di opt-out, la garanzia vera resta la guardia
+    pre-invio (§7.5 punto 7)."""
+    from app.database import AsyncSessionLocal
+    from loguru import logger
+
+    esito = {"numeri_scansionati": 0, "optout_totali": 0, "replied_totali": 0}
+    async with AsyncSessionLocal() as db:
+        ids = await wa_reply_watcher.numeri_da_scansionare(db)
+
+    for number_id in ids:
+        try:
+            risultato = await wa_reply_watcher.scan_number(number_id)
+        except Exception as exc:
+            logger.error(f"[WA] reply-scan {number_id} fallito: {type(exc).__name__}")
+            continue
+        if risultato["motivo"] is None:
+            esito["numeri_scansionati"] += 1
+        esito["optout_totali"] += risultato["optout"]
+        esito["replied_totali"] += risultato["replied"]
+
+    logger.info(f"[WA] reply-scan: {esito}")
+    return esito
+
+
 class CronWorkerSettings:
     functions = []
     cron_jobs = [
@@ -108,6 +136,7 @@ class CronWorkerSettings:
         cron(recover_sending, minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55}),
         cron(telegram_commands, minute=set(range(60))),
         cron(wa_session_healthcheck, minute={0, 30}, hour=set(range(9, 20))),
+        cron(wa_reply_scan, minute={15, 45}, hour=set(range(9, 20))),
     ]
     queue_name = ARQ_CRON_QUEUE
     redis_settings = arq_redis_settings()
