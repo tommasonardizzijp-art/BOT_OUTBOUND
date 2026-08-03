@@ -827,6 +827,36 @@ async def test_ferma_numero_per_guasto_applica_cooldown_redis(db_session, monkey
 
 
 @pytest.mark.asyncio
+async def test_mini_sessione_salta_se_profilo_occupato(db_session, monkeypatch):
+    """M4 Task 2: il lock del profilo si controlla PRIMA di aprire il
+    browser -- se un altro consumatore (health-check/reply-scan) ce l'ha
+    gia', la mini-sessione esce con un motivo dedicato invece di litigare
+    per lo stesso Chromium."""
+    from app.config import settings
+    from app.services import wa_profile_lock
+
+    monkeypatch.setattr(settings, "wa_send_enabled", True)
+    ctx = await _scenario_claim(db_session)
+
+    class _CtxOccupato:
+        def __call__(self, number_id, ttl_min=None):
+            self._number_id = number_id
+            return self
+
+        async def __aenter__(self):
+            raise wa_profile_lock.WaProfileBusy(self._number_id)
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(wa_worker.wa_profile_lock, "held", _CtxOccupato())
+
+    esito = await wa_worker.esegui_mini_sessione(ctx["number"].id)
+    assert esito["motivo"] == "profilo_occupato"
+    assert esito["inviati"] == 0
+
+
+@pytest.mark.asyncio
 async def test_d21_claim_confine_esatto_lock_timeout(db_session, monkeypatch):
     """Adversarial #21: 19min59s ancora fresco (rowcount=0), 20min01s stale
     (rowcount=1) -- nessuno scarto silenzioso di un secondo."""
