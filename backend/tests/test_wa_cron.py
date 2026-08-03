@@ -1,3 +1,4 @@
+import contextlib
 import uuid
 from datetime import datetime, timedelta
 
@@ -5,6 +6,23 @@ import pytest
 
 from app.models.wa import WaNumberStatus
 from tests.factories_wa import make_contact, make_number, make_tenant
+
+
+def _lock_profilo_libero(monkeypatch):
+    """Sostituisce il lucchetto profilo con un context manager no-op.
+
+    `wa_profile_lock.held` fa un `arq.create_pool` VERO: senza un demone Redis
+    vivo l'acquisizione impiega ~50s (conn_retries=10 x conn_retry_delay=2)
+    prima di fallire, e un test di pura logica del cron non deve dipendere da
+    un'infrastruttura esterna. I test che provano DELIBERATAMENTE la mutua
+    esclusione (fixture _redis_o_skip in test_wa_profile_lock.py) e quello che
+    prova il ramo WaProfileBusy restano con i loro doppi dedicati."""
+    from app.workers import cron_worker
+
+    @contextlib.asynccontextmanager
+    async def _libero(number_id, *, ttl_min=None):
+        yield "token-di-test"
+    monkeypatch.setattr(cron_worker.wa_profile_lock, "held", _libero)
 
 
 async def _scenario_claim(db_session, e164: str = "+393331112223", contatti: int = 1):
@@ -66,6 +84,7 @@ async def test_healthcheck_mette_in_pausa_le_campagne_del_numero_caduto(db_sessi
     from app.workers import cron_worker
 
     ctx = await _scenario_claim(db_session)
+    _lock_profilo_libero(monkeypatch)
 
     async def _fake_check(number_id):
         return WaNumberStatus.qr_required
@@ -82,6 +101,7 @@ async def test_healthcheck_non_tocca_le_campagne_se_la_sessione_e_viva(db_sessio
     from app.workers import cron_worker
 
     ctx = await _scenario_claim(db_session)
+    _lock_profilo_libero(monkeypatch)
 
     async def _fake_check(number_id):
         return WaNumberStatus.active
@@ -102,6 +122,7 @@ async def test_healthcheck_rilascia_i_lock_stale(db_session, monkeypatch):
     ctx["cc"].locked_by = "worker-morto"
     ctx["cc"].locked_at = datetime.utcnow() - timedelta(minutes=45)
     await db_session.commit()
+    _lock_profilo_libero(monkeypatch)
 
     async def _fake_check(number_id):
         return WaNumberStatus.active
@@ -121,6 +142,7 @@ async def test_19_healthcheck_avvisa_telegram_su_sessione_caduta(db_session, mon
     from app.workers import cron_worker
 
     ctx = await _scenario_claim(db_session)
+    _lock_profilo_libero(monkeypatch)
 
     async def _fake_check(number_id):
         return WaNumberStatus.qr_required
@@ -181,6 +203,7 @@ async def test_healthcheck_controlla_numero_con_profilo_libero(db_session, monke
     tenant = await make_tenant(db_session)
     numero = await make_number(db_session, tenant, status=WaNumberStatus.active)
     await db_session.commit()
+    _lock_profilo_libero(monkeypatch)
 
     chiamati = []
 

@@ -1,9 +1,23 @@
+import contextlib
+
 import pytest
 from sqlalchemy import select
 
 from app.browser.whatsapp_page import ChatRow
 from app.models.wa import WaMatchedBy
 from tests.factories_wa import make_contact, make_tenant
+
+
+def _lock_profilo_libero(monkeypatch):
+    """Lucchetto profilo no-op: `held` fa un `arq.create_pool` VERO e senza un
+    demone Redis vivo costa ~50s di retry prima di fallire. La mutua esclusione
+    vera si prova in test_wa_profile_lock.py (fixture _redis_o_skip)."""
+    from app.services import wa_reply_watcher
+
+    @contextlib.asynccontextmanager
+    async def _libero(number_id, *, ttl_min=None):
+        yield "token-di-test"
+    monkeypatch.setattr(wa_reply_watcher.wa_profile_lock, "held", _libero)
 
 
 def _row(title, *, title_is_number=False, preview="ciao", unread=1):
@@ -266,6 +280,7 @@ async def test_scan_number_processa_le_righe_non_lette(db_session, monkeypatch):
             return False
 
     monkeypatch.setattr(wa_reply_watcher, "_open_wa_browser", _BrowserCtx())
+    _lock_profilo_libero(monkeypatch)
 
     async def _mai_halted():
         return False
@@ -324,6 +339,7 @@ async def test_e2e_optout_ferma_tutte_le_campagne_del_contatto(db_session, monke
             return False
 
     monkeypatch.setattr(wa_reply_watcher, "_open_wa_browser", _BrowserCtx())
+    _lock_profilo_libero(monkeypatch)
 
     async def _mai_halted():
         return False
