@@ -85,7 +85,16 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
             logger.error(f"[WA] health-check {number_id[:8]} saltato per un "
                          f"guasto: {type(exc).__name__}")
 
-    esito["cooldown_rilasciati"] = len(await wa_number_manager.release_expired_wa_cooldowns())
+    try:
+        # Stesso motivo del try per-numero qui sopra: questa chiamata legge una
+        # chiave Redis per ogni numero in cooldown, e un Redis irraggiungibile
+        # abortiva il run PRIMA del rilascio dei lock stale qui sotto -- che e'
+        # lavoro puramente DB e non ha motivo di dipendere da Redis.
+        esito["cooldown_rilasciati"] = len(
+            await wa_number_manager.release_expired_wa_cooldowns())
+    except Exception as exc:
+        logger.error("[WA] health-check: rilascio cooldown saltato "
+                     f"({type(exc).__name__}), proseguo con i lock stale")
 
     async with AsyncSessionLocal() as db:
         cutoff = datetime.utcnow() - timedelta(minutes=int(settings.wa_lock_timeout_min))

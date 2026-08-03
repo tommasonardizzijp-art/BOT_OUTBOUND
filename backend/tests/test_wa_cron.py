@@ -341,6 +341,37 @@ async def test_healthcheck_continua_dopo_eccezione_generica_su_un_numero(
     assert ctx["cc"].locked_by is None
 
 
+@pytest.mark.asyncio
+async def test_healthcheck_rilascia_i_lock_stale_anche_se_redis_e_giu(db_session, monkeypatch):
+    """release_expired_wa_cooldowns legge Redis; girava fuori da qualunque
+    try, PRIMA del rilascio dei lock stale. Con Redis irraggiungibile il run
+    abortiva li' e i lock stale non venivano mai rilasciati -- lavoro
+    puramente DB che non ha motivo di dipendere da Redis."""
+    from datetime import datetime, timedelta
+    from app.services import wa_number_manager
+    from app.workers import cron_worker
+
+    ctx = await _scenario_claim(db_session)
+    ctx["cc"].locked_by = "worker-morto"
+    ctx["cc"].locked_at = datetime.utcnow() - timedelta(minutes=45)
+    await db_session.commit()
+    _lock_profilo_libero(monkeypatch)
+
+    async def _fake_check(number_id):
+        return WaNumberStatus.active
+    monkeypatch.setattr(cron_worker, "check_session", _fake_check)
+
+    async def _cooldown_rotto():
+        raise ConnectionError("redis irraggiungibile")
+    monkeypatch.setattr(wa_number_manager, "release_expired_wa_cooldowns", _cooldown_rotto)
+
+    esito = await cron_worker.wa_session_healthcheck({})
+
+    assert esito["cooldown_rilasciati"] == 0
+    await db_session.refresh(ctx["cc"])
+    assert ctx["cc"].locked_by is None
+
+
 def test_i_cron_instagram_restano_registrati_e_healthcheck_wa_e_aggiunto():
     """Non-regressione: cron_worker.py e' condiviso con Instagram in
     produzione. Ogni entry di cron_jobs e' un arq.cron.CronJob: il nome
