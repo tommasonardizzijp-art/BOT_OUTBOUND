@@ -435,6 +435,9 @@ async def test_scan_number_processa_le_righe_non_lette(db_session, monkeypatch):
         def __init__(self, page):
             pass
 
+        async def session_state(self):
+            return "logged_in"
+
         async def scan_chat_list(self):
             return righe_finte
 
@@ -469,6 +472,63 @@ async def test_scan_number_processa_le_righe_non_lette(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scan_number_sessione_non_pronta_non_tenta_lo_scan(db_session, monkeypatch):
+    """Trovato provando dal vivo (QA Fase 4, 04/08): appena aperta, WhatsApp
+    Web e' una SPA pesante -- la sidebar non e' garantita pronta subito dopo
+    `page.goto(wait_until="domcontentloaded")`. `session_state()` (M1) ASPETTA
+    fino a 90s la comparsa di CHATLIST; `scan_chat_list()` (M1) NON aspetta,
+    valuta il DOM cosi' com'e' e solleva RuntimeError se la sidebar non c'e'
+    ancora. scan_number deve verificare lo stato PRIMA di scansionare, non
+    lasciar propagare un RuntimeError per un semplice ritardo di caricamento."""
+    from app.services import wa_reply_watcher
+    from tests.factories_wa import make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    await db_session.commit()
+
+    class _PomFinto:
+        def __init__(self, page):
+            pass
+
+        async def session_state(self):
+            return "qr_required"
+
+        async def scan_chat_list(self):
+            raise AssertionError("scan_chat_list non deve partire se la sessione non e' pronta")
+
+    monkeypatch.setattr(wa_reply_watcher, "WhatsAppWebPage", _PomFinto)
+
+    class _ContextFinto:
+        async def new_page(self):
+            class _PageFinta:
+                async def goto(self, *a, **k):
+                    pass
+            return _PageFinta()
+
+    class _BrowserCtx:
+        def __call__(self, number_id, headless=True, proxy_url=None):
+            return self
+
+        async def __aenter__(self):
+            return _ContextFinto()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(wa_reply_watcher, "_open_wa_browser", _BrowserCtx())
+    _lock_profilo_libero(monkeypatch)
+
+    async def _mai_halted():
+        return False
+    monkeypatch.setattr(wa_reply_watcher.bot_state_service, "is_wa_halted", _mai_halted)
+
+    esito = await wa_reply_watcher.scan_number(numero.id)
+    assert esito["motivo"] == "sessione_non_pronta"
+    assert esito["scansionate"] == 0
+
+
+@pytest.mark.asyncio
 async def test_e2e_optout_ferma_tutte_le_campagne_del_contatto(db_session, monkeypatch):
     """Scenario completo SDD §7.5: STOP su UNA campagna ferma TUTTE le righe
     non terminali del contatto, in QUALUNQUE campagna del tenant."""
@@ -496,6 +556,8 @@ async def test_e2e_optout_ferma_tutte_le_campagne_del_contatto(db_session, monke
     class _PomFinto:
         def __init__(self, page):
             pass
+        async def session_state(self):
+            return "logged_in"
         async def scan_chat_list(self):
             return righe_finte
 

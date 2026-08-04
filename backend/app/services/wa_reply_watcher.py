@@ -258,6 +258,17 @@ async def scan_number(number_id: str) -> dict:
                 page = await context.new_page()
                 await page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
                 pom = WhatsAppWebPage(page)
+                # Trovato dal vivo (QA Fase 4, 04/08): subito dopo il goto la
+                # sidebar non e' garantita pronta (SPA pesante). session_state()
+                # (M1) ASPETTA fino a SESSION_STATE_TIMEOUT_CHATLIST_MS la
+                # comparsa di CHATLIST; scan_chat_list() (M1) NON aspetta e
+                # solleva RuntimeError se valutato troppo presto. Verificare
+                # prima evita di scambiare un ritardo di caricamento per un
+                # selettore disallineato.
+                stato = await pom.session_state()
+                if stato != "logged_in":
+                    esito["motivo"] = "sessione_non_pronta"
+                    return esito
                 righe = await pom.scan_chat_list()
     except wa_profile_lock.WaProfileBusy:
         esito["motivo"] = "profilo_occupato"
