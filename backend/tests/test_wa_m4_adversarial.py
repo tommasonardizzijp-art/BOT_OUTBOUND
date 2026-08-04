@@ -152,7 +152,14 @@ async def test_concorrenza_reale_tre_consumatori_stesso_numero(db_session, monke
         # check_session (M1) e' l'operazione 'cara' del consumatore
         # health-check: qui la simuliamo con lo stesso contatore condiviso,
         # cosi' l'invariante 'al piu' uno aperto alla volta' vale sui TRE
-        # consumatori reali, non solo su due.
+        # consumatori reali, non solo su due. Ma il DB di test e' CONDIVISO
+        # fra i file della suite (altri test lasciano numeri attivi dietro
+        # di se'): wa_session_healthcheck({}) itera TUTTI i numeri attivi,
+        # non solo quello sotto test. Contiamo solo le aperture per
+        # `numero.id` -- gli altri numeri hanno una chiave di lock diversa,
+        # la loro concorrenza reciproca non e' l'invariante che proviamo qui.
+        if number_id != numero.id:
+            return WaNumberStatus.active
         await contatore.apri()
         try:
             return WaNumberStatus.active
@@ -608,17 +615,24 @@ async def test_invarianti_dominio_dopo_operazioni_miste(db_session):
         db_session, tenant_id=tenant.id, wa_number_id=numero.id,
         row=_row("Sconosciuto", preview="chi sei"))  # non_associato
 
+    # Le tre query sotto sono scoped al tenant di QUESTO test: il DB di test
+    # e' condiviso fra i file della suite (contratto §7.4), una COUNT(*)
+    # senza filtro conterebbe anche righe lasciate da altri test.
+
     # 1) Nessuna riga wa_campaign_contacts 'replied' con next_action_at NON NULL
     orfani_replied = await db_session.scalar(text(
-        "SELECT COUNT(*) FROM wa_campaign_contacts "
-        "WHERE status = 'replied' AND next_action_at IS NOT NULL"
-    ))
+        "SELECT COUNT(*) FROM wa_campaign_contacts cc "
+        "JOIN wa_campaigns camp ON cc.campaign_id = camp.id "
+        "WHERE camp.tenant_id = :tenant_id "
+        "AND cc.status = 'replied' AND cc.next_action_at IS NOT NULL"
+    ), {"tenant_id": tenant.id})
     assert orfani_replied == 0
 
     # 2) Nessun wa_contacts opted_out=1 con do_not_contact=0
     optout_incoerenti = await db_session.scalar(text(
-        "SELECT COUNT(*) FROM wa_contacts WHERE opted_out = 1 AND do_not_contact = 0"
-    ))
+        "SELECT COUNT(*) FROM wa_contacts "
+        "WHERE tenant_id = :tenant_id AND opted_out = 1 AND do_not_contact = 0"
+    ), {"tenant_id": tenant.id})
     assert optout_incoerenti == 0
 
     # 3) Nessuna riga wa_inbound_events con contact_id NOT NULL che referenzia
@@ -626,8 +640,9 @@ async def test_invarianti_dominio_dopo_operazioni_miste(db_session):
     orfani_eventi = await db_session.scalar(text(
         "SELECT COUNT(*) FROM wa_inbound_events e "
         "LEFT JOIN wa_contacts c ON e.contact_id = c.id "
-        "WHERE e.contact_id IS NOT NULL AND c.id IS NULL"
-    ))
+        "WHERE e.tenant_id = :tenant_id "
+        "AND e.contact_id IS NOT NULL AND c.id IS NULL"
+    ), {"tenant_id": tenant.id})
     assert orfani_eventi == 0
 
 
