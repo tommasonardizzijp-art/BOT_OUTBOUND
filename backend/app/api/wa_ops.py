@@ -3,14 +3,16 @@
 M3 e' backend puro (decisione 29/07): non c'e' UI in questo modulo. Le
 pagine, quando arriveranno, le costruisce M2 contro questi endpoint.
 """
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select
 
 from app.database import get_db
-from app.models.wa import (WaCampaign, WaCampaignStatus, WaMessage,
-                           WaMessageStatus, WaNumber, WaNumberStatus)
+from app.models.wa import (WaCampaign, WaCampaignStatus, WaContact, WaDncReason,
+                           WaMessage, WaMessageStatus, WaNumber, WaNumberStatus)
 from app.services import bot_state_service
 from app.workers.wa_worker import enqueue_wa_workers
 
@@ -19,6 +21,18 @@ router = APIRouter(prefix="/wa/ops", tags=["wa-ops"])
 
 class HaltRequest(BaseModel):
     reason: str
+
+
+class RevokeOptoutRequest(BaseModel):
+    note: str
+
+    @field_validator("note")
+    @classmethod
+    def _note_non_vuota(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("note e' obbligatoria: la revoca di un opt-out va sempre "
+                             "giustificata (GDPR/ePrivacy)")
+        return v
 
 
 @router.get("/status")
@@ -118,3 +132,45 @@ async def resume_campaign(campaign_id: str, db=Depends(get_db)) -> dict:
                      f"a running ma enqueue fallito: {exc!r}")
         return {"resumed": True, "accodati": 0, "errore_accodamento": str(exc)}
     return {"resumed": True, "accodati": accodati}
+
+
+@router.post("/contacts/{contact_id}/revoke-optout")
+async def revoke_optout(contact_id: str, body: RevokeOptoutRequest, db=Depends(get_db)) -> dict:
+    """Revoca l'opt-out di un contatto (richiesto da Tommaso 27/07): oggi chi
+    scrive STOP resta bloccato per sempre, senza modo di tornare indietro se
+    poi cambia idea (es. richiama e chiede di essere ricontattato).
+
+    Nota obbligatoria (validata dal body): revocare una preferenza di
+    opt-out espressa dal contatto e' sensibile lato GDPR/ePrivacy, va sempre
+    giustificato e loggato, mai silenzioso.
+
+    Tocca SOLO wa_contacts, in avanti: le righe wa_campaign_contacts gia'
+    terminali (opted_out) di campagne passate restano cosi' -- e' storico
+    corretto, non si resuscitano invii su campagne gia' fermate. Il
+    contratto M2/M3 (docs/whatsapp/contratto-M2-M3.md §7) ricontrolla
+    l'opt-out live a ogni ingest: basta che il flag a livello contatto sia
+    corretto perche' il contatto torni eleggibile per campagne FUTURE.
+
+    Se il dnc_reason non e' 'optout' (es. 'manual', 'unreachable',
+    'invalid_number' -- causa DNC indipendente, magari scritta da un altro
+    processo dopo lo STOP), NON tocca do_not_contact/dnc_reason: quella
+    causa resta valida a prescindere dalla revoca dell'opt-out.
+    """
+    contact = await db.scalar(select(WaContact).where(WaContact.id == contact_id))
+    if contact is None:
+        raise HTTPException(status_code=404, detail="contatto inesistente")
+
+    if not contact.opted_out:
+        return {"revoked": False, "motivo": "contatto non era in opt-out"}
+
+    contact.opted_out = False
+    contact.opted_out_at = None
+    if contact.dnc_reason == WaDncReason.optout:
+        contact.do_not_contact = False
+        contact.dnc_reason = None
+    await db.commit()
+
+    logger.warning(
+        f"[WA OPTOUT REVOKE] contatto={contact_id} nota={body.note[:60]!r}"
+    )
+    return {"revoked": True}
