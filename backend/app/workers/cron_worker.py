@@ -2,10 +2,10 @@
 
 Run: arq app.workers.cron_worker.CronWorkerSettings
 """
-import arq
 from arq import cron
 
-from app.services.work_enqueue import ARQ_CRON_QUEUE, ARQ_MAIN_QUEUE, arq_redis_settings
+from app.services.work_enqueue import ARQ_CRON_QUEUE, arq_redis_settings
+from app.services import wa_profile_lock, wa_reply_watcher
 from app.services.wa_session import check_session
 from app.workers.task_queue import (
     check_replies,
@@ -16,28 +16,6 @@ from app.workers.task_queue import (
 )
 
 
-async def _wa_send_job_is_active(redis, number_id: str) -> bool:
-    """True se wa_send_task per questo numero e' 'queued' o 'in_progress' su
-    ARQ (Fix 1, review finale C1): il worker di invio potrebbe avere in quel
-    momento il browser aperto sullo STESSO profilo Chromium del
-    health-check. _open_wa_browser (M1, frozen) cancella SingletonLock/
-    Cookie/Socket del profilo come parte del suo cleanup: il guardiano OS
-    che impedirebbe un secondo Chromium concorrente sparisce, quindi il
-    secondo avvio APRE DAVVERO invece di fallire -- corruzione profilo,
-    sessione WhatsApp persa, QR da far riscansionare al cliente.
-
-    'deferred' NON conta come attivo: nessun browser e' aperto finche' il
-    job non viene pescato dalla coda, e trattarlo come attivo fermerebbe il
-    health-check quasi sempre (dopo ogni mini-sessione c'e' sempre un
-    wa_send_task deferred in attesa del break)."""
-    from arq.jobs import Job, JobStatus
-    from app.workers.wa_worker import wa_send_job_id
-
-    job = Job(wa_send_job_id(number_id), redis, _queue_name=ARQ_MAIN_QUEUE)
-    status = await job.status()
-    return status in (JobStatus.queued, JobStatus.in_progress)
-
-
 async def wa_session_healthcheck(ctx: dict) -> dict:
     """Ogni 30 minuti nelle ore attive (SDD Q56): per ogni numero non
     ritirato, guarda se la sessione e' viva; se e' caduta mette in pausa le
@@ -45,8 +23,10 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
 
     Il check apre il browser headless (check_session, M1): e' l'operazione
     piu' cara di questo cron, ed e' il motivo per cui gira su un cron
-    dedicato e non dentro il worker di invio. Prima di aprirlo si verifica
-    che wa_send_task non stia gia' usando lo stesso profilo (Fix 1).
+    dedicato e non dentro il worker di invio. Prima di aprirlo acquisisce
+    il lucchetto Redis del profilo (wa_profile_lock, M4): se invio o
+    reply-scan lo stanno gia' usando, salta il numero invece di rischiare
+    un secondo Chromium concorrente sullo stesso profilo.
     """
     from app.database import AsyncSessionLocal
     from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
@@ -68,40 +48,53 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
         )).scalars().all()
         ids = [n.id for n in numeri]
 
-    redis = await arq.create_pool(arq_redis_settings())
+    for number_id in ids:
+        try:
+            async with wa_profile_lock.held(number_id):
+                esito["controllati"] += 1
+                try:
+                    stato = await check_session(number_id)
+                except Exception as exc:
+                    logger.error(f"[WA] health-check {number_id} fallito: {type(exc).__name__}")
+                    continue
+                if stato == WaNumberStatus.active:
+                    continue
+                esito["caduti"] += 1
+                async with AsyncSessionLocal() as db:
+                    await db.execute(
+                        update(WaCampaign)
+                        .where(WaCampaign.wa_number_id == number_id,
+                               WaCampaign.status == WaCampaignStatus.running)
+                        .values(status=WaCampaignStatus.paused)
+                    )
+                    await db.commit()
+                await notifier.send_telegram(
+                    f"WhatsApp: numero {number_id[:8]} -> {stato.value}. "
+                    "Campagne in pausa. Serve un nuovo QR (lo scansiona il cliente).",
+                    level="error")
+        except wa_profile_lock.WaProfileBusy:
+            esito["saltati_invio_attivo"] += 1
+            logger.info(f"[WA] health-check {number_id[:8]} saltato: "
+                       "profilo occupato (invio o reply-scan in corso)")
+        except Exception as exc:
+            # Qualunque altro guasto sul singolo numero (es. un blip Redis in
+            # held()) non deve abortire il run intero: sotto questo loop girano
+            # il rilascio dei cooldown scaduti e dei lock stale, che valgono
+            # anche quando un numero e' irraggiungibile. Stesso pattern
+            # per-numero gia' in uso in wa_reply_scan.
+            logger.error(f"[WA] health-check {number_id[:8]} saltato per un "
+                         f"guasto: {type(exc).__name__}")
+
     try:
-        for number_id in ids:
-            if await _wa_send_job_is_active(redis, number_id):
-                esito["saltati_invio_attivo"] += 1
-                logger.info(f"[WA] health-check {number_id[:8]} saltato: "
-                           "wa_send_task attivo sullo stesso profilo")
-                continue
-
-            esito["controllati"] += 1
-            try:
-                stato = await check_session(number_id)
-            except Exception as exc:
-                logger.error(f"[WA] health-check {number_id} fallito: {type(exc).__name__}")
-                continue
-            if stato == WaNumberStatus.active:
-                continue
-            esito["caduti"] += 1
-            async with AsyncSessionLocal() as db:
-                await db.execute(
-                    update(WaCampaign)
-                    .where(WaCampaign.wa_number_id == number_id,
-                           WaCampaign.status == WaCampaignStatus.running)
-                    .values(status=WaCampaignStatus.paused)
-                )
-                await db.commit()
-            await notifier.send_telegram(
-                f"WhatsApp: numero {number_id[:8]} -> {stato.value}. "
-                "Campagne in pausa. Serve un nuovo QR (lo scansiona il cliente).",
-                level="error")
-    finally:
-        await redis.aclose()
-
-    esito["cooldown_rilasciati"] = len(await wa_number_manager.release_expired_wa_cooldowns())
+        # Stesso motivo del try per-numero qui sopra: questa chiamata legge una
+        # chiave Redis per ogni numero in cooldown, e un Redis irraggiungibile
+        # abortiva il run PRIMA del rilascio dei lock stale qui sotto -- che e'
+        # lavoro puramente DB e non ha motivo di dipendere da Redis.
+        esito["cooldown_rilasciati"] = len(
+            await wa_number_manager.release_expired_wa_cooldowns())
+    except Exception as exc:
+        logger.error("[WA] health-check: rilascio cooldown saltato "
+                     f"({type(exc).__name__}), proseguo con i lock stale")
 
     async with AsyncSessionLocal() as db:
         cutoff = datetime.utcnow() - timedelta(minutes=int(settings.wa_lock_timeout_min))
@@ -115,6 +108,48 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
         esito["lock_rilasciati"] = res.rowcount or 0
 
     logger.info(f"[WA] health-check: {esito}")
+    return esito
+
+
+async def wa_reply_scan(ctx: dict) -> dict:
+    """Ogni scan: solo numeri con lavoro da fare secondo
+    wa_reply_watcher.numeri_da_scansionare (campagna running con contatti
+    queued/in_sequence, oppure un invio recente).
+
+    La schedulazione resta dentro le ore attive come l'health-check, ma qui
+    NON si ricontrolla la finestra oraria a runtime (a differenza di
+    esegui_mini_sessione): una scansione non manda nulla, quindi non c'e'
+    niente da tenere dentro l'orario umano.
+
+    Non e' tempo-critico per l'MVP (campagne a 1 messaggio, Q29): serve per
+    KPI e per la rete di opt-out, la garanzia vera resta la guardia
+    pre-invio (§7.5 punto 7)."""
+    from app.database import AsyncSessionLocal
+    from loguru import logger
+
+    esito = {"numeri_scansionati": 0, "optout_totali": 0, "replied_totali": 0}
+    async with AsyncSessionLocal() as db:
+        ids = await wa_reply_watcher.numeri_da_scansionare(db)
+
+    for number_id in ids:
+        try:
+            risultato = await wa_reply_watcher.scan_number(number_id)
+        except Exception as exc:
+            # Il messaggio si logga SOLO per RuntimeError: e' l'eccezione con
+            # cui scan_chat_list dice QUALE selettore e' disallineato, e senza
+            # quella diagnosi il log non serve a riparare nulla. Per le altre
+            # resta il solo tipo: potrebbero portarsi dietro una preview di
+            # conversazione (PII).
+            dettaglio = f" -- {exc}" if isinstance(exc, RuntimeError) else ""
+            logger.error(f"[WA] reply-scan {number_id} fallito: "
+                         f"{type(exc).__name__}{dettaglio}")
+            continue
+        if risultato["motivo"] is None:
+            esito["numeri_scansionati"] += 1
+        esito["optout_totali"] += risultato["optout"]
+        esito["replied_totali"] += risultato["replied"]
+
+    logger.info(f"[WA] reply-scan: {esito}")
     return esito
 
 
@@ -132,6 +167,7 @@ class CronWorkerSettings:
         cron(recover_sending, minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55}),
         cron(telegram_commands, minute=set(range(60))),
         cron(wa_session_healthcheck, minute={0, 30}, hour=set(range(9, 20))),
+        cron(wa_reply_scan, minute={15, 45}, hour=set(range(9, 20))),
     ]
     queue_name = ARQ_CRON_QUEUE
     redis_settings = arq_redis_settings()

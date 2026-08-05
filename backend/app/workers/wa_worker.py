@@ -16,7 +16,7 @@ from sqlalchemy import or_, select, update
 
 from app.browser.whatsapp_page import WhatsAppWebPage
 from app.config import settings
-from app.services import wa_sender, wa_timing
+from app.services import wa_profile_lock, wa_sender, wa_timing
 from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
 from app.services.work_enqueue import arq_redis_settings
 
@@ -34,6 +34,14 @@ MAX_GUASTI_CONSECUTIVI = 3
 # lunga da non auto-riattivarsi prima che qualcuno se ne accorga, abbastanza
 # corta da non lasciare il numero morto per giorni se l'alert viene perso.
 FM2_COOLDOWN_MINUTES = 4 * 60
+
+# Margine fra il cap wall-clock della mini-sessione e il TTL del lucchetto
+# profilo. La mini-sessione si ferma da sola PRIMA che il lock possa scadere,
+# invece di confidare solo nel TTL: cosi' anche se l'heartbeat non passasse
+# (Redis irraggiungibile) non esiste una finestra in cui il profilo e' aperto
+# ma il lock e' libero. 5 minuti coprono la chiusura del browser piu' il
+# rilascio del lock, che sono secondi.
+MARGINE_CAP_SESSIONE_MIN = 5
 
 
 async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
@@ -130,6 +138,15 @@ def _ora_locale_corrente() -> int:
         return datetime.now(timezone(timedelta(hours=1))).hour
 
 
+def _limite_sessione_s() -> float:
+    """Durata massima wall-clock di una mini-sessione, sempre sotto il TTL del
+    lucchetto profilo. Il minimo di 60s evita che una configurazione con TTL
+    piccolo produca un limite nullo o negativo (che chiuderebbe ogni sessione
+    prima del primo messaggio)."""
+    return max(60.0, (int(settings.wa_profile_lock_ttl_min)
+                      - MARGINE_CAP_SESSIONE_MIN) * 60.0)
+
+
 async def esegui_mini_sessione(number_id: str) -> dict:
     """Una mini-sessione di invii per UN numero. Short-lived: apre il
     browser, manda al piu' N messaggi (wa_timing), chiude e lascia che sia
@@ -183,113 +200,134 @@ async def esegui_mini_sessione(number_id: str) -> dict:
     processati = 0
     guasti_consecutivi = 0
 
-    async with _open_wa_browser(number_id, headless=True, proxy_url=proxy_url) as context:
-        page = await context.new_page()
-        await page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
-        pom = WhatsAppWebPage(page)
-        browser_t0 = time.perf_counter()
+    try:
+        async with wa_profile_lock.held(number_id) as lock_token:
+            async with _open_wa_browser(number_id, headless=True, proxy_url=proxy_url) as context:
+                page = await context.new_page()
+                await page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
+                pom = WhatsAppWebPage(page)
+                browser_t0 = time.perf_counter()
+                limite_s = _limite_sessione_s()
 
-        while quanti is None or processati < quanti:
-            # I cancelli si ricontrollano a OGNI messaggio, non una volta a
-            # inizio sessione: una sessione dura decine di minuti e nel
-            # frattempo puo' cambiare tutto (kill-switch, cap, ora).
-            if await bot_state_service.is_wa_halted():
-                esito["motivo"] = "wa_halted"
-                break
+                while quanti is None or processati < quanti:
+                    # Cap wall-clock: la durata di una sessione ha una coda destra
+                    # lunga (delay lognormale + costo di invio), e sforare il TTL
+                    # del lucchetto significa un secondo Chromium sullo stesso
+                    # profilo. Si esce pulito prima, il worker rischedula dopo il
+                    # break come per qualunque altra sessione conclusa.
+                    if time.perf_counter() - browser_t0 >= limite_s:
+                        esito["motivo"] = "timeout_sessione"
+                        break
 
-            async with AsyncSessionLocal() as db:
-                number = await db.scalar(select(WaNumber).where(WaNumber.id == number_id))
-                preso = await claim_next_wa_contact(db, number_id=number_id,
-                                                    worker_id=worker_id)
-                if preso is None:
-                    esito["motivo"] = "niente_da_fare"
-                    break
-                cc, contact, campaign, step = preso
-                # Catturati SUBITO: un rollback piu' sotto (Fix B, review
-                # finale round 2) espira tutti gli oggetti ORM della
-                # sessione -- rileggere cc.id/campaign.id DOPO quel rollback
-                # dichiara un lazy-load implicito che l'AsyncSession non
-                # puo' eseguire fuori da un await esplicito (MissingGreenlet).
-                # Gli id, letti ora mentre gli oggetti sono ancora "freschi",
-                # restano validi indipendentemente da cosa succede alla
-                # sessione dopo.
-                cc_id, contact_id, campaign_id = cc.id, contact.id, campaign.id
+                    # I cancelli si ricontrollano a OGNI messaggio, non una volta a
+                    # inizio sessione: una sessione dura decine di minuti e nel
+                    # frattempo puo' cambiare tutto (kill-switch, cap, ora).
+                    if await bot_state_service.is_wa_halted():
+                        esito["motivo"] = "wa_halted"
+                        break
 
-                if quanti is None:
-                    quanti = wa_timing.wa_session_message_count(campaign)
+                    async with AsyncSessionLocal() as db:
+                        number = await db.scalar(select(WaNumber).where(WaNumber.id == number_id))
+                        preso = await claim_next_wa_contact(db, number_id=number_id,
+                                                            worker_id=worker_id)
+                        if preso is None:
+                            esito["motivo"] = "niente_da_fare"
+                            break
+                        cc, contact, campaign, step = preso
+                        # Catturati SUBITO: un rollback piu' sotto (Fix B, review
+                        # finale round 2) espira tutti gli oggetti ORM della
+                        # sessione -- rileggere cc.id/campaign.id DOPO quel rollback
+                        # dichiara un lazy-load implicito che l'AsyncSession non
+                        # puo' eseguire fuori da un await esplicito (MissingGreenlet).
+                        # Gli id, letti ora mentre gli oggetti sono ancora "freschi",
+                        # restano validi indipendentemente da cosa succede alla
+                        # sessione dopo.
+                        cc_id, contact_id, campaign_id = cc.id, contact.id, campaign.id
 
-                ora = _ora_locale_corrente()
-                inizio, fine = wa_timing.effective_wa_active_hours(campaign)
-                if not (inizio <= ora < fine):
-                    await _rilascia_lock(db, cc_id)
-                    esito["motivo"] = "fuori_finestra"
-                    break
+                        if quanti is None:
+                            quanti = wa_timing.wa_session_message_count(campaign)
 
-                if not await wa_number_manager.has_wa_send_budget(db, number, campaign):
-                    await _rilascia_lock(db, cc_id)
-                    esito["motivo"] = "cap_esaurito"
-                    break
+                        ora = _ora_locale_corrente()
+                        inizio, fine = wa_timing.effective_wa_active_hours(campaign)
+                        if not (inizio <= ora < fine):
+                            await _rilascia_lock(db, cc_id)
+                            esito["motivo"] = "fuori_finestra"
+                            break
 
-                try:
-                    res = await wa_sender.invia_a_contatto(
-                        db, pom, campaign=campaign, step=step, cc=cc, contact=contact,
-                        number=number,
-                        browser_avviato_da_s=time.perf_counter() - browser_t0)
-                except Exception as exc:
-                    # Un'eccezione IMPREVISTA (decrypt, commit DB, blip) non
-                    # deve mai propagare fuori dalla mini-sessione: senza
-                    # questo except fermava TUTTO il job in silenzio, il
-                    # contatto restava lockato fino al prossimo health-check
-                    # (20 min) e _rischedula non veniva mai raggiunta -- il
-                    # numero smetteva di inviare senza un log che lo
-                    # spiegasse (Fix 4, review finale I7). Si tratta come
-                    # 'queued': stesso ramo del guasto nostro qui sotto,
-                    # rilascia il lock e arma FM2. Nessun numero in chiaro:
-                    # solo l'id opaco del contatto.
-                    #
-                    # Rollback PRIMA di tutto (review finale round 2, gap
-                    # residuo su Fix 4): se l'eccezione viene da un
-                    # db.commit() fallito dentro invia_a_contatto, la
-                    # AsyncSession resta in stato must-rollback -- la
-                    # prossima istruzione che tocca db (_rilascia_lock, qui
-                    # sotto) solleverebbe PendingRollbackError FUORI da
-                    # questo except, ripresentando I7 identico per la classe
-                    # di eccezione piu' citata nel finding originale.
-                    # Difensivo (stesso pattern di browser_bio._resilient_
-                    # release e bot_state_service.halt/resume): un rollback
-                    # su una sessione gia' pulita e' un no-op innocuo.
-                    try:
-                        await db.rollback()
-                    except Exception:
-                        pass
-                    logger.error(f"[WA] invia_a_contatto: eccezione imprevista su "
-                                f"contatto {contact_id} (cc={cc_id}): "
-                                f"{type(exc).__name__}")
-                    res = wa_sender.EsitoInvio("queued", f"eccezione:{type(exc).__name__}")
-                processati += 1
+                        if not await wa_number_manager.has_wa_send_budget(db, number, campaign):
+                            await _rilascia_lock(db, cc_id)
+                            esito["motivo"] = "cap_esaurito"
+                            break
 
-                if res.stato == "sent":
-                    esito["inviati"] += 1
-                    guasti_consecutivi = 0
-                elif res.stato in ("skipped", "opted_out", "replied"):
-                    esito["saltati"] += 1
-                    guasti_consecutivi = 0
-                elif res.stato == "failed":
-                    esito["falliti"] += 1
-                    guasti_consecutivi = 0
-                else:  # 'queued' = guasto nostro, il contatto non si tocca
-                    await _rilascia_lock(db, cc_id)
-                    guasti_consecutivi += 1
+                        try:
+                            res = await wa_sender.invia_a_contatto(
+                                db, pom, campaign=campaign, step=step, cc=cc, contact=contact,
+                                number=number,
+                                browser_avviato_da_s=time.perf_counter() - browser_t0)
+                        except Exception as exc:
+                            # Un'eccezione IMPREVISTA (decrypt, commit DB, blip) non
+                            # deve mai propagare fuori dalla mini-sessione: senza
+                            # questo except fermava TUTTO il job in silenzio, il
+                            # contatto restava lockato fino al prossimo health-check
+                            # (20 min) e _rischedula non veniva mai raggiunta -- il
+                            # numero smetteva di inviare senza un log che lo
+                            # spiegasse (Fix 4, review finale I7). Si tratta come
+                            # 'queued': stesso ramo del guasto nostro qui sotto,
+                            # rilascia il lock e arma FM2. Nessun numero in chiaro:
+                            # solo l'id opaco del contatto.
+                            #
+                            # Rollback PRIMA di tutto (review finale round 2, gap
+                            # residuo su Fix 4): se l'eccezione viene da un
+                            # db.commit() fallito dentro invia_a_contatto, la
+                            # AsyncSession resta in stato must-rollback -- la
+                            # prossima istruzione che tocca db (_rilascia_lock, qui
+                            # sotto) solleverebbe PendingRollbackError FUORI da
+                            # questo except, ripresentando I7 identico per la classe
+                            # di eccezione piu' citata nel finding originale.
+                            # Difensivo (stesso pattern di browser_bio._resilient_
+                            # release e bot_state_service.halt/resume): un rollback
+                            # su una sessione gia' pulita e' un no-op innocuo.
+                            try:
+                                await db.rollback()
+                            except Exception:
+                                pass
+                            logger.error(f"[WA] invia_a_contatto: eccezione imprevista su "
+                                        f"contatto {contact_id} (cc={cc_id}): "
+                                        f"{type(exc).__name__}")
+                            res = wa_sender.EsitoInvio("queued", f"eccezione:{type(exc).__name__}")
+                        processati += 1
 
-                if guasti_consecutivi >= MAX_GUASTI_CONSECUTIVI:
-                    await _ferma_numero_per_guasto(db, number_id, campaign_id,
-                                                   guasti_consecutivi)
-                    esito["motivo"] = "guasti_consecutivi"
-                    break
+                        if res.stato == "sent":
+                            esito["inviati"] += 1
+                            guasti_consecutivi = 0
+                        elif res.stato in ("skipped", "opted_out", "replied"):
+                            esito["saltati"] += 1
+                            guasti_consecutivi = 0
+                        elif res.stato == "failed":
+                            esito["falliti"] += 1
+                            guasti_consecutivi = 0
+                        else:  # 'queued' = guasto nostro, il contatto non si tocca
+                            await _rilascia_lock(db, cc_id)
+                            guasti_consecutivi += 1
 
-            # Delay lognormale FRA i messaggi, dentro la sessione. Non e' un
-            # "sleep lungo": e' la mediana di 90s che rende il ritmo umano.
-            await asyncio.sleep(wa_timing.wa_send_delay_seconds())
+                        if guasti_consecutivi >= MAX_GUASTI_CONSECUTIVI:
+                            await _ferma_numero_per_guasto(db, number_id, campaign_id,
+                                                           guasti_consecutivi)
+                            esito["motivo"] = "guasti_consecutivi"
+                            break
+
+                    # Heartbeat del lucchetto: rimette il TTL pieno ora che c'e'
+                    # un segno di vita fresco, cosi' la scadenza dipende
+                    # dall'ultimo messaggio e non dalla durata totale prevista
+                    # della sessione (che ha una coda destra lunga). Un EXPIRE.
+                    await wa_profile_lock.renew(number_id, lock_token)
+
+                    # Delay lognormale FRA i messaggi, dentro la sessione. Non e' un
+                    # "sleep lungo": e' la mediana di 90s che rende il ritmo umano.
+                    await asyncio.sleep(wa_timing.wa_send_delay_seconds())
+    except wa_profile_lock.WaProfileBusy:
+        esito["motivo"] = "profilo_occupato"
+        return esito
 
     logger.info(f"[WA] mini-sessione {number_id}: {esito}")
     return esito
@@ -388,7 +426,14 @@ async def wa_send_task(ctx: dict, number_id: str) -> None:
                     "nessuna rischedulazione automatica")
         return
 
-    # cap_esaurito / fuori_finestra / completata -> si riprende dopo il break.
+    if esito["motivo"] == "profilo_occupato":
+        logger.info(f"[WA] {number_id}: profilo occupato (health-check o "
+                    "reply-scan in corso), riprovo fra "
+                    f"{settings.wa_lock_busy_retry_s}s")
+        raise Retry(defer=int(settings.wa_lock_busy_retry_s))
+
+    # cap_esaurito / fuori_finestra / timeout_sessione / completata -> si
+    # riprende dopo il break.
     break_s = wa_timing.wa_session_break_seconds(
         await _campagna_attiva_del_numero(number_id))
     raise Retry(defer=int(break_s))
