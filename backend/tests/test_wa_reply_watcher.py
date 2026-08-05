@@ -124,6 +124,42 @@ async def test_match_per_chat_title_matcha_anche_se_il_dom_arriva_in_nfd(db_sess
 
 
 @pytest.mark.asyncio
+async def test_ambiguita_nfc_nfd_cross_contatto_resta_rilevata(db_session):
+    """Rischio specifico del fix .in_({nfc, nfd}): con un confronto singolo
+    '==' due contatti con chat_title byte-diversi (uno NFC, l'altro NFD)
+    non sarebbero MAI stati confusi. Ora la query cerca due varianti insieme
+    -- se contatto A ha chat_title salvato in NFC e contatto B (stesso
+    tenant) ha per coincidenza un chat_title che e' esattamente la forma NFD
+    generata dallo stesso titolo in ingresso, la query trova ENTRAMBI.
+    Verifichiamo che questo produca conteggio=2 -> ambiguo -> nessun match
+    (mai indovinare, SDD 7.3), non un match a caso sul primo trovato."""
+    import unicodedata
+    from app.services.wa_reply_watcher import match_contact
+
+    tenant = await make_tenant(db_session)
+    nfc = unicodedata.normalize("NFC", "Città Bella")
+    nfd = unicodedata.normalize("NFD", "Città Bella")
+    assert nfc != nfd  # precondizione: le due forme sono davvero byte-diverse
+
+    contatto_a = await make_contact(db_session, tenant, e164="+393330000011")
+    contatto_a.chat_title = nfc
+    contatto_b = await make_contact(db_session, tenant, e164="+393330000012")
+    contatto_b.chat_title = nfd
+    await db_session.commit()
+
+    # Il DOM manda il titolo in una qualunque delle due forme: entrambe
+    # generano lo stesso insieme di varianti {nfc, nfd}, quindi il risultato
+    # non deve dipendere da quale delle due arriva.
+    trovato_da_nfc, via_da_nfc = await match_contact(db_session, tenant.id, _row(nfc))
+    trovato_da_nfd, via_da_nfd = await match_contact(db_session, tenant.id, _row(nfd))
+
+    assert trovato_da_nfc is None
+    assert via_da_nfc == WaMatchedBy.none
+    assert trovato_da_nfd is None
+    assert via_da_nfd == WaMatchedBy.none
+
+
+@pytest.mark.asyncio
 async def test_process_row_optout(db_session):
     from app.services.wa_reply_watcher import process_chat_row
     from app.models.wa import WaContact
