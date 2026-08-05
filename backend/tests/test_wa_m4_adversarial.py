@@ -335,15 +335,16 @@ async def test_title_null_byte_non_crasha_match_contact(db_session):
 
 
 @pytest.mark.asyncio
-async def test_chat_title_nfc_vs_nfd_non_sono_trattati_come_uguali(db_session):
+async def test_chat_title_nfc_vs_nfd_sono_trattati_come_uguali(db_session):
     """'café' in forma NFC (precomposta) vs NFD (e + accento combinante) sono
-    byte-diversi. match_contact confronta a livello SQL (WHERE chat_title ==
-    title), senza alcuna normalizzazione Unicode: documentiamo il
-    comportamento reale, che diverge silenziosamente da quello 'atteso' da un
-    umano (le due stringhe sembrano identiche a schermo). Rischio reale: se
-    WhatsApp Web e la nostra scrittura del chat_title normalizzano in forme
-    diverse, il contatto smette di matchare senza errori visibili -- non un
-    match ambiguo, ma un falso 'nessun match'."""
+    byte-diversi ma la stessa stringa per un umano. Backlog M4 (fix): prima
+    match_contact confrontava a livello SQL (WHERE chat_title == title)
+    senza alcuna normalizzazione Unicode e il contatto smetteva di matchare
+    senza errori visibili -- non un match ambiguo, un falso 'nessun match'.
+    Ora row.title viene normalizzato a NFC/NFD e confrontato contro
+    entrambe le forme (chat_title a DB puo' essere stato scritto prima del
+    fix e non essere garantito NFC): entrambe le forme in ingresso devono
+    matchare lo stesso contatto."""
     import unicodedata
 
     tenant = await make_tenant(db_session)
@@ -360,10 +361,11 @@ async def test_chat_title_nfc_vs_nfd_non_sono_trattati_come_uguali(db_session):
 
     assert trovato_nfc.id == contatto.id
     assert via_nfc == WaMatchedBy.chat_title
-    # Comportamento reale, non quello "intuitivo": la forma diversa NON
-    # matcha, silenziosamente (nessun match ambiguo rilevato ne' segnalato).
-    assert trovato_nfd is None
-    assert via_nfd == WaMatchedBy.none
+    # Fix M4: la forma diversa matcha lo stesso contatto, non piu' un falso
+    # 'nessun match'.
+    assert trovato_nfd is not None
+    assert trovato_nfd.id == contatto.id
+    assert via_nfd == WaMatchedBy.chat_title
 
 
 # ---------------------------------------------------------------------------

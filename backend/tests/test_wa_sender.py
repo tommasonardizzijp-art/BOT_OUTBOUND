@@ -617,6 +617,37 @@ async def test_i35_chat_title_mai_salvato_come_numero(db_session, monkeypatch):
     assert ctx["contact"].chat_title is None
 
 
+@pytest.mark.asyncio
+async def test_impara_chat_title_normalizza_sempre_in_nfc(db_session, monkeypatch):
+    """Backlog M4: il DOM di WhatsApp puo' restituire un nome accentato in
+    forma NFD (lettera base + accento combinante separato); il matching del
+    reply-watcher confronta con '=='. Se si salva il testo cosi' com'e', un
+    contatto scritto oggi non verra' mai agganciato a una risposta futura
+    (bug silenzioso, non un crash)."""
+    import unicodedata
+    from app.browser.whatsapp_page import ChatRow
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+
+    titolo_nfd = unicodedata.normalize("NFD", "Città Bella")
+
+    class _PomAccentato(_PomInvio):
+        async def scan_chat_list(self):
+            return [ChatRow(position=0, title=titolo_nfd, title_is_number=False,
+                            unread_count=0, preview="", last_is_outbound=False,
+                            outgoing_state=None, muted=False)]
+
+    pom = _PomAccentato([])
+    await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    await db_session.refresh(ctx["contact"])
+
+    assert ctx["contact"].chat_title == unicodedata.normalize("NFC", "Città Bella")
+    assert ctx["contact"].chat_title == unicodedata.normalize("NFC", ctx["contact"].chat_title)
+
+
 # ---------------------------------------------------------------------------
 # Fix 2 (review finale whole-branch, Critical C2): "failed" da
 # invia_a_contatto azzerava guasti_consecutivi (FM2 mai armato). send_text
@@ -803,3 +834,31 @@ async def test_ricerca_senza_risultati_sotto_soglia_non_avvisa(db_session, monke
     await wa_sender._incrementa_fallimento(db_session, ctx["cc"], "ricerca_senza_risultati")
 
     assert chiamate == []
+
+
+@pytest.mark.asyncio
+async def test_ha_risposto_incrementa_contatore_replied_e_marca_step(db_session):
+    """Backlog M4: la guardia M3 marcava 'replied' ma non toccava
+    wa_campaigns.replied ne' replied_at_step/last_replied_at -- a differenza
+    del reply-watcher (wa_reply_watcher.process_chat_row) che per lo stesso
+    evento fa tutte e tre le cose. Le due strade devono avere lo stesso
+    effetto sul contatto/campagna."""
+    from app.services.wa_sender import EsitoGuardia
+
+    ctx = await _scenario_invio(db_session)
+    ctx["cc"].current_step = 2
+    await db_session.commit()
+
+    guardia = EsitoGuardia(False, "ha_risposto", prova="ciao, mi interessa")
+    esito = await wa_sender._esito_guardia_negativa(
+        db_session, ctx["cc"], ctx["contact"], ctx["campaign"], guardia, "+39***")
+
+    assert esito.stato == "replied"
+
+    await db_session.refresh(ctx["cc"])
+    await db_session.refresh(ctx["contact"])
+    await db_session.refresh(ctx["campaign"])
+
+    assert ctx["cc"].replied_at_step == 2
+    assert ctx["contact"].last_replied_at is not None
+    assert ctx["campaign"].replied == 1

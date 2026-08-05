@@ -83,6 +83,46 @@ async def test_title_ambiguo_mai_indovinare(db_session):
     assert via == WaMatchedBy.none
 
 
+def test_nfc_e_nfd_sono_byte_diversi_a_parita_di_testo_visivo():
+    """Prova pura, senza DB: la stessa parola "citta'" con la lettera
+    accentata puo' arrivare in due forme di normalizzazione Unicode diverse
+    -- NFC (un solo code point per 'a') e NFD (lettera base + accento
+    combinante separato). Sono la stessa cosa per un umano, ma '==' su
+    stringhe Python le tratta come diverse: e' esattamente il confronto che
+    match_contact fa su chat_title."""
+    import unicodedata
+
+    nfc = unicodedata.normalize("NFC", "città")
+    nfd = unicodedata.normalize("NFD", "città")
+
+    assert nfc != nfd                     # stesso testo, byte diversi
+    assert len(nfd) > len(nfc)             # NFD ha un code point in piu' (l'accento separato)
+    assert unicodedata.normalize("NFC", nfd) == nfc   # normalizzare le riallinea
+
+
+@pytest.mark.asyncio
+async def test_match_per_chat_title_matcha_anche_se_il_dom_arriva_in_nfd(db_session):
+    """Backlog M4: chat_title a DB salvato in NFC (nome con lettere
+    accentate, comune nei nomi italiani), il DOM di WhatsApp lo restituisce
+    in NFD. Senza normalizzazione il confronto '==' fallisce in silenzio e
+    il matching si perde -- niente crash, solo una risposta mai agganciata."""
+    import unicodedata
+    from app.services.wa_reply_watcher import match_contact
+
+    tenant = await make_tenant(db_session)
+    contatto = await make_contact(db_session, tenant, display_name="Citta' Bella")
+    contatto.chat_title = unicodedata.normalize("NFC", "Città Bella")
+    await db_session.commit()
+
+    title_nfd = unicodedata.normalize("NFD", "Città Bella")
+    assert title_nfd != contatto.chat_title   # precondizione: le due forme sono davvero diverse
+
+    trovato, via = await match_contact(db_session, tenant.id, _row(title_nfd))
+    assert trovato is not None
+    assert trovato.id == contatto.id
+    assert via == WaMatchedBy.chat_title
+
+
 @pytest.mark.asyncio
 async def test_process_row_optout(db_session):
     from app.services.wa_reply_watcher import process_chat_row
