@@ -278,3 +278,71 @@ async def test_9_junction_non_viene_attraversata(db_session, monkeypatch, tmp_pa
         # pulizia extra di sicurezza: se profile_dir fosse rimasta (test
         # fallito prima del purge), rimuoverla SENZA attraversarla.
         purge.remove_profile_dir_safely(profile_dir)
+
+
+@pytest.mark.asyncio
+async def test_10_fallimento_rimozione_un_profilo_non_blocca_gli_altri(
+        db_session, monkeypatch):
+    """Trovato in code review adversarial (M5 Task 1): il DB e' gia' stato
+    cancellato (commit irreversibile) quando parte il loop sui profili
+    browser. Se la rimozione del profilo del PRIMO numero solleva (es. file
+    bloccato da un processo Chromium ancora vivo), un semplice `for` senza
+    try/except interrompe il loop: i profili degli ALTRI numeri non vengono
+    nemmeno tentati, e non c'e' modo di ritentarli via CLI perche' i
+    wa_numbers che servono a ricostruire il path sono gia' spariti dal DB.
+    Il fallimento su un numero non deve impedire il tentativo sugli altri, e
+    deve essere segnalato chiaramente (non un crash silenzioso a meta' lista,
+    non un traceback grezzo).
+
+    NON usa la fixture `profili_da_pulire`: il suo teardown chiamerebbe
+    `remove_profile_dir_safely` mentre il monkeypatch di questo test e'
+    ancora attivo (i finalizer dei fixture girano prima dell'undo del
+    monkeypatch), risollevando lo stesso PermissionError simulato. La pulizia
+    del profilo "rotto" e' fatta a mano in `finally` con la funzione REALE
+    salvata prima del patch."""
+    tenant = await make_tenant(db_session, f"QAM5-fs-fail-{uuid.uuid4().hex[:8]}")
+    numero_rotto = await make_number(db_session, tenant, label="Numero bloccato")
+    numero_ok = await make_number(db_session, tenant, label="Numero pulibile")
+    await db_session.commit()
+
+    profilo_rotto = profile_dir_for(numero_rotto.id)
+    profilo_rotto.mkdir(parents=True, exist_ok=True)
+    (profilo_rotto / "canary.txt").write_text("bloccato")
+
+    profilo_ok = profile_dir_for(numero_ok.id)
+    profilo_ok.mkdir(parents=True, exist_ok=True)
+    (profilo_ok / "canary.txt").write_text("pulibile")
+
+    reale = purge.remove_profile_dir_safely
+
+    def fallisce_sul_primo(path):
+        if path == profilo_rotto:
+            raise PermissionError(f"simulato: {path} bloccato da un processo")
+        return reale(path)
+
+    monkeypatch.setattr(purge, "remove_profile_dir_safely", fallisce_sul_primo)
+    monkeypatch.setattr(sys, "argv", _argv(tenant.id, "--yes"))
+
+    try:
+        with pytest.raises(SystemExit) as exc:
+            await purge.main()
+
+        # Segnalato in modo chiaro (non un traceback grezzo che scoppia fuori
+        # dallo script), con un codice di uscita diverso da successo pieno.
+        assert exc.value.code != 0
+
+        # Il DB e' comunque gia' stato svuotato (irreversibile, commit
+        # avvenuto prima del loop sui profili) -- il fallimento e' SOLO sul
+        # filesystem.
+        assert await _tenant_fresco(db_session, tenant.id) is None
+
+        # Il profilo del SECONDO numero deve essere stato rimosso comunque:
+        # un fallimento sul primo non deve aver fermato il tentativo sul
+        # secondo.
+        assert not profilo_ok.exists(), (
+            "il profilo del numero SANO deve essere rimosso anche se un altro fallisce")
+
+        # Il profilo rotto resta (rimozione fallita) -- verificabile a mano.
+        assert profilo_rotto.exists()
+    finally:
+        reale(profilo_rotto)

@@ -200,10 +200,32 @@ async def main() -> None:
     # Filesystem FUORI dalla transazione DB, di proposito: eseguito solo DOPO
     # il commit riuscito, cosi' un rollback del DB non lascia mai un profilo
     # vero gia' cancellato mentre le sue righe sopravvivono (o viceversa).
+    #
+    # A questo punto il DB e' GIA' irreversibile (commit avvenuto): un
+    # fallimento sulla rimozione del profilo di UN numero (es. file bloccato
+    # da un processo Chromium ancora vivo) non deve impedire il tentativo
+    # sugli altri numeri -- fermarsi al primo errore lascerebbe i profili
+    # successivi MAI nemmeno tentati, e senza modo di ritentarli via CLI
+    # perche' i wa_numbers che servono a ricostruire il path sono gia'
+    # spariti dal DB (trovato in review, M5 Task 1).
+    falliti = []
     for number_id in number_ids:
-        remove_profile_dir_safely(profile_dir_for(number_id))
+        try:
+            remove_profile_dir_safely(profile_dir_for(number_id))
+        except OSError as e:
+            falliti.append((number_id, e))
 
-    print(f"Purge completato: {len(number_ids)} profili browser rimossi (o gia' assenti).")
+    riusciti = len(number_ids) - len(falliti)
+    print(f"Purge completato: {riusciti}/{len(number_ids)} profili browser "
+          "rimossi (o gia' assenti).")
+
+    if falliti:
+        print(f"ATTENZIONE: {len(falliti)} profili browser NON rimossi (le "
+              "righe DB sono comunque GIA' cancellate, serve pulizia manuale "
+              "della cartella su disco):", file=sys.stderr)
+        for number_id, e in falliti:
+            print(f"  {profile_dir_for(number_id)}: {e}", file=sys.stderr)
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
