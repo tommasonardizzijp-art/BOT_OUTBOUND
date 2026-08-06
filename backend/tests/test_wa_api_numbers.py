@@ -152,10 +152,17 @@ async def test_patch_warmup_day_override_non_impedisce_avanzamento_automatico_di
 
     await wnm.advance_wa_warmup_if_needed()
     await db_session.refresh(n)
-    # l'avanzamento automatico riprende comunque: +10/giorno, clampato
-    # all'ultimo gradino di wa_warmup_steps default (7 voci): 5+10 -> 7
-    assert n.warmup_day == 7
+    # L'avanzamento automatico riprende comunque, dal valore impostato a mano:
+    # 5 -> 6, un gradino. Cio' che questo test verifica e' che l'override non
+    # BLOCCHI l'avanzamento, non di quanto avanzi -- l'entita' del passo e'
+    # coperta in test_wa_number_manager (rampa in messaggi/giorno).
+    assert n.warmup_day == 6
     assert n.warmup_advanced_date == wnm._utc_today_str()
+
+    # Il vero punto per l'operatore: l'override NON e' una frenata durevole.
+    # Chi abbassa warmup_day dopo un warning se lo vede risalire al prossimo
+    # avanzamento. La leva che regge nel tempo e' daily_cap.
+    assert n.warmup_day > 5
 
 
 def _lock_occupato(monkeypatch):
