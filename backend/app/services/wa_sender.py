@@ -6,6 +6,7 @@ e' pura o quasi, perche' deve essere provabile senza browser: le tre volte
 in cui M1 ha sbagliato una guardia, il difetto era nel giudizio, non nel
 DOM.
 """
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -372,7 +373,14 @@ async def _impara_chat_title(db, pom, contact) -> None:
         logger.debug(f"chat_title non appreso ({type(exc).__name__}): non e' un errore")
         return
     if righe and not righe[0].title_is_number and righe[0].title:
-        contact.chat_title = righe[0].title[:200]
+        # NFC prima del troncamento: il DOM di WhatsApp puo' restituire un
+        # nome accentato in NFC o NFD a seconda del sistema che l'ha
+        # originato, e il matching del reply-watcher confronta con '=='
+        # (bug silenzioso senza normalizzazione, backlog M4). Normalizzare
+        # DOPO aver troncato a meta' di un carattere combinante darebbe un
+        # risultato diverso: si normalizza la stringa intera, poi si tronca.
+        titolo_nfc = unicodedata.normalize("NFC", righe[0].title)
+        contact.chat_title = titolo_nfc[:200]
         await db.commit()
 
 
@@ -482,10 +490,16 @@ async def _esito_guardia_negativa(db, cc, contact, campaign, guardia, masked: st
 
     if guardia.motivo == "ha_risposto":
         cc.status = WaContactStatus.replied
+        cc.replied_at_step = cc.current_step
         cc.next_action_at = None
         cc.locked_by = None
         cc.locked_at = None
-        await db.commit()
+        contact.last_replied_at = datetime.utcnow()
+        # _incrementa_contatore_campagna fa il proprio commit (contratto
+        # §4.2, UPDATE atomico): le assegnazioni sopra vanno fatte PRIMA,
+        # cosi' un solo commit chiude tutto -- stesso schema del ramo
+        # 'optout' qui sopra, niente doppio commit.
+        await _incrementa_contatore_campagna(db, campaign.id, "replied")
         logger.info(f"[WA] {masked}: ha gia' risposto, la sequenza si ferma qui")
         return EsitoInvio("replied", "ha_risposto")
 

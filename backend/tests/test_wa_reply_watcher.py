@@ -83,6 +83,82 @@ async def test_title_ambiguo_mai_indovinare(db_session):
     assert via == WaMatchedBy.none
 
 
+def test_nfc_e_nfd_sono_byte_diversi_a_parita_di_testo_visivo():
+    """Prova pura, senza DB: la stessa parola "citta'" con la lettera
+    accentata puo' arrivare in due forme di normalizzazione Unicode diverse
+    -- NFC (un solo code point per 'a') e NFD (lettera base + accento
+    combinante separato). Sono la stessa cosa per un umano, ma '==' su
+    stringhe Python le tratta come diverse: e' esattamente il confronto che
+    match_contact fa su chat_title."""
+    import unicodedata
+
+    nfc = unicodedata.normalize("NFC", "città")
+    nfd = unicodedata.normalize("NFD", "città")
+
+    assert nfc != nfd                     # stesso testo, byte diversi
+    assert len(nfd) > len(nfc)             # NFD ha un code point in piu' (l'accento separato)
+    assert unicodedata.normalize("NFC", nfd) == nfc   # normalizzare le riallinea
+
+
+@pytest.mark.asyncio
+async def test_match_per_chat_title_matcha_anche_se_il_dom_arriva_in_nfd(db_session):
+    """Backlog M4: chat_title a DB salvato in NFC (nome con lettere
+    accentate, comune nei nomi italiani), il DOM di WhatsApp lo restituisce
+    in NFD. Senza normalizzazione il confronto '==' fallisce in silenzio e
+    il matching si perde -- niente crash, solo una risposta mai agganciata."""
+    import unicodedata
+    from app.services.wa_reply_watcher import match_contact
+
+    tenant = await make_tenant(db_session)
+    contatto = await make_contact(db_session, tenant, display_name="Citta' Bella")
+    contatto.chat_title = unicodedata.normalize("NFC", "Città Bella")
+    await db_session.commit()
+
+    title_nfd = unicodedata.normalize("NFD", "Città Bella")
+    assert title_nfd != contatto.chat_title   # precondizione: le due forme sono davvero diverse
+
+    trovato, via = await match_contact(db_session, tenant.id, _row(title_nfd))
+    assert trovato is not None
+    assert trovato.id == contatto.id
+    assert via == WaMatchedBy.chat_title
+
+
+@pytest.mark.asyncio
+async def test_ambiguita_nfc_nfd_cross_contatto_resta_rilevata(db_session):
+    """Rischio specifico del fix .in_({nfc, nfd}): con un confronto singolo
+    '==' due contatti con chat_title byte-diversi (uno NFC, l'altro NFD)
+    non sarebbero MAI stati confusi. Ora la query cerca due varianti insieme
+    -- se contatto A ha chat_title salvato in NFC e contatto B (stesso
+    tenant) ha per coincidenza un chat_title che e' esattamente la forma NFD
+    generata dallo stesso titolo in ingresso, la query trova ENTRAMBI.
+    Verifichiamo che questo produca conteggio=2 -> ambiguo -> nessun match
+    (mai indovinare, SDD 7.3), non un match a caso sul primo trovato."""
+    import unicodedata
+    from app.services.wa_reply_watcher import match_contact
+
+    tenant = await make_tenant(db_session)
+    nfc = unicodedata.normalize("NFC", "Città Bella")
+    nfd = unicodedata.normalize("NFD", "Città Bella")
+    assert nfc != nfd  # precondizione: le due forme sono davvero byte-diverse
+
+    contatto_a = await make_contact(db_session, tenant, e164="+393330000011")
+    contatto_a.chat_title = nfc
+    contatto_b = await make_contact(db_session, tenant, e164="+393330000012")
+    contatto_b.chat_title = nfd
+    await db_session.commit()
+
+    # Il DOM manda il titolo in una qualunque delle due forme: entrambe
+    # generano lo stesso insieme di varianti {nfc, nfd}, quindi il risultato
+    # non deve dipendere da quale delle due arriva.
+    trovato_da_nfc, via_da_nfc = await match_contact(db_session, tenant.id, _row(nfc))
+    trovato_da_nfd, via_da_nfd = await match_contact(db_session, tenant.id, _row(nfd))
+
+    assert trovato_da_nfc is None
+    assert via_da_nfc == WaMatchedBy.none
+    assert trovato_da_nfd is None
+    assert via_da_nfd == WaMatchedBy.none
+
+
 @pytest.mark.asyncio
 async def test_process_row_optout(db_session):
     from app.services.wa_reply_watcher import process_chat_row

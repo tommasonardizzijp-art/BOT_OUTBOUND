@@ -3,6 +3,7 @@
 brucerebbe le notifiche del cliente sul telefono (vincolo di coesistenza,
 SDD §9). Matching contatto, dedup eventi, dispatch opt-out/replied.
 """
+import unicodedata
 from datetime import datetime
 
 from loguru import logger
@@ -50,17 +51,29 @@ async def match_contact(db, tenant_id: str, row: ChatRow) -> tuple[WaContact | N
             return contatto, WaMatchedBy.phone
         return None, WaMatchedBy.none
 
+    # NFC/NFD: il DOM puo' restituire lo stesso nome accentato in due forme
+    # di normalizzazione Unicode diverse (backlog M4). Normalizziamo row.title
+    # a NFC (standard raccomandato) e confrontiamo contro ENTRAMBE le forme:
+    # non tutti i chat_title gia' a DB sono garantiti NFC (scritti prima di
+    # questo fix), quindi un confronto solo-NFC lascerebbe indietro i dati
+    # vecchi in NFD. Nessuna normalizzazione Unicode portabile lato SQL
+    # (SQLite e Postgres non la offrono in modo uniforme): si confronta
+    # contro il piccolo insieme di varianti possibili invece.
+    titolo_nfc = unicodedata.normalize("NFC", row.title)
+    titolo_nfd = unicodedata.normalize("NFD", titolo_nfc)
+    varianti_titolo = {titolo_nfc, titolo_nfd}
+
     conteggio = await db.scalar(
         select(func.count(WaContact.id)).where(
             WaContact.tenant_id == tenant_id,
-            WaContact.chat_title == row.title,
+            WaContact.chat_title.in_(varianti_titolo),
         )
     )
     if conteggio == 1:
         contatto = await db.scalar(
             select(WaContact).where(
                 WaContact.tenant_id == tenant_id,
-                WaContact.chat_title == row.title,
+                WaContact.chat_title.in_(varianti_titolo),
             )
         )
         return contatto, WaMatchedBy.chat_title
