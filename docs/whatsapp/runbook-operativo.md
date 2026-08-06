@@ -113,13 +113,21 @@ curl -s -H "Authorization: Bearer $TOKEN" $API/wa/ops/status
 
 ## Rampa volume — chi guarda i warning, chi decide di fermarla
 
-La rampa (10 → 30 → 60 → 100 messaggi/giorno sulla prima campagna vera, SDD §14/BT12) si **ferma al primo warning**: non e' un traguardo da raggiungere a tutti i costi.
+La rampa si **ferma al primo warning**: non e' un traguardo da raggiungere a tutti i costi.
+
+I gradini configurati oggi (`WA_WARMUP_STEPS`) sono, in messaggi al giorno:
+
+| Giorno | 1 | 2 | 3 | 4 | 5 | 6 | 7+ |
+|---|---|---|---|---|---|---|---|
+| Cap | 20 | 20 | 30 | 40 | 60 | 80 | 100 |
+
+Un gradino al giorno, poi plateau a 100. La SDD §14/BT12 cita una sequenza piu' corta (10 → 30 → 60 → 100): la lista qui sopra e' quella che comanda davvero, ed e' piu' prudente (parte da 20 e ci arriva in sette giorni invece che in quattro). Per cambiarla si modifica `WA_WARMUP_STEPS`, **non** il passo: `WA_WARMUP_ADVANCE_STEPS_PER_DAY` e' in gradini al giorno e deve restare 1 — alzarlo significa saltare gradini, non mandare piu' messaggi.
 
 **Attenzione ai nomi.** Il campo si chiama `daily_cap` su `wa_numbers` (`PATCH $API/wa/numbers/{id}`) ma `daily_limit` su `wa_campaigns` (`PATCH $API/wa/campaigns/{id}`): non e' lo stesso nome sulle due tabelle. Il cap effettivo di invio (`wa_number_manager.effective_wa_daily_cap`) e' il **minimo fra tre valori**: `daily_cap` del numero, `daily_limit` della campagna (se impostato) e il gradino di warmup del numero. Se `warmup_day` e' basso, alzare solo `daily_cap`/`daily_limit` non sposta il tetto reale.
 
 **Come funziona il gradino di warmup.** `warmup_day` e' un **indice** nella lista `WA_WARMUP_STEPS` (non un contatore di messaggi): `warmup_day = 3` significa "terzo valore della lista". Il valore in messaggi si legge senza fare conti dal campo `warmup_cap` di `GET $API/wa/numbers/{id}`, ed e' la colonna "Giorno rampa" della pagina Numeri.
 
-Da M5 il gradino **sale da solo**: `advance_wa_warmup_if_needed` gira al boot dell'app e dal cron giornaliero, e avanza di `WA_WARMUP_ADVANCE_PER_DAY` gradini al giorno i numeri `active`, fermandosi (plateau) sull'ultimo gradino della lista. Due conseguenze da tenere a mente:
+Da M5 il gradino **sale da solo**: `advance_wa_warmup_if_needed` gira al boot dell'app e dal cron giornaliero, e avanza di un gradino al giorno i numeri `active`, fermandosi (plateau) sull'ultimo gradino della lista. Due conseguenze da tenere a mente:
 
 - **Un riavvio dell'applicazione conta come un avanzamento** se quel numero non e' ancora stato avanzato quel giorno.
 - **Abbassare `warmup_day` a mano NON e' una frenata durevole**: al prossimo avanzamento il numero risale partendo dal valore impostato. Dopo un warning, la leva che regge nel tempo e' `daily_cap`.
