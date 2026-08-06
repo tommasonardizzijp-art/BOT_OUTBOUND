@@ -201,7 +201,8 @@ La regola generale: **una colonna ha un solo proprietario in scrittura.** Chi no
 | `tenants` (tutto) | ✅ | — | |
 | `wa_numbers`: `label`, `proxy_url`, `daily_cap`, `notes`, `browser_profile` | ✅ | — | CRUD admin |
 | `wa_numbers.status` | ✅ solo `retired`/`suspended` (dismissione manuale) e riattivazione → `pending_qr` (§2.2) | ✅ `active`↔`cooldown`, → `suspended` (ban), → `qr_required` via `wa_session` | M1 possiede già `pending_qr`↔`active`↔`qr_required` dentro `wa_session._persist_status` |
-| `wa_numbers`: `sent_today`, `sent_date`, `warmup_day` | ✅ **solo azzeramento** in riattivazione (§2.2) | ✅ runtime (incremento, rollover date-aware) | |
+| `wa_numbers`: `sent_today`, `sent_date` | ✅ **solo azzeramento** in riattivazione (§2.2) | ✅ runtime (incremento, rollover date-aware) | |
+| `wa_numbers.warmup_day` | ✅ azzeramento in riattivazione (§2.2) **+ override manuale via `PATCH /wa/numbers/{id}`** | ✅ runtime | **Emendato da M5**: la regola originale ("solo azzeramento") non vale piu'. Oggi ha tre scriventi: l'override admin, l'azzeramento in riattivazione e `wa_number_manager.advance_wa_warmup_if_needed`, che avanza la rampa di un gradino al giorno al boot e dal cron. Convivono senza logica speciale: l'avanzamento guarda `warmup_advanced_date`, non `warmup_day`, quindi un override non lo blocca ne' lo forza |
 | `wa_numbers.session_checked_at` | — | ✅ (via `wa_session`, M1) | |
 | `wa_contacts` (anagrafica, `attributes`, `display_name`) | ✅ | — | |
 | `wa_contacts.chat_title` | — | ✅ appreso al primo invio, **solo se `title_is_number` è False** | numero in chiaro nel title = PII, resta NULL (P12) |
