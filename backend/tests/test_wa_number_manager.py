@@ -325,3 +325,52 @@ async def test_adv23_cap_globale_esattamente_raggiunto_non_superato(
 
     ok = await wnm.has_wa_send_budget(db_session, numero_a, SimpleNamespace(daily_limit=None))
     assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_config_warmup_steps_malformata_non_uccide_il_boot(
+        db_session, monkeypatch, _tenant_warmup):
+    """_parse_wa_warmup_steps gira nel lifespan del boot E nel calcolo del cap
+    di ogni invio: un refuso in WA_WARMUP_STEPS faceva morire l'avvio
+    dell'applicazione con un ValueError grezzo. Deve degradare, non esplodere.
+    Trovato nel collaudo M5."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,abc,40")
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=1)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()  # non deve sollevare
+
+    # La voce sporca e' scartata, i gradini validi restano usabili.
+    assert wnm._parse_wa_warmup_steps("20,abc,40") == [20, 40]
+    assert isinstance(wnm.get_wa_warmup_cap(1), int)
+
+
+@pytest.mark.asyncio
+async def test_incremento_negativo_in_config_non_fa_retrocedere_la_rampa(
+        db_session, monkeypatch, _tenant_warmup):
+    """Un WA_WARMUP_ADVANCE_PER_DAY negativo portava warmup_day sotto zero, e
+    sotto zero il gradino esce dal min() di effective_wa_daily_cap: una
+    configurazione sbagliata RIMUOVEVA il tetto anti-ban invece di rallentare
+    la rampa, per giunta in modo definitivo (il numero usciva per sempre dallo
+    sweep). Questo contatore ha una direzione sola."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_advance_per_day", -5)
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=2)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day > 2, "la rampa non deve mai retrocedere"
+
+    # E il tetto resta calcolabile e attivo (non "nessun tetto").
+    campagna = type("C", (), {"daily_limit": None})()
+    numero.daily_cap = 1000
+    assert wnm.effective_wa_daily_cap(numero, campagna) <= 100

@@ -24,8 +24,29 @@ def _parse_wa_warmup_steps(spec: str) -> list[int]:
     """"20,20,30,40,60,80,100" -> [20,20,30,40,60,80,100]. Lista ordinale
     (non range come account_manager.WARMUP_LIMITS): warmup_day 1-based
     indicizza direttamente, oltre la fine si resta sull'ultimo valore
-    (regime raggiunto, SDD 10.3)."""
-    return [int(x.strip()) for x in spec.split(",") if x.strip()]
+    (regime raggiunto, SDD 10.3).
+
+    Una voce non numerica viene SCARTATA con un warning invece di sollevare:
+    questa funzione gira nel lifespan del boot e dentro il calcolo del cap di
+    ogni invio, quindi un refuso in WA_WARMUP_STEPS faceva morire l'avvio
+    dell'applicazione con un ValueError grezzo. Scartare la voce sporca
+    degrada in modo prevedibile (la rampa resta sui gradini validi) e lascia
+    una traccia leggibile; se NESSUNA voce e' valida, chi chiama ricade sul
+    default di config (get_wa_warmup_cap) -- mai su "nessun tetto".
+    Trovato nel collaudo M5 con WA_WARMUP_STEPS="abc".
+    """
+    valori = []
+    for voce in spec.split(","):
+        voce = voce.strip()
+        if not voce:
+            continue
+        try:
+            valori.append(int(voce))
+        except ValueError:
+            logger.warning(
+                f"[WaWarmup] WA_WARMUP_STEPS contiene una voce non numerica "
+                f"({voce!r}): ignorata. Gradini validi: {valori or 'nessuno'}")
+    return valori
 
 
 def get_wa_warmup_cap(warmup_day: int) -> int:
@@ -68,8 +89,15 @@ async def advance_wa_warmup_if_needed() -> None:
         for number in result.scalars().all():
             if number.warmup_advanced_date == today:
                 continue
-            number.warmup_day = min(number.warmup_day + settings.wa_warmup_advance_per_day,
-                                    len(steps))
+            # max(1, ...) sul passo: un WA_WARMUP_ADVANCE_PER_DAY negativo in
+            # .env faceva RETROCEDERE warmup_day fin sotto lo zero, e sotto lo
+            # zero il gradino esce dal min() di effective_wa_daily_cap -- cioe'
+            # una configurazione sbagliata RIMUOVEVA il tetto anti-ban invece
+            # di rallentare la rampa, e il numero restava escluso per sempre
+            # dallo sweep. La direzione di questo contatore e' una sola.
+            # Trovato nel collaudo M5 con WA_WARMUP_ADVANCE_PER_DAY=-5.
+            passo = max(1, settings.wa_warmup_advance_per_day)
+            number.warmup_day = min(number.warmup_day + passo, len(steps))
             number.warmup_advanced_date = today
             logger.info(f"[WaWarmup] numero {number.id[:8]} warmup_day -> {number.warmup_day}")
             advanced += 1
