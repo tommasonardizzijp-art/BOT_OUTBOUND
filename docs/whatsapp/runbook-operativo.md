@@ -24,6 +24,24 @@ curl -s -H "Authorization: Bearer $TOKEN" $API/wa/ops/status
 
 Tutti i comandi seguenti danno per scontato che `$API` e `$TOKEN` siano impostati.
 
+## Deploy: le migrazioni PRIMA del riavvio
+
+Le migrazioni non girano al boot, vanno lanciate a mano:
+
+```bash
+cd backend && python -m scripts.migrate
+```
+
+Da M5 questo ordine non e' piu' una buona pratica ma un vincolo: l'avvio
+dell'applicazione legge una colonna introdotta dalla migrazione 028
+(`wa_numbers.warmup_advanced_date`). Se il backend riparte **prima** di aver
+migrato, Postgres risponde `UndefinedColumn` (42703) dentro il lifespan e
+**uvicorn non parte affatto** — non e' un errore su una singola pagina, e'
+il servizio che non sale. Prima di M5 lo stesso errore sarebbe emerso solo
+alla prima richiesta sui numeri.
+
+Il rimedio e' lanciare la migrazione e riavviare: non serve rollback.
+
 ## Stati di un numero — cosa significano
 
 Li si legge in `GET $API/wa/numbers` (colonna "Stato" della pagina Numeri).
@@ -141,7 +159,7 @@ Da M5 il gradino **sale da solo**: `advance_wa_warmup_if_needed` gira al boot de
 curl -s -H "Authorization: Bearer $TOKEN" $API/wa/numbers/<id>   # campi sent_today, warmup_cap, daily_cap
 ```
 
-**Responsabilita'**: chi ha acceso `WA_SEND_ENABLED` e avviato la campagna reale decide se e quando salire di gradino, e decide di fermarsi al primo segnale ambiguo (non solo a un errore conclamato).
+**Responsabilita'**: la salita e' automatica, la decisione umana e' **fermarla**. Chi ha acceso `WA_SEND_ENABLED` e avviato la campagna reale ha il compito di guardare i segnali e abbassare `daily_cap` (o usare il kill-switch) al primo segnale ambiguo, non solo a un errore conclamato. Nessuno deve fare qualcosa perche' il volume salga: succede da solo.
 
 ## Richieste GDPR
 
