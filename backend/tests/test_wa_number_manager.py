@@ -462,9 +462,42 @@ async def test_incremento_negativo_in_config_non_fa_retrocedere_la_rampa(
     await wnm.advance_wa_warmup_if_needed()
 
     await db_session.refresh(numero)
-    assert numero.warmup_day > 2, "la rampa non deve mai retrocedere"
+    assert numero.warmup_day == 2, (
+        "con un passo negativo l'avanzamento va SOSPESO, non invertito e "
+        "nemmeno forzato a salire: la configurazione e' sbagliata e va "
+        "corretta, non interpretata")
 
     # E il tetto resta calcolabile e attivo (non "nessun tetto").
     campagna = type("C", (), {"daily_limit": None})()
     numero.daily_cap = 1000
     assert wnm.effective_wa_daily_cap(numero, campagna) <= 100
+
+
+@pytest.mark.asyncio
+async def test_passo_zero_congela_la_rampa_invece_di_farla_salire(
+        db_session, monkeypatch, _tenant_warmup):
+    """Chi mette 0 sta chiedendo di congelare la rampa: la richiesta va
+    onorata fermandosi, non forzando il passo a 1.
+
+    Il primo fix del passo negativo usava `max(1, passo)` e finiva per far
+    salire la rampa anche a 0, mentre `warmup_advanced_date` continuava ad
+    aggiornarsi: sembrava funzionare e faceva l'opposto di quanto chiesto.
+    Trovato nella review finale di M5.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_advance_steps_per_day", 0)
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=2, warmup_advanced_date=None)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 2, "con passo 0 la rampa non deve salire"
+    # E nemmeno la guardia va toccata: un giorno "saltato" non deve risultare
+    # come un giorno gia' avanzato, altrimenti rimettere il passo a 1 domani
+    # non recupererebbe nulla.
+    assert numero.warmup_advanced_date is None

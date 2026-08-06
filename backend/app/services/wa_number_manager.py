@@ -76,6 +76,34 @@ async def advance_wa_warmup_if_needed() -> None:
     from app.models.wa import WaNumber, WaNumberStatus
 
     steps = _parse_wa_warmup_steps(settings.wa_warmup_steps)
+    passo = settings.wa_warmup_advance_steps_per_day
+
+    # Il passo ha UNA direzione sola. Un valore <= 0 in .env non deve poter
+    # cambiare il verso della rampa: con un negativo warmup_day scendeva sotto
+    # lo zero, e sotto lo zero il gradino esce dal min() di
+    # effective_wa_daily_cap -- cioe' una configurazione sbagliata RIMUOVEVA il
+    # tetto anti-ban invece di rallentare la rampa, lasciando per giunta il
+    # numero fuori dallo sweep per sempre (collaudo M5, passo -5).
+    #
+    # Zero e' un caso a parte: NON lo si forza a 1. Chi scrive 0 sta chiedendo
+    # di congelare la rampa, ed e' una richiesta legittima -- ma va onorata
+    # fermandosi qui, non lasciando che la rampa salga lo stesso mentre
+    # warmup_advanced_date continua ad aggiornarsi (sembrerebbe funzionare e
+    # non farebbe nulla di quello che si e' chiesto). Il warning esiste perche'
+    # una rampa ferma e' uno stato che si nota solo se qualcuno lo dice.
+    if passo <= 0:
+        if passo < 0:
+            logger.warning(
+                f"[WaWarmup] WA_WARMUP_ADVANCE_STEPS_PER_DAY={passo} e' negativo: "
+                "il passo della rampa non puo' essere negativo, avanzamento "
+                "sospeso. Correggi la configurazione (1 = un gradino al giorno).")
+        else:
+            logger.warning(
+                "[WaWarmup] WA_WARMUP_ADVANCE_STEPS_PER_DAY=0: la rampa NON "
+                "avanzera' da sola. I numeri restano al gradino attuale finche' "
+                "non lo si rimette a 1.")
+        return
+
     today = _utc_today_str()
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -89,15 +117,6 @@ async def advance_wa_warmup_if_needed() -> None:
         for number in result.scalars().all():
             if number.warmup_advanced_date == today:
                 continue
-            # max(1, ...) sul passo: un WA_WARMUP_ADVANCE_STEPS_PER_DAY
-            # negativo in .env faceva RETROCEDERE warmup_day fin sotto lo zero,
-            # e sotto lo zero il gradino esce dal min() di
-            # effective_wa_daily_cap -- cioe' una configurazione sbagliata
-            # RIMUOVEVA il tetto anti-ban invece di rallentare la rampa, e il
-            # numero restava escluso per sempre dallo sweep. La direzione di
-            # questo contatore e' una sola. Trovato nel collaudo M5 con
-            # WA_WARMUP_ADVANCE_STEPS_PER_DAY=-5.
-            passo = max(1, settings.wa_warmup_advance_steps_per_day)
             number.warmup_day = min(number.warmup_day + passo, len(steps))
             number.warmup_advanced_date = today
             logger.info(f"[WaWarmup] numero {number.id[:8]} warmup_day -> {number.warmup_day}")

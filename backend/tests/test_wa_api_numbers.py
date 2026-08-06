@@ -346,3 +346,41 @@ async def test_serializza_espone_il_cap_in_messaggi_non_solo_l_indice(
     n.warmup_day = 0  # fuori warmup: NESSUN tetto di rampa
     await db_session.commit()
     assert wa_numbers._serializza(n)["warmup_cap"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valore", ["molti", 3.5, True, [20], {"v": 20}, -5, 10**30])
+async def test_crea_con_daily_cap_sporco_rifiutato(db_session, valore):
+    """Il gemello del test sul PATCH, e conta di PIU': la pagina Numeri non ha
+    una form di creazione (waApi.numeri.create non e' chiamato da nessuna UI),
+    quindi un numero nasce SOLO da questo endpoint, via API o script. Un
+    daily_cap sporco scritto alla nascita non fallisce qui: fallisce piu' tardi
+    dentro il worker (effective_wa_daily_cap fa un min() fra i due campi del
+    cap) e il numero smette di mandare, con l'errore lontano dalla causa.
+
+    Trovato nella review finale di M5: la validazione era stata messa solo su
+    aggiorna(), e le batterie adversarial avevano fuzzato solo il PATCH --
+    questa meta' dell'ingresso era rimasta scoperta da entrambi.
+    """
+    from fastapi import HTTPException
+
+    tenant = await make_tenant(db_session)
+    with pytest.raises(HTTPException) as exc:
+        await wa_numbers.crea(
+            {"tenant_id": tenant.id, "label": "N", "numero": "+393421460099",
+             "daily_cap": valore},
+            db=db_session)
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_crea_senza_daily_cap_usa_il_default(db_session):
+    """La validazione non deve rompere il caso normale: daily_cap assente
+    resta legittimo e prende il default di config."""
+    from app.config import settings
+
+    tenant = await make_tenant(db_session)
+    risposta = await wa_numbers.crea(
+        {"tenant_id": tenant.id, "label": "N-default", "numero": "+393421460098"},
+        db=db_session)
+    assert risposta["daily_cap"] == settings.wa_daily_cap_default

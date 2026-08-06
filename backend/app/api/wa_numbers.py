@@ -90,9 +90,12 @@ def _valida_intero(nome: str, valore) -> None:
         raise HTTPException(422, f"{nome} deve essere un intero >= 0")
     massimo = _max_warmup_day() if nome == "warmup_day" else _MAX_DAILY_CAP
     if valore > massimo:
-        raise HTTPException(
-            422, f"{nome} non puo' superare {massimo}"
-            + (f" (ultimo gradino di WA_WARMUP_STEPS)" if nome == "warmup_day" else ""))
+        # "quanti gradini sono configurati", non "il valore dell'ultimo
+        # gradino": in un modulo il cui bug principale e' stato confondere
+        # l'indice con i messaggi, la differenza va detta per esteso.
+        dettaglio = (" (tanti quanti sono i gradini configurati in "
+                     "WA_WARMUP_STEPS)" if nome == "warmup_day" else "")
+        raise HTTPException(422, f"{nome} non puo' superare {massimo}{dettaglio}")
 
 # Stati da cui la riattivazione e' ammessa (contratto §2.2): sono gli unici
 # che un operatore mette a mano e che un operatore deve poter togliere a mano.
@@ -180,7 +183,16 @@ async def crea(dati: dict, db=Depends(get_db)) -> dict:
     if esiste is not None:
         raise HTTPException(409, "esiste gia' un numero WA con questo numero")
 
+    # Stessa validazione del PATCH, e qui conta di PIU': la pagina Numeri non
+    # ha una form di creazione (waApi.numeri.create non e' chiamato da nessuna
+    # UI), quindi un numero nasce solo da qui -- via API o script. Un
+    # daily_cap sporco scritto alla nascita non fallisce adesso: fallisce piu'
+    # tardi dentro il worker, in effective_wa_daily_cap, e il numero smette di
+    # mandare senza che l'errore indichi da dove viene. Il collaudo M5 aveva
+    # fuzzato solo il PATCH: questa meta' era rimasta scoperta.
     daily_cap = dati.get("daily_cap")
+    if daily_cap is not None:
+        _valida_intero("daily_cap", daily_cap)
     n = WaNumber(
         tenant_id=tenant_id, label=label,
         phone_hmac=hmac_phone(e164), encrypted_phone=encrypt(e164),
