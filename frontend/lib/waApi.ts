@@ -64,6 +64,11 @@ export type WaNumber = {
   proxy_url: string | null
   daily_cap: number
   warmup_day: number
+  // Derivati dal backend (non scrivibili): warmup_day da solo e' un indice
+  // senza significato per chi guarda la pagina -- warmup_cap dice quanti
+  // messaggi sono davvero, ed e' null quando la rampa non pone alcun tetto.
+  warmup_cap: number | null
+  warmup_advanced_date: string | null
   sent_today: number
   sent_date: string | null
   session_checked_at: string | null

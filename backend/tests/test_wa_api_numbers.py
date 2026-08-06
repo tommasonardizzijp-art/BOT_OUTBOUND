@@ -233,3 +233,109 @@ async def test_endpoint_browser_procede_se_il_profilo_e_libero(
 
     risposta = await getattr(wa_numbers, endpoint)(n.id, db=db_session)
     assert risposta["status"] == WaNumberStatus.active.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valore", ["molti", 3.5, None, True, [20], {"v": 20}])
+async def test_patch_daily_cap_non_intero_rifiutato(db_session, valore):
+    """daily_cap NON e' un campo qualsiasi: insieme a warmup_day compone il
+    tetto di invio in effective_wa_daily_cap, che fa un `min()` fra i due. Un
+    valore non-intero qui non falliva al PATCH (200 OK, scritto a DB) ma piu'
+    tardi DENTRO il worker, con un TypeError sul confronto int/str -- e a quel
+    punto il numero smette di mandare e la causa e' lontana dal punto in cui
+    e' stata scritta. Trovato nel collaudo M5 con `PATCH {"daily_cap":
+    "molti"}`; daily_cap era gia' modificabile da prima di M5, la validazione
+    mancava per entrambi i campi.
+    """
+    from fastapi import HTTPException
+
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant)
+    n.daily_cap = 20
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await wa_numbers.aggiorna(n.id, {"daily_cap": valore}, db=db_session)
+    assert exc.value.status_code == 422
+
+    await db_session.refresh(n)
+    assert n.daily_cap == 20  # invariato: la scrittura non e' passata
+
+
+@pytest.mark.asyncio
+async def test_patch_daily_cap_stringa_non_lascia_il_cap_incalcolabile(db_session):
+    """La verifica che conta davvero del test sopra: dopo un PATCH rifiutato,
+    il cap effettivo deve restare CALCOLABILE. Senza la validazione questo
+    solleva TypeError invece di restituire un numero."""
+    from fastapi import HTTPException
+    from app.services.wa_number_manager import effective_wa_daily_cap
+
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant)
+    n.daily_cap, n.warmup_day = 20, 1
+    await db_session.commit()
+
+    with pytest.raises(HTTPException):
+        await wa_numbers.aggiorna(n.id, {"daily_cap": "molti"}, db=db_session)
+    await db_session.refresh(n)
+
+    campagna = type("C", (), {"daily_limit": None})()
+    assert isinstance(effective_wa_daily_cap(n, campagna), int)
+
+
+@pytest.mark.asyncio
+async def test_patch_warmup_day_oltre_l_ultimo_gradino_rifiutato(db_session, monkeypatch):
+    """Sopra l'ultimo gradino configurato warmup_day non ha piu' significato:
+    get_wa_warmup_cap clampa comunque all'ultimo valore E il numero esce dalla
+    query di avanzamento (`warmup_day < len(steps)`), restando congelato al cap
+    MASSIMO per sempre. Accettare 999999 significa quindi offrire un "sblocca
+    tutto e non gestirlo piu'" che nessuna schermata dichiara.
+
+    Secondo motivo, invisibile alla suite: la colonna e' Integer, cioe' int4 su
+    Postgres. Un valore oltre i 2^31 passa la validazione Python e poi esplode
+    al commit con un DataError non catturato -> 500 invece di 422. Su SQLite
+    passerebbe in silenzio (collaudo M5: `warmup_day: 10**30` -> 500).
+    """
+    from fastapi import HTTPException
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")  # 7 gradini
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant)
+    n.warmup_day = 3
+    await db_session.commit()
+
+    for valore in (8, 999999, 2**31, 10**30):
+        with pytest.raises(HTTPException) as exc:
+            await wa_numbers.aggiorna(n.id, {"warmup_day": valore}, db=db_session)
+        assert exc.value.status_code == 422, f"valore {valore} non rifiutato"
+
+    await db_session.refresh(n)
+    assert n.warmup_day == 3
+
+    # L'ultimo gradino esatto resta invece legittimo (plateau raggiunto a mano).
+    await wa_numbers.aggiorna(n.id, {"warmup_day": 7}, db=db_session)
+    await db_session.refresh(n)
+    assert n.warmup_day == 7
+
+
+@pytest.mark.asyncio
+async def test_serializza_espone_il_cap_in_messaggi_non_solo_l_indice(
+        db_session, monkeypatch):
+    """warmup_day da solo e' un indice: "3" non dice a chi guarda la pagina
+    quanti messaggi sono. warmup_cap traduce l'indice in messaggi/giorno, ed e'
+    None quando la rampa non pone alcun tetto -- mostrare un numero in quel
+    caso suggerirebbe il contrario di cio' che sta succedendo."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant)
+
+    n.warmup_day = 4  # 4o gradino = 40 msg/giorno
+    await db_session.commit()
+    assert wa_numbers._serializza(n)["warmup_cap"] == 40
+
+    n.warmup_day = 0  # fuori warmup: NESSUN tetto di rampa
+    await db_session.commit()
+    assert wa_numbers._serializza(n)["warmup_cap"] is None

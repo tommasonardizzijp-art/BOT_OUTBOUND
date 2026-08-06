@@ -6,9 +6,13 @@
 // non offriamo mai una strada per scrivere sent_today/sent_date/status: le
 // uniche azioni che scrivono sono "Riattiva" (manda solo il motivo, e'
 // l'endpoint a decidere il resto, SS2.2) e "Modifica giorno rampa", che
-// scrive SOLO warmup_day -- override manuale voluto (M5): la rampa avanza
-// comunque da sola ogni giorno, l'override di oggi non blocca l'avanzamento
-// di domani (vedi commento su CAMPI_MODIFICABILI in wa_numbers.py).
+// scrive SOLO warmup_day -- override manuale voluto (M5).
+//
+// Attenzione a come lo si racconta all'operatore: l'override NON congela la
+// rampa. Al prossimo avanzamento (boot o cron) il numero risale del passo
+// configurato in WA_WARMUP_ADVANCE_PER_DAY partendo dal valore impostato
+// qui, quindi una frenata fatta da questo dialog dura al massimo fino al
+// giorno dopo. La leva che regge nel tempo e' il cap/giorno.
 import { useState } from 'react'
 import useSWR from 'swr'
 import { toast } from 'sonner'
@@ -131,7 +135,16 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
           </span>
         </td>
         <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>{numero.daily_cap}</td>
-        <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>{numero.warmup_day}</td>
+        {/* Il giorno da solo non dice niente a chi guarda: "3" non fa capire
+            che sono 40 messaggi. Il cap del gradino va accanto, e quando la
+            rampa non pone alcun tetto (warmup_day 0) va detto a parole --
+            altrimenti sembra solo un numero piu' basso, cioe' il contrario. */}
+        <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>
+          {numero.warmup_day}
+          {numero.warmup_cap !== null
+            ? <span className="ml-1 text-xs opacity-70">({numero.warmup_cap} msg)</span>
+            : <span className="ml-1 text-xs" style={{ color: '#e07a3c' }}>(nessun tetto)</span>}
+        </td>
         <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>{numero.sent_today}</td>
         <td className="px-4 py-3">
           {senzaProxy
@@ -150,7 +163,14 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
             {(numero.status === 'retired' || numero.status === 'suspended') && (
               <RiattivaButton numero={numero} onChanged={onChanged} />
             )}
-            <ModificaWarmupDayButton numero={numero} onChanged={onChanged} />
+            {/* Su retired/suspended il bottone non e' solo inutile, e'
+                ingannevole: "Riattiva" riporta warmup_day a 1 (wa_numbers.py,
+                riattiva), quindi il valore impostato qui verrebbe buttato in
+                silenzio subito dopo un toast di successo. Stesso criterio di
+                gating delle altre tre azioni della riga. */}
+            {numero.status !== 'retired' && numero.status !== 'suspended' && (
+              <ModificaWarmupDayButton numero={numero} onChanged={onChanged} />
+            )}
           </div>
         </td>
       </tr>
@@ -333,7 +353,17 @@ function ModificaWarmupDayButton({ numero, onChanged }: { numero: WaNumber; onCh
   }
 
   const numerico = Number(valore)
-  const valoreValido = valore.trim().length > 0 && Number.isInteger(numerico) && numerico >= 0
+  // `Number.isInteger` da solo non basta: `<input type="number">` accetta la
+  // notazione esponenziale, e `Number("1e3")` e' l'intero 1000 -- passava in
+  // silenzio e veniva salvato senza che chi ha digitato "1e3" se ne
+  // accorgesse. La forma va controllata sulla STRINGA, non sul numero.
+  const soloCifre = /^\d+$/.test(valore.trim())
+  const valoreValido = soloCifre && Number.isInteger(numerico) && numerico >= 0
+  // Distingue "non ho ancora scritto niente" da "ho scritto qualcosa di
+  // sbagliato": senza, il bottone si disabilita e non dice perche'.
+  const motivoNonValido = valore.trim().length === 0 || valoreValido
+    ? null
+    : 'Serve un numero intero senza segni, decimali o notazione esponenziale.'
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -370,15 +400,25 @@ function ModificaWarmupDayButton({ numero, onChanged }: { numero: WaNumber; onCh
         <DialogHeader>
           <DialogTitle>Modifica giorno rampa — {numero.label}</DialogTitle>
           <DialogDescription className="text-gray-400">
-            Il giorno di rampa concorre al tetto di invio giornaliero insieme al cap/giorno.
-            Cambiarlo qui non blocca l&apos;avanzamento automatico: da domani la rampa riprende
-            comunque a salire di un giorno, ripartendo dal valore che imposti ora.
+            Il giorno di rampa e&apos; il gradino della rampa di volume: concorre al tetto di
+            invio giornaliero insieme al cap/giorno, e il tetto effettivo e&apos; il piu&apos;
+            basso dei due.
+            {numero.warmup_cap !== null && (
+              <> Oggi questo numero e&apos; al giorno {numero.warmup_day}, che vale{' '}
+                <strong>{numero.warmup_cap} messaggi al giorno</strong>.</>
+            )}
+            {' '}Cambiarlo qui non ferma l&apos;avanzamento automatico: la rampa riprende
+            comunque a salire al prossimo avanzamento, ripartendo dal valore che imposti ora.
+            Per fermare davvero il volume dopo un warning, la leva e&apos; il cap/giorno.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-3">
           <div className="space-y-1.5">
-            <label className="text-sm text-gray-300">Giorno rampa (intero, minimo 0)</label>
+            <label htmlFor={`warmup-day-${numero.id}`} className="text-sm text-gray-300">
+              Giorno rampa (numero intero)
+            </label>
             <Input
+              id={`warmup-day-${numero.id}`}
               type="number"
               min={0}
               step={1}
@@ -386,6 +426,21 @@ function ModificaWarmupDayButton({ numero, onChanged }: { numero: WaNumber; onCh
               onChange={(e) => setValore(e.target.value)}
               className="bg-gray-800 border-gray-700 text-white"
             />
+            {/* Lo zero NON e' "il valore piu' prudente": toglie del tutto il
+                tetto di rampa (resta solo il cap/giorno) e il numero non
+                viene piu' avanzato in automatico. Chi lo sceglie pensando di
+                frenare ottiene l'opposto, quindi va detto qui, dove sta per
+                sbagliare. */}
+            {valore.trim() === '0' && (
+              <p className="text-xs" style={{ color: '#e07a3c' }}>
+                Attenzione: 0 non e&apos; il valore piu&apos; prudente. Toglie del tutto il
+                tetto della rampa (resta solo il cap/giorno) e questo numero non verra&apos;
+                piu&apos; avanzato in automatico.
+              </p>
+            )}
+            {motivoNonValido && (
+              <p className="text-xs text-gray-400">{motivoNonValido}</p>
+            )}
           </div>
           <DialogFooter>
             <Button

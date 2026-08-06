@@ -44,7 +44,55 @@ def _motivo_pulito(exc: PhoneNormalizationError) -> str:
 # convivono senza logica speciale -- un override oggi non impedisce ne'
 # forza l'avanzamento automatico di domani, che segue il proprio corso
 # indipendentemente (guarda warmup_advanced_date, non warmup_day).
+#
+# Conseguenza operativa da tenere presente, perche' non e' ovvia leggendo
+# solo la frase sopra: un operatore che ABBASSA warmup_day per frenare dopo
+# un warning viene rialzato dal prossimo avanzamento (boot o cron) del passo
+# configurato. La frenata dura meno di un giorno e il rimbalzo va verso
+# l'alto: la leva che regge nel tempo e' daily_cap, non questa.
 CAMPI_MODIFICABILI = {"label", "proxy_url", "daily_cap", "notes", "warmup_day"}
+
+# I due campi che compongono il tetto di invio (effective_wa_daily_cap fa
+# `min(...)` fra loro): un valore non-intero qui non produce un errore al
+# PATCH ma esplode DOPO, dentro il worker, con un TypeError sul confronto
+# int/str -- e a quel punto il numero non manda piu' niente e la causa e'
+# lontana dal punto in cui e' stata scritta. Trovato nel collaudo M5
+# eseguendo `PATCH {"daily_cap": "molti"}`: 200 OK, e la funzione di cap
+# sollevava "'<' not supported between instances of 'int' and 'str'".
+# `daily_cap` era gia' modificabile prima di M5: la validazione mancava
+# per entrambi, non solo per il campo nuovo.
+_CAMPI_INTERI = {"warmup_day", "daily_cap"}
+
+# Tetto di sanita' per daily_cap. La colonna e' un Integer, cioe' int4 su
+# Postgres: un valore oltre i 2^31 passa la validazione Python ma esplode al
+# commit con un DataError non catturato -> 500 invece di un 422 leggibile.
+# Su SQLite passerebbe in silenzio, quindi la suite non puo' intercettarlo:
+# il limite va messo qui a mano (collaudo M5, `warmup_day: 10**30` -> 500).
+_MAX_DAILY_CAP = 100_000
+
+
+def _max_warmup_day() -> int:
+    """Oltre l'ultimo gradino configurato, warmup_day non ha piu' significato:
+    get_wa_warmup_cap clampa comunque all'ultimo valore, e il numero esce
+    dalla query di avanzamento (`warmup_day < len(steps)`) restando congelato
+    al cap massimo PER SEMPRE. Accettare 999999 vuol dire quindi offrire
+    all'operatore un "sblocca tutto e non gestirlo piu'" che nessuna schermata
+    dichiara. Il limite naturale e' il numero di gradini configurati."""
+    from app.services.wa_number_manager import _parse_wa_warmup_steps
+
+    return len(_parse_wa_warmup_steps(settings.wa_warmup_steps)) or 1
+
+
+def _valida_intero(nome: str, valore) -> None:
+    # isinstance(x, bool) prima: bool e' sottoclasse di int in Python,
+    # True/False passerebbero altrimenti isinstance(x, int) in silenzio.
+    if isinstance(valore, bool) or not isinstance(valore, int) or valore < 0:
+        raise HTTPException(422, f"{nome} deve essere un intero >= 0")
+    massimo = _max_warmup_day() if nome == "warmup_day" else _MAX_DAILY_CAP
+    if valore > massimo:
+        raise HTTPException(
+            422, f"{nome} non puo' superare {massimo}"
+            + (f" (ultimo gradino di WA_WARMUP_STEPS)" if nome == "warmup_day" else ""))
 
 # Stati da cui la riattivazione e' ammessa (contratto §2.2): sono gli unici
 # che un operatore mette a mano e che un operatore deve poter togliere a mano.
@@ -57,7 +105,19 @@ _PROFILO_OCCUPATO = ("il profilo di questo numero e' gia' aperto da un invio, "
 
 def _serializza(n: WaNumber) -> dict:
     """Il numero torna SEMPRE mascherato (P12): nessun endpoint di questo
-    router espone il numero in chiaro, nemmeno la lista admin."""
+    router espone il numero in chiaro, nemmeno la lista admin.
+
+    `warmup_cap` e `warmup_advanced_date` sono derivati, non colonne
+    modificabili: servono a rendere leggibile la rampa. `warmup_day` da solo
+    e' un indice senza significato per chi guarda la pagina -- "3" non dice
+    quanti messaggi sono, e la colonna "Cap/giorno" accanto sembra decidere
+    ma spesso non decide, perche' il tetto vero e' il minimo fra tre valori
+    (wa_number_manager.effective_wa_daily_cap). `warmup_advanced_date` dice
+    se e quando la rampa e' salita l'ultima volta: senza, dalla UI e'
+    impossibile capire PERCHE' un numero non sta avanzando.
+    """
+    from app.services.wa_number_manager import get_wa_warmup_cap
+
     return {
         "id": n.id,
         "tenant_id": n.tenant_id,
@@ -67,6 +127,11 @@ def _serializza(n: WaNumber) -> dict:
         "proxy_url": n.proxy_url,
         "daily_cap": n.daily_cap,
         "warmup_day": n.warmup_day,
+        # None quando la rampa e' fuori gioco (warmup_day <= 0): in quel caso
+        # NON c'e' un tetto di warmup, e mostrare un numero suggerirebbe il
+        # contrario.
+        "warmup_cap": get_wa_warmup_cap(n.warmup_day) if (n.warmup_day or 0) > 0 else None,
+        "warmup_advanced_date": n.warmup_advanced_date,
         "sent_today": n.sent_today,
         "sent_date": n.sent_date,
         "session_checked_at": n.session_checked_at.isoformat() if n.session_checked_at else None,
@@ -140,16 +205,16 @@ async def aggiorna(number_id: str, campi: dict, db=Depends(get_db)) -> dict:
     body (sent_today, sent_date, status, ...) e' ignorata in silenzio, non e'
     un errore -- e' cosi' che un client che manda il record intero non
     riesce comunque a scavalcare M3 (contratto §4.1). warmup_day E' fra i
-    campi modificabili (override manuale M5): validato a parte sotto,
-    perche' un valore sporco qui non deve mai finire a comporre il cap
-    effettivo di invio (wa_number_manager.effective_wa_daily_cap)."""
+    campi modificabili (override manuale M5).
+
+    I campi che compongono il cap di invio (warmup_day, daily_cap) sono
+    validati PRIMA di essere applicati: un valore sporco li' dentro non
+    fallisce qui, fallisce dopo dentro il worker
+    (wa_number_manager.effective_wa_daily_cap) con un TypeError lontano
+    dalla causa, e nel frattempo il numero smette di mandare."""
     numero = await _numero_o_404(db, number_id)
-    if "warmup_day" in campi:
-        valore = campi["warmup_day"]
-        # isinstance(x, bool) prima: bool e' sottoclasse di int in Python,
-        # True/False passerebbero altrimenti isinstance(x, int) in silenzio.
-        if isinstance(valore, bool) or not isinstance(valore, int) or valore < 0:
-            raise HTTPException(422, "warmup_day deve essere un intero >= 0")
+    for chiave in _CAMPI_INTERI & campi.keys():
+        _valida_intero(chiave, campi[chiave])
     for chiave in CAMPI_MODIFICABILI & campi.keys():
         setattr(numero, chiave, campi[chiave])
     await db.commit()
