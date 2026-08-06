@@ -10,7 +10,7 @@
 //
 // Attenzione a come lo si racconta all'operatore: l'override NON congela la
 // rampa. Al prossimo avanzamento (boot o cron) il numero risale del passo
-// configurato in WA_WARMUP_ADVANCE_PER_DAY partendo dal valore impostato
+// configurato in WA_WARMUP_ADVANCE_STEPS_PER_DAY partendo dal valore impostato
 // qui, quindi una frenata fatta da questo dialog dura al massimo fino al
 // giorno dopo. La leva che regge nel tempo e' il cap/giorno.
 import { useState } from 'react'

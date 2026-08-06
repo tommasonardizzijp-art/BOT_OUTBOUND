@@ -89,14 +89,15 @@ async def advance_wa_warmup_if_needed() -> None:
         for number in result.scalars().all():
             if number.warmup_advanced_date == today:
                 continue
-            # max(1, ...) sul passo: un WA_WARMUP_ADVANCE_PER_DAY negativo in
-            # .env faceva RETROCEDERE warmup_day fin sotto lo zero, e sotto lo
-            # zero il gradino esce dal min() di effective_wa_daily_cap -- cioe'
-            # una configurazione sbagliata RIMUOVEVA il tetto anti-ban invece
-            # di rallentare la rampa, e il numero restava escluso per sempre
-            # dallo sweep. La direzione di questo contatore e' una sola.
-            # Trovato nel collaudo M5 con WA_WARMUP_ADVANCE_PER_DAY=-5.
-            passo = max(1, settings.wa_warmup_advance_per_day)
+            # max(1, ...) sul passo: un WA_WARMUP_ADVANCE_STEPS_PER_DAY
+            # negativo in .env faceva RETROCEDERE warmup_day fin sotto lo zero,
+            # e sotto lo zero il gradino esce dal min() di
+            # effective_wa_daily_cap -- cioe' una configurazione sbagliata
+            # RIMUOVEVA il tetto anti-ban invece di rallentare la rampa, e il
+            # numero restava escluso per sempre dallo sweep. La direzione di
+            # questo contatore e' una sola. Trovato nel collaudo M5 con
+            # WA_WARMUP_ADVANCE_STEPS_PER_DAY=-5.
+            passo = max(1, settings.wa_warmup_advance_steps_per_day)
             number.warmup_day = min(number.warmup_day + passo, len(steps))
             number.warmup_advanced_date = today
             logger.info(f"[WaWarmup] numero {number.id[:8]} warmup_day -> {number.warmup_day}")

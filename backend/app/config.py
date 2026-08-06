@@ -334,8 +334,20 @@ class Settings(BaseSettings):
     wa_daily_cap_default: int = 20              # SDD 10.3, warmup giorno 1-3
     # ATTENZIONE: proposta NON misurata (SDD 10.3). A6 si verifica solo con
     # la rampa di M5.
+    # La rampa di volume vive TUTTA qui: ogni voce e' il tetto in MESSAGGI di
+    # un giorno, e warmup_day e' l'indice 1-based che dice a che punto della
+    # lista si trova un numero. Per cambiare la velocita' della rampa si
+    # cambia QUESTA lista, non il passo qui sotto.
     wa_warmup_steps: str = "20,20,30,40,60,80,100"
-    wa_warmup_advance_per_day: int = 10         # M5, decisione 06/08
+    # GRADINI DELLA LISTA QUI SOPRA AL GIORNO -- **NON** messaggi al giorno.
+    # Deve restare 1: alzarlo significa SALTARE gradini, non mandare piu'
+    # messaggi. Con 10 su una lista di 7 voci un numero nuovo passava da 20 a
+    # 100 msg/giorno al primo avanzamento (cioe' al primo riavvio dell'app),
+    # saltando l'intera rampa che esiste per non farlo bannare -- verificato a
+    # runtime nel collaudo M5, e' il motivo per cui questo commento e' cosi'
+    # lungo. Il nome del campo dice "steps" apposta: era l'ambiguita' del nome
+    # precedente ("per_day") ad aver prodotto l'errore.
+    wa_warmup_advance_steps_per_day: int = 1
     wa_send_delay_median_s: int = 90            # SDD 10.3
     wa_send_delay_sigma: float = 0.7            # SDD 10.3
     wa_session_min_msg: int = 8                 # SDD 10.3
