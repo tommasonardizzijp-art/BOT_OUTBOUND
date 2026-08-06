@@ -1025,8 +1025,8 @@ async def pre_generate_messages(
 
 @router.get("/{campaign_id}/ab-stats")
 async def get_ab_stats(campaign_id: str, db: AsyncSession = Depends(get_db)):
-    """Return A/B testing stats for a campaign: sent/failed counts per template variant.
-    M10.
+    """Statistiche per variante di template (A/B/C/D): inviati, falliti, in coda, risposte.
+    M10, esteso a C/D.
     """
     from app.models.message import Message, MessageStatus
     from sqlalchemy import func, case
@@ -1056,25 +1056,38 @@ async def get_ab_stats(campaign_id: str, db: AsyncSession = Depends(get_db)):
         .group_by(Message.template_variant)
     )
 
-    stats: dict = {"variant_a": None, "variant_b": None, "template_b_present": False}
+    # Quattro varianti: il rendering locale sceglie tra A/B/C/D (pick_template).
+    # Le chiavi ci sono sempre, anche a None: la UI tiene quattro caselle fisse e
+    # mostra "nessun dato" per le varianti non usate, invece di cambiare layout.
+    stats: dict = {
+        "variant_a": None, "variant_b": None, "variant_c": None, "variant_d": None,
+        "template_b_present": False,
+        "template_c_present": False,
+        "template_d_present": False,
+    }
+    # I messaggi pre-A/B hanno template_variant NULL e vanno sommati alla A: sono
+    # due gruppi distinti nella query, sovrascrivere invece di sommare perderebbe
+    # meta' dello storico della variante A.
+    buckets: dict[str, dict] = {}
     for row in rows.all():
-        variant = row.template_variant or 'a'
-        sent = row.sent or 0
-        replied = row.replied or 0
-        reply_rate = (replied / sent) if sent else 0.0
-        data = {
-            "total": row.total,
-            "sent": sent,
-            "failed": row.failed or 0,
-            "pending": row.pending or 0,
-            "replied": replied,
-            "reply_rate": reply_rate,
-        }
-        if variant == 'a':
-            stats["variant_a"] = data
-        elif variant == 'b':
-            stats["variant_b"] = data
-            stats["template_b_present"] = True
+        variant = (row.template_variant or 'a').lower()
+        if variant not in ("a", "b", "c", "d"):
+            # Variante sconosciuta (dato sporco/vecchio): non inventare una casella.
+            continue
+        bucket = buckets.setdefault(
+            variant, {"total": 0, "sent": 0, "failed": 0, "pending": 0, "replied": 0}
+        )
+        bucket["total"] += row.total or 0
+        bucket["sent"] += row.sent or 0
+        bucket["failed"] += row.failed or 0
+        bucket["pending"] += row.pending or 0
+        bucket["replied"] += row.replied or 0
+
+    for variant, bucket in buckets.items():
+        bucket["reply_rate"] = (bucket["replied"] / bucket["sent"]) if bucket["sent"] else 0.0
+        stats[f"variant_{variant}"] = bucket
+        if variant != 'a':
+            stats[f"template_{variant}_present"] = True
 
     return stats
 

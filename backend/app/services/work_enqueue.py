@@ -152,6 +152,27 @@ async def enqueue_bios(campaign_id: str) -> bool:
         await redis.aclose()
 
 
+async def _release_parked_dm_lease(campaign_id: str, account_id: str) -> None:
+    """Libera il lease lasciato dallo slot DM (campagna+account) quando il job non gira.
+
+    Fallisce in silenzio (solo log): un lease non rilasciato scade da solo alla fine
+    della pausa, mentre un'eccezione qui bloccherebbe l'avvio dell'intera campagna.
+    """
+    from app.services import account_lease
+
+    prefix = f"{dm_worker_job_id(campaign_id, account_id)}:"
+    try:
+        async with AsyncSessionLocal() as db:
+            released = await account_lease.release_slot(account_id, prefix, db)
+        if released:
+            logger.info(
+                f"[Enqueue] Lease parcheggiato rilasciato per account={account_id[:8]} "
+                f"(slot {prefix[:-1]} non in esecuzione)"
+            )
+    except Exception as exc:
+        logger.warning(f"[Enqueue] Rilascio lease parcheggiato fallito ({account_id[:8]}): {exc}")
+
+
 async def _enqueue_dm_workers_with_redis(redis, campaign_id: str) -> int:
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -176,7 +197,25 @@ async def _enqueue_dm_workers_with_redis(redis, campaign_id: str) -> int:
     for index, (ca, account_username) in enumerate(campaign_accounts):
         job_id = dm_worker_job_id(campaign_id, ca.account_id)
         defer_seconds = dm_startup_stagger_seconds(index)
-        await redis.delete(*dm_worker_redis_keys(campaign_id, ca.account_id))
+
+        # `arq:in-progress:{job_id}` = worker davvero in esecuzione adesso.
+        # ⚠️ NON cancellarlo mai: e' il lock con cui ARQ garantisce UN job per job_id.
+        # Accodare mentre esiste e' invece sicuro — il worker ARQ salta il job e lo
+        # ripesca al poll successivo, appena il lock sparisce — quindi si accoda
+        # sempre: saltare l'enqueue perderebbe il worker se il job stesse uscendo
+        # proprio in quell'istante (pausa e ripresa ravvicinate).
+        job_running = bool(await redis.exists(f"arq:in-progress:{job_id}"))
+        await redis.delete(f"arq:job:{job_id}", f"arq:retry:{job_id}")
+
+        # Job NON in esecuzione: se ha lasciato un lease appeso (a fine batch il worker
+        # prolunga il lease per tutta la pausa di sessione e parcheggia il job con
+        # `Retry(defer)`), lo slot e' libero e il lease va rilasciato PRIMA di accodare.
+        # Senza questo, riprendere la campagna durante la pausa accoda un worker con un
+        # owner nuovo che esce subito con "already leased by another job" — e la retry
+        # parcheggiata l'ha appena cancellata la delete qui sopra: la campagna resta
+        # "running" senza nessun worker fino al riavvio del bot (bug FLASH LASER, 06/08).
+        if not job_running:
+            await _release_parked_dm_lease(campaign_id, ca.account_id)
         await redis.enqueue_job(
             "run_campaign_task",
             campaign_id,
