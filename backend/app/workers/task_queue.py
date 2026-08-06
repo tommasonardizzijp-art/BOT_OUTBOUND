@@ -135,6 +135,10 @@ async def daily_reset(ctx: dict) -> None:
         await advance_warmup_if_needed()
         logger.info("[Cron] Warmup advancement check done")
 
+        from app.services.wa_number_manager import advance_wa_warmup_if_needed
+        await advance_wa_warmup_if_needed()
+        logger.info("[Cron] WA warmup advancement check done")
+
         from app.services.bot_state_service import is_halted
         if await is_halted(db):
             logger.warning("[Cron] daily_reset: BOT_HALTED active, skipping worker restart")

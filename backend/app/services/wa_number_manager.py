@@ -38,6 +38,45 @@ def get_wa_warmup_cap(warmup_day: int) -> int:
     return steps[max(0, idx)]
 
 
+async def advance_wa_warmup_if_needed() -> None:
+    """Avanza warmup_day per i numeri WA 'active' che non sono ancora stati
+    avanzati oggi. Stesso pattern idempotente di
+    account_manager.advance_warmup_if_needed (warmup_advanced_date come
+    guardia, sicuro sia chiamato al boot che dal cron giornaliero senza
+    avanzare due volte lo stesso giorno), con due differenze deliberate
+    (decisione prodotto M5, non c'e' uno stato 'warming_up' dedicato per WA):
+
+    - avanza SOLO i numeri 'active' (un WaNumber resta 'active' per tutta
+      la rampa, non esiste un secondo stato da cui "uscire");
+    - si ferma (no-op) quando warmup_day >= len(steps) invece di azzerare:
+      il warmup 'plateau-a' sull'ultimo gradino, non termina."""
+    from sqlalchemy import select
+    from app.database import AsyncSessionLocal
+    from app.models.wa import WaNumber, WaNumberStatus
+
+    steps = _parse_wa_warmup_steps(settings.wa_warmup_steps)
+    today = _utc_today_str()
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(WaNumber).where(
+                WaNumber.status == WaNumberStatus.active,
+                WaNumber.warmup_day > 0,
+                WaNumber.warmup_day < len(steps),
+            )
+        )
+        advanced = 0
+        for number in result.scalars().all():
+            if number.warmup_advanced_date == today:
+                continue
+            number.warmup_day += 1
+            number.warmup_advanced_date = today
+            logger.info(f"[WaWarmup] numero {number.id[:8]} warmup_day -> {number.warmup_day}")
+            advanced += 1
+        if advanced:
+            await db.commit()
+            logger.info(f"[WaWarmup] Avanzati {advanced} numero/i")
+
+
 def effective_wa_daily_cap(number, campaign) -> int:
     """Minimo tra: daily_cap del numero (override admin), daily_limit della
     campagna (se impostato), e il gradino di warmup (se warmup_day>0).

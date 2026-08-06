@@ -159,6 +159,125 @@ async def test_22_cap_esatto_del_numero_blocca(db_session, monkeypatch, _tenant)
     assert ok is False
 
 
+@pytest_asyncio.fixture
+async def _tenant_warmup(db_session):
+    import uuid
+    from app.models.tenant import Tenant
+    t = Tenant(id=str(uuid.uuid4()), name="T-warmup", status="active")
+    db_session.add(t)
+    await db_session.commit()
+    return t
+
+
+def _make_wa_number(tenant_id, **over):
+    """Helper locale (non factories_wa.make_number): serve controllare
+    warmup_advanced_date/status/warmup_day riga per riga in ogni test."""
+    import uuid
+    from app.models.wa import WaNumber
+
+    base = dict(
+        id=str(uuid.uuid4()), tenant_id=tenant_id, label="n",
+        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e",
+        daily_cap=100, warmup_day=1, warmup_advanced_date=None,
+        status=WaNumberStatus.active,
+    )
+    base.update(over)
+    return WaNumber(**base)
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_avanza_numero_active_non_ancora_avanzato_oggi(
+        db_session, monkeypatch, _tenant_warmup):
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=1)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 2
+    assert numero.warmup_advanced_date == wnm._utc_today_str()
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_e_idempotente_stesso_giorno(
+        db_session, monkeypatch, _tenant_warmup):
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+
+    numero = _make_wa_number(
+        _tenant_warmup.id, warmup_day=2, warmup_advanced_date=wnm._utc_today_str())
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 2  # gia' avanzato oggi: nessun secondo incremento
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_non_supera_ultimo_gradino(
+        db_session, monkeypatch, _tenant_warmup):
+    from app.config import settings
+    steps = "20,20,30,40,60,80,100"
+    monkeypatch.setattr(settings, "wa_warmup_steps", steps)
+    ultimo = len(steps.split(","))  # 7
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=ultimo)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == ultimo  # a regime: nessun avanzamento oltre
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stato", [WaNumberStatus.suspended, WaNumberStatus.cooldown,
+                                    WaNumberStatus.disconnected, WaNumberStatus.retired,
+                                    WaNumberStatus.pending_qr, WaNumberStatus.qr_required])
+async def test_advance_wa_warmup_ignora_numeri_non_active(
+        db_session, monkeypatch, _tenant_warmup, stato):
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=1, status=stato)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 1
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_override_manuale_oggi_non_blocca_avanzamento_di_domani(
+        db_session, monkeypatch, _tenant_warmup):
+    """Un override manuale (PATCH warmup_day) non tocca warmup_advanced_date:
+    la volta successiva che il cron/boot chiama advance_wa_warmup_if_needed
+    (di fatto 'domani', qui simulato con la guardia None/non-oggi) il numero
+    avanza normalmente, a prescindere dall'override."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+
+    # Override manuale: warmup_day portato a 5, warmup_advanced_date MAI toccato.
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=5, warmup_advanced_date=None)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 6  # avanza comunque, l'override non lo blocca
+    assert numero.warmup_advanced_date == wnm._utc_today_str()
+
+
 @pytest.mark.asyncio
 async def test_adv23_cap_globale_esattamente_raggiunto_non_superato(
         db_session, monkeypatch, _tenant):
