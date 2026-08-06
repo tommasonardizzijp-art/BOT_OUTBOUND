@@ -237,6 +237,13 @@ async def test_8_directory_profilo_assente_non_fallisce(db_session, monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="junction NTFS + mklink /J esistono solo su Windows; su Linux (CI) "
+           "'cmd' non esiste e subprocess.run solleva FileNotFoundError prima "
+           "ancora di poter guardare il returncode. Il ramo POSIX equivalente "
+           "(symlink) e' coperto da test_9b_symlink_non_viene_attraversato.",
+)
 async def test_9_junction_non_viene_attraversata(db_session, monkeypatch, tmp_path):
     """IL TEST PIU' IMPORTANTE del file. Il profilo del numero e' una vera
     junction NTFS verso una cartella "esterna" con un file dentro (simula un
@@ -281,6 +288,46 @@ async def test_9_junction_non_viene_attraversata(db_session, monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="gemello POSIX di test_9: su Windows la creazione di un symlink "
+           "richiede privilegi elevati/developer mode, il caso reale li' e' la "
+           "junction (test_9). Questo esiste perche' la CI gira su Linux: senza, "
+           "il comportamento piu' importante dello script non sarebbe verificato "
+           "da NESSUN test nell'unico ambiente che gira a ogni push.",
+)
+async def test_9b_symlink_non_viene_attraversato(db_session, monkeypatch, tmp_path):
+    """Stesso contratto di test_9 sul ramo POSIX: il profilo del numero e' un
+    symlink verso una cartella esterna con un canary dentro. Dopo il purge il
+    symlink e' sparito ma il target e il suo contenuto esistono ancora --
+    prova che la rimozione non ha attraversato il collegamento."""
+    ids = await _seed_tenant_completo(db_session, label=f"QAM5-symlink-{uuid.uuid4().hex[:8]}")
+    profile_dir = profile_dir_for(ids["number"].id)
+    profile_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    esterna = tmp_path / "cartella_esterna_reale"
+    esterna.mkdir()
+    canary = esterna / "canary.txt"
+    canary.write_text("contenuto reale, non deve sparire mai")
+
+    os.symlink(esterna, profile_dir, target_is_directory=True)
+    assert profile_dir.is_dir()  # il symlink risolve come directory
+
+    try:
+        monkeypatch.setattr(sys, "argv", _argv(ids["tenant"].id, "--yes"))
+        await purge.main()
+
+        assert not os.path.lexists(profile_dir), (
+            "il symlink del profilo deve essere sparito dopo il purge")
+        assert esterna.exists(), (
+            "la cartella ESTERNA (target del symlink) deve esistere ancora")
+        assert canary.exists() and canary.read_text() == "contenuto reale, non deve sparire mai", (
+            "il contenuto dietro il symlink non deve mai essere toccato")
+    finally:
+        purge.remove_profile_dir_safely(profile_dir)
+
+
+@pytest.mark.asyncio
 async def test_10_fallimento_rimozione_un_profilo_non_blocca_gli_altri(
         db_session, monkeypatch):
     """Trovato in code review adversarial (M5 Task 1): il DB e' gia' stato
@@ -316,7 +363,13 @@ async def test_10_fallimento_rimozione_un_profilo_non_blocca_gli_altri(
     reale = purge.remove_profile_dir_safely
 
     def fallisce_sul_primo(path):
-        if path == profilo_rotto:
+        # Confronto sul path ASSOLUTO di entrambi i lati: lo script normalizza
+        # il percorso prima di rimuoverlo (browser_profiles_dir e' relativo di
+        # default, e un path relativo dipenderebbe dalla CWD di chi lancia).
+        # Un `==` fra un path relativo e uno assoluto non matcha mai: il
+        # fallimento simulato non scatterebbe e il test passerebbe verificando
+        # nulla.
+        if os.path.abspath(path) == os.path.abspath(profilo_rotto):
             raise PermissionError(f"simulato: {path} bloccato da un processo")
         return reale(path)
 
@@ -346,3 +399,126 @@ async def test_10_fallimento_rimozione_un_profilo_non_blocca_gli_altri(
         assert profilo_rotto.exists()
     finally:
         reale(profilo_rotto)
+
+
+def test_11_nessuna_tabella_wa_sfugge_al_purge():
+    """GUARDIA ANTI-DRIFT — il test piu' importante per il FUTURO di questo
+    file (gli altri guardano il presente).
+
+    Oggi il purge copre tutte e 7 le tabelle wa_*. Il giorno in cui una
+    milestone successiva ne aggiunge una ottava, lo script continuerebbe a
+    stampare "Purge completato" cancellando solo una parte dei dati del
+    cliente: un fallimento GDPR silenzioso, con l'unico segnale visibile che
+    e' un messaggio di successo. Nessun altro test se ne accorgerebbe, perche'
+    tutti gli altri seminano a mano solo cio' che gia' conoscono.
+
+    Qui invece si parte dallo SCHEMA: ogni tabella registrata in
+    Base.metadata che sia wa_* o che abbia una colonna tenant_id deve essere
+    nominata in _TABELLE. Se qualcuno aggiunge una tabella e dimentica lo
+    script, e' questo test a fallire, con il nome della tabella dimenticata.
+    """
+    from app.database import Base
+    import app.models  # noqa: F401 - registra tutti i modelli in Base
+
+    coperte = set(purge._TABELLE)
+    scoperte = {
+        nome for nome, tabella in Base.metadata.tables.items()
+        if (nome.startswith("wa_") or "tenant_id" in tabella.columns)
+        and nome not in coperte and nome != "tenants"
+    }
+    assert not scoperte, (
+        f"tabelle con dati per-tenant NON cancellate dal purge: {sorted(scoperte)}. "
+        "Aggiungile a _TABELLE e alla sequenza di delete in main(), rispettando "
+        "l'ordine FK (figli prima dei genitori)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_12_una_delete_che_fallisce_non_lascia_il_tenant_a_meta(
+        db_session, monkeypatch):
+    """ROLLBACK — la proprieta' che lo script dichiara a parole (docstring di
+    main: "se qualcosa fallisce a meta', il commit non parte e nessuna riga
+    resta cancellata a meta'") non era verificata da nessun test.
+
+    Si fa esplodere l'ULTIMA delete prima del commit (quella del tenant):
+    a quel punto le delete precedenti sono gia' state eseguite nella
+    transazione. Se l'atomicita' regge, alla fine il tenant deve essere
+    ancora li' CON tutti i suoi dati; se non reggesse, resterebbe un tenant
+    orfano coi figli spariti -- lo stato peggiore possibile, perche' sembra
+    integro dall'alto e non lo e'.
+    """
+    ids = await _seed_tenant_completo(db_session, label=f"QAM5-rollback-{uuid.uuid4().hex[:8]}")
+    tenant_id = ids["tenant"].id
+
+    vera_delete = purge.delete
+    esplosa = {"fatto": False}
+
+    def delete_che_esplode(target):
+        if target is Tenant and not esplosa["fatto"]:
+            esplosa["fatto"] = True
+            raise RuntimeError("guasto simulato a meta' cancellazione")
+        return vera_delete(target)
+
+    monkeypatch.setattr(purge, "delete", delete_che_esplode)
+    monkeypatch.setattr(sys, "argv", _argv(tenant_id, "--yes"))
+
+    with pytest.raises(RuntimeError):
+        await purge.main()
+
+    assert esplosa["fatto"], "il guasto simulato non e' scattato: test inutile"
+
+    # Nulla deve essere sopravvissuto al rollback: ne' il tenant, ne' i figli
+    # gia' passati dalla delete prima dello scoppio.
+    assert await _tenant_fresco(db_session, tenant_id) is not None, (
+        "il tenant deve essere ancora presente: il commit non e' mai avvenuto")
+    assert await _count(db_session, WaNumber, tenant_id=tenant_id) == 1
+    assert await _count(db_session, WaContact, tenant_id=tenant_id) == 1
+    assert await _count(db_session, WaCampaign, tenant_id=tenant_id) == 1
+    assert await _count(db_session, WaInboundEvent, tenant_id=tenant_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_13_junction_ANNIDATA_dentro_il_profilo_non_viene_attraversata(
+        db_session, monkeypatch, tmp_path):
+    """La forma ESATTA dell'incidente del 05-06/08: non un profilo che E' un
+    collegamento (test_9), ma una junction NASCOSTA DENTRO un albero vero --
+    che e' quello che `robocopy /MIR` senza `/XJ` ha seguito, cancellando un
+    profilo WhatsApp reale fuori dalla cartella prevista.
+
+    La docstring di remove_profile_dir_safely dichiara questo caso
+    "verificato sperimentalmente" ma nessun test lo copriva.
+    """
+    if sys.platform == "win32":
+        crea_link = lambda src, dst: subprocess.run(  # noqa: E731
+            ["cmd", "/c", "mklink", "/J", str(dst), str(src)],
+            capture_output=True, text=True).returncode == 0
+    else:
+        def crea_link(src, dst):
+            os.symlink(src, dst, target_is_directory=True)
+            return True
+
+    ids = await _seed_tenant_completo(db_session, label=f"QAM5-annidata-{uuid.uuid4().hex[:8]}")
+    profile_dir = profile_dir_for(ids["number"].id)
+    (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Default" / "vero.txt").write_text("file interno, puo' sparire")
+
+    esterna = tmp_path / "cartella_esterna_reale"
+    esterna.mkdir()
+    canary = esterna / "canary.txt"
+    canary.write_text("contenuto reale, non deve sparire mai")
+
+    if not crea_link(esterna, profile_dir / "Default" / "collegamento"):
+        pytest.skip("creazione del collegamento non permessa in questo ambiente")
+
+    try:
+        monkeypatch.setattr(sys, "argv", _argv(ids["tenant"].id, "--yes"))
+        await purge.main()
+
+        assert not os.path.lexists(profile_dir), (
+            "l'albero vero del profilo deve essere stato cancellato")
+        assert esterna.exists() and canary.exists(), (
+            "la cancellazione ha ATTRAVERSATO la junction annidata: e' "
+            "esattamente l'incidente del 05-06/08")
+        assert canary.read_text() == "contenuto reale, non deve sparire mai"
+    finally:
+        purge.remove_profile_dir_safely(profile_dir)

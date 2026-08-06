@@ -208,23 +208,61 @@ async def main() -> None:
     # successivi MAI nemmeno tentati, e senza modo di ritentarli via CLI
     # perche' i wa_numbers che servono a ricostruire il path sono gia'
     # spariti dal DB (trovato in review, M5 Task 1).
-    falliti = []
+    rimossi, assenti, falliti = [], [], []
     for number_id in number_ids:
+        # Il path si calcola UNA volta, FUORI dal try: profile_dir_for solleva
+        # ValueError (non OSError) su un number_id che contiene separatori, e
+        # dentro il try scavalcherebbe il fix sopra -- traceback a DB gia'
+        # cancellato, numeri successivi mai tentati e path non piu'
+        # ricostruibili.
+        #
+        # Assoluto perche' browser_profiles_dir e' relativo di default
+        # (config.py: "./data/browser_profiles"): un path relativo dipende
+        # dalla CWD di CHI lancia lo script, che non e' necessariamente quella
+        # del worker, e un profilo esistente risulterebbe "assente".
+        #
+        # `os.path.abspath` e NON `Path.resolve()`: resolve() RISOLVE i
+        # reparse point, quindi su una junction restituisce il TARGET, e la
+        # riga sotto cancellerebbe il target invece del collegamento --
+        # esattamente l'incidente del 05-06/08 che questo script esiste per
+        # non ripetere. abspath normalizza soltanto in modo lessicale, senza
+        # mai guardare dove punta un link. (Introdotto per sbaglio con
+        # resolve() durante il collaudo M5 e fermato da
+        # test_9_junction_non_viene_attraversata: il test funziona.)
         try:
-            remove_profile_dir_safely(profile_dir_for(number_id))
-        except OSError as e:
-            falliti.append((number_id, e))
+            percorso = Path(os.path.abspath(profile_dir_for(number_id)))
+        except Exception as e:
+            falliti.append((number_id, "<path non calcolabile>", e))
+            continue
 
-    riusciti = len(number_ids) - len(falliti)
-    print(f"Purge completato: {riusciti}/{len(number_ids)} profili browser "
-          "rimossi (o gia' assenti).")
+        # Distinguere "rimosso" da "non c'era" non e' pedanteria: il profilo
+        # e' la SESSIONE WhatsApp viva del cliente (accesso alle sue chat), la
+        # cosa piu' sensibile che questo script deve cancellare. Un conteggio
+        # che somma i due casi stampa "N/N rimossi" identico sia quando ha
+        # cancellato davvero sia quando ha guardato nella cartella sbagliata
+        # e non ha trovato niente -- successo pieno a video, sessioni ancora
+        # sul disco. Trovato in review, M5 collaudo.
+        c_era = os.path.lexists(percorso)
+        try:
+            remove_profile_dir_safely(percorso)
+        except Exception as e:
+            falliti.append((number_id, percorso, e))
+            continue
+        (rimossi if c_era else assenti).append(percorso)
+
+    print(f"Profili browser: {len(rimossi)} rimossi, {len(assenti)} gia' "
+          f"assenti, {len(falliti)} falliti (su {len(number_ids)} numeri).")
+    for percorso in rimossi:
+        print(f"  rimosso: {percorso}")
+    for percorso in assenti:
+        print(f"  gia' assente: {percorso}")
 
     if falliti:
         print(f"ATTENZIONE: {len(falliti)} profili browser NON rimossi (le "
               "righe DB sono comunque GIA' cancellate, serve pulizia manuale "
               "della cartella su disco):", file=sys.stderr)
-        for number_id, e in falliti:
-            print(f"  {profile_dir_for(number_id)}: {e}", file=sys.stderr)
+        for _number_id, percorso, e in falliti:
+            print(f"  {percorso}: {e}", file=sys.stderr)
         raise SystemExit(2)
 
 
