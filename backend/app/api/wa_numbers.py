@@ -35,10 +35,16 @@ def _motivo_pulito(exc: PhoneNormalizationError) -> str:
     testo = str(exc)
     return testo.split(":")[0].strip() if ":" in testo else type(exc).__name__
 
-# Contratto §4.1: sent_today / sent_date / warmup_day / status NON sono qui,
-# sono di M3 in scrittura runtime (tranne l'azzeramento fatto da `riattiva`).
-# Un PATCH che li accettasse creerebbe due padroni per la stessa colonna.
-CAMPI_MODIFICABILI = {"label", "proxy_url", "daily_cap", "notes"}
+# Contratto §4.1: sent_today / sent_date / status NON sono qui, sono di M3 in
+# scrittura runtime (tranne l'azzeramento fatto da `riattiva`). Un PATCH che
+# li accettasse creerebbe due padroni per la stessa colonna.
+# warmup_day invece E' overridabile a mano (decisione prodotto M5): la rampa
+# avanza da sola ogni giorno (wa_number_manager.advance_wa_warmup_if_needed,
+# chiamato al boot e dal cron) ma resta sovrascrivibile qui. I due
+# convivono senza logica speciale -- un override oggi non impedisce ne'
+# forza l'avanzamento automatico di domani, che segue il proprio corso
+# indipendentemente (guarda warmup_advanced_date, non warmup_day).
+CAMPI_MODIFICABILI = {"label", "proxy_url", "daily_cap", "notes", "warmup_day"}
 
 # Stati da cui la riattivazione e' ammessa (contratto §2.2): sono gli unici
 # che un operatore mette a mano e che un operatore deve poter togliere a mano.
@@ -131,10 +137,19 @@ async def dettaglio(number_id: str, db=Depends(get_db)) -> dict:
 @router.patch("/{number_id}")
 async def aggiorna(number_id: str, campi: dict, db=Depends(get_db)) -> dict:
     """Solo CAMPI_MODIFICABILI vengono applicati: qualunque altra chiave nel
-    body (sent_today, sent_date, warmup_day, status, ...) e' ignorata in
-    silenzio, non e' un errore -- e' cosi' che un client che manda il record
-    intero non riesce comunque a scavalcare M3 (contratto §4.1)."""
+    body (sent_today, sent_date, status, ...) e' ignorata in silenzio, non e'
+    un errore -- e' cosi' che un client che manda il record intero non
+    riesce comunque a scavalcare M3 (contratto §4.1). warmup_day E' fra i
+    campi modificabili (override manuale M5): validato a parte sotto,
+    perche' un valore sporco qui non deve mai finire a comporre il cap
+    effettivo di invio (wa_number_manager.effective_wa_daily_cap)."""
     numero = await _numero_o_404(db, number_id)
+    if "warmup_day" in campi:
+        valore = campi["warmup_day"]
+        # isinstance(x, bool) prima: bool e' sottoclasse di int in Python,
+        # True/False passerebbero altrimenti isinstance(x, int) in silenzio.
+        if isinstance(valore, bool) or not isinstance(valore, int) or valore < 0:
+            raise HTTPException(422, "warmup_day deve essere un intero >= 0")
     for chiave in CAMPI_MODIFICABILI & campi.keys():
         setattr(numero, chiave, campi[chiave])
     await db.commit()

@@ -82,6 +82,80 @@ async def test_crea_con_numero_malformato_non_stampa_il_numero_in_chiaro(db_sess
     assert "ABC123NONVALIDO456" not in str(exc.value)
 
 
+@pytest.mark.asyncio
+async def test_patch_warmup_day_override_manuale_accettato_e_persistito(db_session):
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant)
+    n.warmup_day = 1
+    await db_session.commit()
+
+    risposta = await wa_numbers.aggiorna(n.id, {"warmup_day": 5}, db=db_session)
+    await db_session.refresh(n)
+    assert n.warmup_day == 5
+    assert risposta["warmup_day"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valore", [-1, -100])
+async def test_patch_warmup_day_negativo_rifiutato(db_session, valore):
+    from fastapi import HTTPException
+
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant)
+    n.warmup_day = 3
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await wa_numbers.aggiorna(n.id, {"warmup_day": valore}, db=db_session)
+    assert exc.value.status_code == 422
+
+    await db_session.refresh(n)
+    assert n.warmup_day == 3  # invariato: la scrittura non e' passata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valore", [3.5, "5", None, True])
+async def test_patch_warmup_day_non_intero_rifiutato(db_session, valore):
+    from fastapi import HTTPException
+
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant)
+    n.warmup_day = 3
+    await db_session.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        await wa_numbers.aggiorna(n.id, {"warmup_day": valore}, db=db_session)
+    assert exc.value.status_code == 422
+
+    await db_session.refresh(n)
+    assert n.warmup_day == 3
+
+
+@pytest.mark.asyncio
+async def test_patch_warmup_day_override_non_impedisce_avanzamento_automatico_di_domani(
+        db_session):
+    """Un override oggi non tocca warmup_advanced_date: il prossimo giro di
+    advance_wa_warmup_if_needed (di fatto 'domani') avanza comunque il
+    numero, indipendentemente dall'override -- nessuna interazione speciale
+    fra i due meccanismi (per design)."""
+    from app.services import wa_number_manager as wnm
+
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant)
+    n.warmup_day, n.warmup_advanced_date = 1, None
+    await db_session.commit()
+
+    await wa_numbers.aggiorna(n.id, {"warmup_day": 5}, db=db_session)
+    await db_session.refresh(n)
+    assert n.warmup_day == 5
+    assert n.warmup_advanced_date is None  # l'override NON setta la guardia
+
+    await wnm.advance_wa_warmup_if_needed()
+    await db_session.refresh(n)
+    assert n.warmup_day == 6  # l'avanzamento automatico riprende comunque
+    assert n.warmup_advanced_date == wnm._utc_today_str()
+
+
 def _lock_occupato(monkeypatch):
     """Doppio del lucchetto profilo sempre occupato."""
     from app.services import wa_profile_lock
