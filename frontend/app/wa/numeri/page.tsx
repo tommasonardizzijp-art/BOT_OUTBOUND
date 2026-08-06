@@ -2,15 +2,19 @@
 
 // Pagina Numeri del canale WhatsApp (Task 10). Mostra solo cio' che il
 // backend espone: il numero e' SEMPRE mascherato (mai in chiaro -- vedi il
-// commento su WaNumber in lib/waApi.ts, non esiste un campo "intero"), e
-// qui non offriamo mai una strada per scrivere i campi di M3 (sent_today,
-// sent_date, warmup_day, status): l'unica azione che scrive e' "Riattiva",
-// che manda solo il motivo -- e' l'endpoint a decidere il resto (SS2.2).
+// commento su WaNumber in lib/waApi.ts, non esiste un campo "intero"). Qui
+// non offriamo mai una strada per scrivere sent_today/sent_date/status: le
+// uniche azioni che scrivono sono "Riattiva" (manda solo il motivo, e'
+// l'endpoint a decidere il resto, SS2.2) e "Modifica giorno rampa", che
+// scrive SOLO warmup_day -- override manuale voluto (M5): la rampa avanza
+// comunque da sola ogni giorno, l'override di oggi non blocca l'avanzamento
+// di domani (vedi commento su CAMPI_MODIFICABILI in wa_numbers.py).
 import { useState } from 'react'
 import useSWR from 'swr'
 import { toast } from 'sonner'
 import { waApi, type WaNumber, type WaNumberStatus } from '@/lib/waApi'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import {
@@ -89,6 +93,7 @@ export default function WaNumeriPage() {
                 <th className="px-4 py-3 text-left font-medium">Numero</th>
                 <th className="px-4 py-3 text-left font-medium">Stato</th>
                 <th className="px-4 py-3 text-right font-medium">Cap/giorno</th>
+                <th className="px-4 py-3 text-right font-medium">Giorno rampa</th>
                 <th className="px-4 py-3 text-right font-medium">Inviati oggi</th>
                 <th className="px-4 py-3 text-left font-medium">Proxy</th>
                 <th className="px-4 py-3 text-left font-medium">Ultimo check</th>
@@ -126,6 +131,7 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
           </span>
         </td>
         <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>{numero.daily_cap}</td>
+        <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>{numero.warmup_day}</td>
         <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>{numero.sent_today}</td>
         <td className="px-4 py-3">
           {senzaProxy
@@ -144,6 +150,7 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
             {(numero.status === 'retired' || numero.status === 'suspended') && (
               <RiattivaButton numero={numero} onChanged={onChanged} />
             )}
+            <ModificaWarmupDayButton numero={numero} onChanged={onChanged} />
           </div>
         </td>
       </tr>
@@ -151,7 +158,7 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
         // Avviso ESPLICITO in UI (non solo nel log del backend): minaccia T3
         // della SDD -- numeri diversi correlati perche' escono dallo stesso IP.
         <tr>
-          <td colSpan={8} className="px-4 pb-3 pt-0">
+          <td colSpan={9} className="px-4 pb-3 pt-0">
             <div
               className="rounded-lg border px-3 py-2 text-xs"
               style={{ borderColor: '#7a5a2a', backgroundColor: 'rgba(224, 122, 60, 0.12)', color: '#f2c9a0' }}
@@ -305,6 +312,93 @@ function RiattivaButton({ numero, onChanged }: { numero: WaNumber; onChanged: ()
               className="bg-blue-600 hover:bg-blue-700"
             >
               {loading ? 'Riattivo...' : 'Riattiva'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ModificaWarmupDayButton({ numero, onChanged }: { numero: WaNumber; onChanged: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [valore, setValore] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const handleOpenChange = (v: boolean) => {
+    setOpen(v)
+    // Precompilato col valore corrente: si riapre sempre allineato, non
+    // resta appeso a un tentativo precedente annullato.
+    if (v) setValore(String(numero.warmup_day))
+  }
+
+  const numerico = Number(valore)
+  const valoreValido = valore.trim().length > 0 && Number.isInteger(numerico) && numerico >= 0
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    // Guardia raddoppiata come in RiattivaButton: il bottone e' gia'
+    // disabled su input non valido, ma il submit da tastiera deve rifiutare
+    // comunque (stesso motivo).
+    if (!valoreValido) return
+    setLoading(true)
+    try {
+      await waApi.numeri.update(numero.id, { warmup_day: numerico })
+      toast.success(`${numero.label}: giorno rampa aggiornato a ${numerico}`)
+      setOpen(false)
+      onChanged()
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Errore')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogTrigger
+        render={
+          <Button
+            size="sm" variant="outline" type="button"
+            style={{ borderColor: 'var(--wa-accent)', color: 'var(--wa-accent)' }}
+          />
+        }
+      >
+        Modifica giorno rampa
+      </DialogTrigger>
+      <DialogContent className="bg-gray-900 border-gray-800 text-white">
+        <DialogHeader>
+          <DialogTitle>Modifica giorno rampa — {numero.label}</DialogTitle>
+          <DialogDescription className="text-gray-400">
+            Il giorno di rampa concorre al tetto di invio giornaliero insieme al cap/giorno.
+            Cambiarlo qui non blocca l&apos;avanzamento automatico: da domani la rampa riprende
+            comunque a salire di un giorno, ripartendo dal valore che imposti ora.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="space-y-1.5">
+            <label className="text-sm text-gray-300">Giorno rampa (intero, minimo 0)</label>
+            <Input
+              type="number"
+              min={0}
+              step={1}
+              value={valore}
+              onChange={(e) => setValore(e.target.value)}
+              className="bg-gray-800 border-gray-700 text-white"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button" variant="outline" className="border-gray-700 text-gray-300"
+              onClick={() => setOpen(false)} disabled={loading}
+            >
+              Annulla
+            </Button>
+            <Button
+              type="submit" disabled={loading || !valoreValido}
+              className="bg-blue-600 hover:bg-blue-700"
+            >
+              {loading ? 'Salvo...' : 'Salva'}
             </Button>
           </DialogFooter>
         </form>

@@ -173,7 +173,7 @@ export const waApi = {
     get: (id: string) => req<WaNumber>(`/wa/numbers/${id}`),
     create: (data: WaNumberCreate) =>
       req<WaNumber>('/wa/numbers', { method: 'POST', body: JSON.stringify(data) }),
-    update: (id: string, data: Partial<{ label: string; proxy_url: string | null; daily_cap: number; notes: string }>) =>
+    update: (id: string, data: Partial<{ label: string; proxy_url: string | null; daily_cap: number; notes: string; warmup_day: number }>) =>
       req<WaNumber>(`/wa/numbers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: string) => req<{ eliminato: boolean }>(`/wa/numbers/${id}`, { method: 'DELETE' }),
     // Apre un browser VISIBILE sulla macchina del backend: va premuto solo
