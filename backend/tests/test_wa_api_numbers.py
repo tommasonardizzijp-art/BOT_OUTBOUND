@@ -152,7 +152,9 @@ async def test_patch_warmup_day_override_non_impedisce_avanzamento_automatico_di
 
     await wnm.advance_wa_warmup_if_needed()
     await db_session.refresh(n)
-    assert n.warmup_day == 6  # l'avanzamento automatico riprende comunque
+    # l'avanzamento automatico riprende comunque: +10/giorno, clampato
+    # all'ultimo gradino di wa_warmup_steps default (7 voci): 5+10 -> 7
+    assert n.warmup_day == 7
     assert n.warmup_advanced_date == wnm._utc_today_str()
 
 

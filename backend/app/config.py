@@ -335,6 +335,7 @@ class Settings(BaseSettings):
     # ATTENZIONE: proposta NON misurata (SDD 10.3). A6 si verifica solo con
     # la rampa di M5.
     wa_warmup_steps: str = "20,20,30,40,60,80,100"
+    wa_warmup_advance_per_day: int = 10         # M5, decisione 06/08
     wa_send_delay_median_s: int = 90            # SDD 10.3
     wa_send_delay_sigma: float = 0.7            # SDD 10.3
     wa_session_min_msg: int = 8                 # SDD 10.3

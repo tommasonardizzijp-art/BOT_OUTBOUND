@@ -190,6 +190,7 @@ async def test_advance_wa_warmup_avanza_numero_active_non_ancora_avanzato_oggi(
         db_session, monkeypatch, _tenant_warmup):
     from app.config import settings
     monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_advance_per_day", 10)
 
     numero = _make_wa_number(_tenant_warmup.id, warmup_day=1)
     db_session.add(numero)
@@ -198,8 +199,30 @@ async def test_advance_wa_warmup_avanza_numero_active_non_ancora_avanzato_oggi(
     await wnm.advance_wa_warmup_if_needed()
 
     await db_session.refresh(numero)
-    assert numero.warmup_day == 2
+    # +10/giorno (decisione 06/08), clampato all'ultimo gradino (7): 1+10 -> 7
+    assert numero.warmup_day == 7
     assert numero.warmup_advanced_date == wnm._utc_today_str()
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_incrementa_esattamente_di_10_senza_clamp(
+        db_session, monkeypatch, _tenant_warmup):
+    """Steps abbastanza lunga da non saturare al primo salto: verifica
+    l'incremento REALE (+10), non solo il risultato clampato all'ultimo
+    gradino che da solo non distinguerebbe +10 da un ipotetico bug a +1."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps",
+                        "20,20,30,40,50,60,70,80,90,100,110,120,130,140,150")
+    monkeypatch.setattr(settings, "wa_warmup_advance_per_day", 10)
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=3)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 13  # 3 + 10, ben sotto i 15 gradini: nessun clamp in gioco
 
 
 @pytest.mark.asyncio
@@ -265,6 +288,7 @@ async def test_advance_wa_warmup_override_manuale_oggi_non_blocca_avanzamento_di
     avanza normalmente, a prescindere dall'override."""
     from app.config import settings
     monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_advance_per_day", 10)
 
     # Override manuale: warmup_day portato a 5, warmup_advanced_date MAI toccato.
     numero = _make_wa_number(_tenant_warmup.id, warmup_day=5, warmup_advanced_date=None)
@@ -274,7 +298,8 @@ async def test_advance_wa_warmup_override_manuale_oggi_non_blocca_avanzamento_di
     await wnm.advance_wa_warmup_if_needed()
 
     await db_session.refresh(numero)
-    assert numero.warmup_day == 6  # avanza comunque, l'override non lo blocca
+    # avanza comunque (l'override non lo blocca), clampato all'ultimo gradino: 5+10 -> 7
+    assert numero.warmup_day == 7
     assert numero.warmup_advanced_date == wnm._utc_today_str()
 
 

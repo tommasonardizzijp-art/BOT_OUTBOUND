@@ -68,7 +68,8 @@ async def advance_wa_warmup_if_needed() -> None:
         for number in result.scalars().all():
             if number.warmup_advanced_date == today:
                 continue
-            number.warmup_day += 1
+            number.warmup_day = min(number.warmup_day + settings.wa_warmup_advance_per_day,
+                                    len(steps))
             number.warmup_advanced_date = today
             logger.info(f"[WaWarmup] numero {number.id[:8]} warmup_day -> {number.warmup_day}")
             advanced += 1
