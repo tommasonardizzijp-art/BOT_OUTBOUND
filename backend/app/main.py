@@ -49,6 +49,8 @@ async def lifespan(app: FastAPI):
     await _sync_daily_message_counts()
     from app.services.account_manager import advance_warmup_if_needed
     await advance_warmup_if_needed()
+    from app.services.wa_number_manager import advance_wa_warmup_if_needed
+    await advance_wa_warmup_if_needed()
 
     # BUG-NEW-34: warn if .env has test/aggressive timing values
     if settings.min_delay_seconds < 60:

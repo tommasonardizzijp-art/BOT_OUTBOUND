@@ -24,8 +24,29 @@ def _parse_wa_warmup_steps(spec: str) -> list[int]:
     """"20,20,30,40,60,80,100" -> [20,20,30,40,60,80,100]. Lista ordinale
     (non range come account_manager.WARMUP_LIMITS): warmup_day 1-based
     indicizza direttamente, oltre la fine si resta sull'ultimo valore
-    (regime raggiunto, SDD 10.3)."""
-    return [int(x.strip()) for x in spec.split(",") if x.strip()]
+    (regime raggiunto, SDD 10.3).
+
+    Una voce non numerica viene SCARTATA con un warning invece di sollevare:
+    questa funzione gira nel lifespan del boot e dentro il calcolo del cap di
+    ogni invio, quindi un refuso in WA_WARMUP_STEPS faceva morire l'avvio
+    dell'applicazione con un ValueError grezzo. Scartare la voce sporca
+    degrada in modo prevedibile (la rampa resta sui gradini validi) e lascia
+    una traccia leggibile; se NESSUNA voce e' valida, chi chiama ricade sul
+    default di config (get_wa_warmup_cap) -- mai su "nessun tetto".
+    Trovato nel collaudo M5 con WA_WARMUP_STEPS="abc".
+    """
+    valori = []
+    for voce in spec.split(","):
+        voce = voce.strip()
+        if not voce:
+            continue
+        try:
+            valori.append(int(voce))
+        except ValueError:
+            logger.warning(
+                f"[WaWarmup] WA_WARMUP_STEPS contiene una voce non numerica "
+                f"({voce!r}): ignorata. Gradini validi: {valori or 'nessuno'}")
+    return valori
 
 
 def get_wa_warmup_cap(warmup_day: int) -> int:
@@ -36,6 +57,73 @@ def get_wa_warmup_cap(warmup_day: int) -> int:
         return settings.wa_daily_cap_default
     idx = min(warmup_day, len(steps)) - 1
     return steps[max(0, idx)]
+
+
+async def advance_wa_warmup_if_needed() -> None:
+    """Avanza warmup_day per i numeri WA 'active' che non sono ancora stati
+    avanzati oggi. Stesso pattern idempotente di
+    account_manager.advance_warmup_if_needed (warmup_advanced_date come
+    guardia, sicuro sia chiamato al boot che dal cron giornaliero senza
+    avanzare due volte lo stesso giorno), con due differenze deliberate
+    (decisione prodotto M5, non c'e' uno stato 'warming_up' dedicato per WA):
+
+    - avanza SOLO i numeri 'active' (un WaNumber resta 'active' per tutta
+      la rampa, non esiste un secondo stato da cui "uscire");
+    - si ferma (no-op) quando warmup_day >= len(steps) invece di azzerare:
+      il warmup 'plateau-a' sull'ultimo gradino, non termina."""
+    from sqlalchemy import select
+    from app.database import AsyncSessionLocal
+    from app.models.wa import WaNumber, WaNumberStatus
+
+    steps = _parse_wa_warmup_steps(settings.wa_warmup_steps)
+    passo = settings.wa_warmup_advance_steps_per_day
+
+    # Il passo ha UNA direzione sola. Un valore <= 0 in .env non deve poter
+    # cambiare il verso della rampa: con un negativo warmup_day scendeva sotto
+    # lo zero, e sotto lo zero il gradino esce dal min() di
+    # effective_wa_daily_cap -- cioe' una configurazione sbagliata RIMUOVEVA il
+    # tetto anti-ban invece di rallentare la rampa, lasciando per giunta il
+    # numero fuori dallo sweep per sempre (collaudo M5, passo -5).
+    #
+    # Zero e' un caso a parte: NON lo si forza a 1. Chi scrive 0 sta chiedendo
+    # di congelare la rampa, ed e' una richiesta legittima -- ma va onorata
+    # fermandosi qui, non lasciando che la rampa salga lo stesso mentre
+    # warmup_advanced_date continua ad aggiornarsi (sembrerebbe funzionare e
+    # non farebbe nulla di quello che si e' chiesto). Il warning esiste perche'
+    # una rampa ferma e' uno stato che si nota solo se qualcuno lo dice.
+    if passo <= 0:
+        if passo < 0:
+            logger.warning(
+                f"[WaWarmup] WA_WARMUP_ADVANCE_STEPS_PER_DAY={passo} e' negativo: "
+                "il passo della rampa non puo' essere negativo, avanzamento "
+                "sospeso. Correggi la configurazione (1 = un gradino al giorno).")
+        else:
+            logger.warning(
+                "[WaWarmup] WA_WARMUP_ADVANCE_STEPS_PER_DAY=0: la rampa NON "
+                "avanzera' da sola. I numeri restano al gradino attuale finche' "
+                "non lo si rimette a 1.")
+        return
+
+    today = _utc_today_str()
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(WaNumber).where(
+                WaNumber.status == WaNumberStatus.active,
+                WaNumber.warmup_day > 0,
+                WaNumber.warmup_day < len(steps),
+            )
+        )
+        advanced = 0
+        for number in result.scalars().all():
+            if number.warmup_advanced_date == today:
+                continue
+            number.warmup_day = min(number.warmup_day + passo, len(steps))
+            number.warmup_advanced_date = today
+            logger.info(f"[WaWarmup] numero {number.id[:8]} warmup_day -> {number.warmup_day}")
+            advanced += 1
+        if advanced:
+            await db.commit()
+            logger.info(f"[WaWarmup] Avanzati {advanced} numero/i")
 
 
 def effective_wa_daily_cap(number, campaign) -> int:

@@ -159,6 +159,244 @@ async def test_22_cap_esatto_del_numero_blocca(db_session, monkeypatch, _tenant)
     assert ok is False
 
 
+@pytest_asyncio.fixture
+async def _tenant_warmup(db_session):
+    import uuid
+    from app.models.tenant import Tenant
+    t = Tenant(id=str(uuid.uuid4()), name="T-warmup", status="active")
+    db_session.add(t)
+    await db_session.commit()
+    return t
+
+
+def _make_wa_number(tenant_id, **over):
+    """Helper locale (non factories_wa.make_number): serve controllare
+    warmup_advanced_date/status/warmup_day riga per riga in ogni test."""
+    import uuid
+    from app.models.wa import WaNumber
+
+    base = dict(
+        id=str(uuid.uuid4()), tenant_id=tenant_id, label="n",
+        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e",
+        daily_cap=100, warmup_day=1, warmup_advanced_date=None,
+        status=WaNumberStatus.active,
+    )
+    base.update(over)
+    return WaNumber(**base)
+
+
+@pytest.mark.asyncio
+async def test_la_rampa_sale_un_gradino_al_giorno_in_MESSAGGI(
+        db_session, monkeypatch, _tenant_warmup):
+    """IL test della rampa, e l'unico che avrebbe intercettato il bug di M5.
+
+    Asserisce sui MESSAGGI AL GIORNO, non sull'indice: `warmup_day` e' un
+    indice nella lista dei gradini, quindi un test che guarda solo il suo
+    valore non distingue "la rampa sale" da "la rampa e' saltata". La prima
+    stesura di questi test asseriva `warmup_day == 7` dopo un avanzamento da 1
+    e passava, mentre il numero era gia' al cap massimo dal secondo giorno.
+
+    Nessuna delle assert qui sotto guarda l'indice: guardano il tetto in
+    messaggi, che e' la cosa che fa bannare un numero se cresce troppo in
+    fretta.
+    """
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_advance_steps_per_day", 1)
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=1, daily_cap=1000)
+    db_session.add(numero)
+    await db_session.commit()
+    campagna = type("C", (), {"daily_limit": None})()
+
+    # daily_cap volutamente altissimo: qui deve comandare SOLO il gradino,
+    # altrimenti il min() lo maschera ed e' il motivo per cui il bug era
+    # rimasto invisibile nell'uso normale.
+    attesi = [20, 20, 30, 40, 60, 80, 100, 100, 100]
+    ottenuti = [wnm.effective_wa_daily_cap(numero, campagna)]
+
+    for _ in range(len(attesi) - 1):
+        numero.warmup_advanced_date = None  # simula "e' passato un giorno"
+        await db_session.commit()
+        await wnm.advance_wa_warmup_if_needed()
+        await db_session.refresh(numero)
+        ottenuti.append(wnm.effective_wa_daily_cap(numero, campagna))
+
+    assert ottenuti == attesi, (
+        f"la rampa in messaggi/giorno e' {ottenuti}, attesa {attesi}")
+
+    # E nessun giorno deve salire piu' del gradino successivo previsto: e'
+    # questa la proprieta' che protegge il numero, non il valore finale.
+    salti = [b - a for a, b in zip(ottenuti, ottenuti[1:])]
+    assert max(salti) <= 20, f"salto troppo grande fra due giorni: {salti}"
+
+
+def test_la_configurazione_DI_DEFAULT_produce_una_rampa_graduale():
+    """Gli altri test della rampa usano monkeypatch, quindi passerebbero anche
+    se qualcuno rimettesse un passo sbagliato nel default di config.py -- ed e'
+    esattamente cosi' che il bug di M5 e' arrivato fino al collaudo. Questo
+    test NON monkeypatcha niente: legge i valori veri con cui l'applicazione
+    parte, e fallisce se la rampa reale non e' graduale.
+
+    Non impone QUALI debbano essere i gradini (e' una decisione di prodotto,
+    si cambiano liberamente): impone che, qualunque siano, il tetto in
+    messaggi non raddoppi da un giorno all'altro e che servano piu' giorni per
+    arrivare a regime.
+    """
+    from app.config import settings
+
+    steps = wnm._parse_wa_warmup_steps(settings.wa_warmup_steps)
+    assert len(steps) >= 3, "una rampa di meno di 3 gradini non e' una rampa"
+
+    passo = settings.wa_warmup_advance_steps_per_day
+    assert passo >= 1, "il passo e' in gradini/giorno: sotto 1 la rampa non sale"
+
+    # Simula i primi giorni di vita di un numero nuovo, coi valori veri.
+    giorno, caps = 1, []
+    for _ in range(len(steps) + 2):
+        caps.append(wnm.get_wa_warmup_cap(giorno))
+        giorno = min(giorno + passo, len(steps))
+
+    assert caps[0] == steps[0], "il giorno 1 deve partire dal primo gradino"
+
+    salti = [b - a for a, b in zip(caps, caps[1:])]
+    salto_massimo_previsto = max(
+        b - a for a, b in zip(steps, steps[1:])) if len(steps) > 1 else 0
+    assert max(salti) <= salto_massimo_previsto, (
+        f"la rampa reale salta {max(salti)} messaggi fra due giorni "
+        f"consecutivi, ma il salto piu' grande fra due gradini adiacenti e' "
+        f"{salto_massimo_previsto}: il passo "
+        f"(WA_WARMUP_ADVANCE_STEPS_PER_DAY={passo}) sta scavalcando gradini. "
+        f"Rampa risultante: {caps}"
+    )
+
+    giorni_per_arrivare_a_regime = caps.index(max(caps)) + 1
+    assert giorni_per_arrivare_a_regime >= len(steps), (
+        f"il cap massimo viene raggiunto al giorno "
+        f"{giorni_per_arrivare_a_regime} su {len(steps)} gradini: la rampa "
+        f"esiste per distribuire la crescita nel tempo, non per arrivarci "
+        f"subito. Rampa risultante: {caps}")
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_avanza_di_un_solo_gradino(
+        db_session, monkeypatch, _tenant_warmup):
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_advance_steps_per_day", 1)
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=1)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 2
+    assert numero.warmup_advanced_date == wnm._utc_today_str()
+
+
+@pytest.mark.asyncio
+async def test_il_passo_e_in_GRADINI_non_in_messaggi(
+        db_session, monkeypatch, _tenant_warmup):
+    """Guardia sull'unita' di misura del passo, che e' l'errore da cui nasce
+    tutto: con una lista lunga e un passo di 3, l'indice deve salire di 3
+    POSIZIONI (non di 3 messaggi, e non di 3 x qualcosa)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps",
+                        "20,20,30,40,50,60,70,80,90,100,110,120,130,140,150")
+    monkeypatch.setattr(settings, "wa_warmup_advance_steps_per_day", 3)
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=3)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 6  # 3 + 3 posizioni, lontano dal clamp
+    # 6o gradino della lista = 60 msg/giorno
+    assert wnm.get_wa_warmup_cap(numero.warmup_day) == 60
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_e_idempotente_stesso_giorno(
+        db_session, monkeypatch, _tenant_warmup):
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+
+    numero = _make_wa_number(
+        _tenant_warmup.id, warmup_day=2, warmup_advanced_date=wnm._utc_today_str())
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 2  # gia' avanzato oggi: nessun secondo incremento
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_non_supera_ultimo_gradino(
+        db_session, monkeypatch, _tenant_warmup):
+    from app.config import settings
+    steps = "20,20,30,40,60,80,100"
+    monkeypatch.setattr(settings, "wa_warmup_steps", steps)
+    ultimo = len(steps.split(","))  # 7
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=ultimo)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == ultimo  # a regime: nessun avanzamento oltre
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stato", [WaNumberStatus.suspended, WaNumberStatus.cooldown,
+                                    WaNumberStatus.disconnected, WaNumberStatus.retired,
+                                    WaNumberStatus.pending_qr, WaNumberStatus.qr_required])
+async def test_advance_wa_warmup_ignora_numeri_non_active(
+        db_session, monkeypatch, _tenant_warmup, stato):
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=1, status=stato)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 1
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_override_manuale_oggi_non_blocca_avanzamento_di_domani(
+        db_session, monkeypatch, _tenant_warmup):
+    """Un override manuale (PATCH warmup_day) non tocca warmup_advanced_date:
+    la volta successiva che il cron/boot chiama advance_wa_warmup_if_needed
+    (di fatto 'domani', qui simulato con la guardia None/non-oggi) il numero
+    avanza normalmente, a prescindere dall'override."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_advance_steps_per_day", 1)
+
+    # Override manuale: warmup_day portato a 5, warmup_advanced_date MAI toccato.
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=5, warmup_advanced_date=None)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    # avanza comunque (l'override non lo blocca): 5 -> 6, un gradino
+    assert numero.warmup_day == 6
+    assert numero.warmup_advanced_date == wnm._utc_today_str()
+
+
 @pytest.mark.asyncio
 async def test_adv23_cap_globale_esattamente_raggiunto_non_superato(
         db_session, monkeypatch, _tenant):
@@ -181,3 +419,85 @@ async def test_adv23_cap_globale_esattamente_raggiunto_non_superato(
 
     ok = await wnm.has_wa_send_budget(db_session, numero_a, SimpleNamespace(daily_limit=None))
     assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_config_warmup_steps_malformata_non_uccide_il_boot(
+        db_session, monkeypatch, _tenant_warmup):
+    """_parse_wa_warmup_steps gira nel lifespan del boot E nel calcolo del cap
+    di ogni invio: un refuso in WA_WARMUP_STEPS faceva morire l'avvio
+    dell'applicazione con un ValueError grezzo. Deve degradare, non esplodere.
+    Trovato nel collaudo M5."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,abc,40")
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=1)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()  # non deve sollevare
+
+    # La voce sporca e' scartata, i gradini validi restano usabili.
+    assert wnm._parse_wa_warmup_steps("20,abc,40") == [20, 40]
+    assert isinstance(wnm.get_wa_warmup_cap(1), int)
+
+
+@pytest.mark.asyncio
+async def test_incremento_negativo_in_config_non_fa_retrocedere_la_rampa(
+        db_session, monkeypatch, _tenant_warmup):
+    """Un WA_WARMUP_ADVANCE_STEPS_PER_DAY negativo portava warmup_day sotto zero, e
+    sotto zero il gradino esce dal min() di effective_wa_daily_cap: una
+    configurazione sbagliata RIMUOVEVA il tetto anti-ban invece di rallentare
+    la rampa, per giunta in modo definitivo (il numero usciva per sempre dallo
+    sweep). Questo contatore ha una direzione sola."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_advance_steps_per_day", -5)
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=2)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 2, (
+        "con un passo negativo l'avanzamento va SOSPESO, non invertito e "
+        "nemmeno forzato a salire: la configurazione e' sbagliata e va "
+        "corretta, non interpretata")
+
+    # E il tetto resta calcolabile e attivo (non "nessun tetto").
+    campagna = type("C", (), {"daily_limit": None})()
+    numero.daily_cap = 1000
+    assert wnm.effective_wa_daily_cap(numero, campagna) <= 100
+
+
+@pytest.mark.asyncio
+async def test_passo_zero_congela_la_rampa_invece_di_farla_salire(
+        db_session, monkeypatch, _tenant_warmup):
+    """Chi mette 0 sta chiedendo di congelare la rampa: la richiesta va
+    onorata fermandosi, non forzando il passo a 1.
+
+    Il primo fix del passo negativo usava `max(1, passo)` e finiva per far
+    salire la rampa anche a 0, mentre `warmup_advanced_date` continuava ad
+    aggiornarsi: sembrava funzionare e faceva l'opposto di quanto chiesto.
+    Trovato nella review finale di M5.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_advance_steps_per_day", 0)
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=2, warmup_advanced_date=None)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 2, "con passo 0 la rampa non deve salire"
+    # E nemmeno la guardia va toccata: un giorno "saltato" non deve risultare
+    # come un giorno gia' avanzato, altrimenti rimettere il passo a 1 domani
+    # non recupererebbe nulla.
+    assert numero.warmup_advanced_date is None

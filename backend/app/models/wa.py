@@ -138,6 +138,11 @@ class WaNumber(Base):
     daily_cap: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
     # Riuso semantica IG: rampa graduale del cap.
     warmup_day: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # Guardia idempotente per l'avanzamento automatico giornaliero (M5),
+    # stesso pattern/tipo di InstagramAccount.warmup_advanced_date: se
+    # diverso da oggi (UTC, "YYYY-MM-DD") il numero non e' ancora stato
+    # avanzato oggi, sicuro sia chiamato al boot sia dal cron giornaliero.
+    warmup_advanced_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # Contatore date-aware, stesso pattern lazy-reset di scrape_lookups_date
     # (migrazione 018).
     sent_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

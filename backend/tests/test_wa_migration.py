@@ -220,3 +220,38 @@ def test_025_non_tocca_instagram(migration_db):
 
     new_tables = post_tables - pre_tables
     assert new_tables == WA_NEW_TABLES | {"alembic_version"}
+
+
+# ---------------------------------------------------------------------------
+# Funzionale 4 -- 028: warmup_advanced_date raggiungibile via upgrade pulito
+# ---------------------------------------------------------------------------
+
+def _wa_numbers_columns(db_path: Path) -> set[str]:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return {row[1] for row in conn.execute("PRAGMA table_info(wa_numbers)").fetchall()}
+    finally:
+        conn.close()
+
+
+def test_028_warmup_advanced_date_raggiungibile_da_upgrade_pulito(migration_db):
+    """stamp 024 (prod reale) -> upgrade head: la colonna nuova (M5,
+    avanzamento automatico warmup_day) e' fisicamente su wa_numbers."""
+    _run_alembic(["stamp", "024"], migration_db)
+    _run_alembic(["upgrade", "head"], migration_db)
+
+    assert "warmup_advanced_date" in _wa_numbers_columns(migration_db)
+
+
+def test_028_ciclo_su_giu_su_isolato(migration_db):
+    """downgrade 027 (via batch_alter_table) -> upgrade head: nessun errore,
+    e la colonna torna ad esserci dopo il secondo upgrade."""
+    _run_alembic(["stamp", "024"], migration_db)
+    _run_alembic(["upgrade", "head"], migration_db)
+    assert "warmup_advanced_date" in _wa_numbers_columns(migration_db)
+
+    _run_alembic(["downgrade", "027"], migration_db)
+    assert "warmup_advanced_date" not in _wa_numbers_columns(migration_db)
+
+    _run_alembic(["upgrade", "head"], migration_db)
+    assert "warmup_advanced_date" in _wa_numbers_columns(migration_db)

@@ -2,15 +2,23 @@
 
 // Pagina Numeri del canale WhatsApp (Task 10). Mostra solo cio' che il
 // backend espone: il numero e' SEMPRE mascherato (mai in chiaro -- vedi il
-// commento su WaNumber in lib/waApi.ts, non esiste un campo "intero"), e
-// qui non offriamo mai una strada per scrivere i campi di M3 (sent_today,
-// sent_date, warmup_day, status): l'unica azione che scrive e' "Riattiva",
-// che manda solo il motivo -- e' l'endpoint a decidere il resto (SS2.2).
+// commento su WaNumber in lib/waApi.ts, non esiste un campo "intero"). Qui
+// non offriamo mai una strada per scrivere sent_today/sent_date/status: le
+// uniche azioni che scrivono sono "Riattiva" (manda solo il motivo, e'
+// l'endpoint a decidere il resto, SS2.2) e "Modifica giorno rampa", che
+// scrive SOLO warmup_day -- override manuale voluto (M5).
+//
+// Attenzione a come lo si racconta all'operatore: l'override NON congela la
+// rampa. Al prossimo avanzamento (boot o cron) il numero risale del passo
+// configurato in WA_WARMUP_ADVANCE_STEPS_PER_DAY partendo dal valore impostato
+// qui, quindi una frenata fatta da questo dialog dura al massimo fino al
+// giorno dopo. La leva che regge nel tempo e' il cap/giorno.
 import { useState } from 'react'
 import useSWR from 'swr'
 import { toast } from 'sonner'
 import { waApi, type WaNumber, type WaNumberStatus } from '@/lib/waApi'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import {
@@ -89,6 +97,7 @@ export default function WaNumeriPage() {
                 <th className="px-4 py-3 text-left font-medium">Numero</th>
                 <th className="px-4 py-3 text-left font-medium">Stato</th>
                 <th className="px-4 py-3 text-right font-medium">Cap/giorno</th>
+                <th className="px-4 py-3 text-right font-medium">Giorno rampa</th>
                 <th className="px-4 py-3 text-right font-medium">Inviati oggi</th>
                 <th className="px-4 py-3 text-left font-medium">Proxy</th>
                 <th className="px-4 py-3 text-left font-medium">Ultimo check</th>
@@ -126,6 +135,16 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
           </span>
         </td>
         <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>{numero.daily_cap}</td>
+        {/* Il giorno da solo non dice niente a chi guarda: "3" non fa capire
+            che sono 40 messaggi. Il cap del gradino va accanto, e quando la
+            rampa non pone alcun tetto (warmup_day 0) va detto a parole --
+            altrimenti sembra solo un numero piu' basso, cioe' il contrario. */}
+        <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>
+          {numero.warmup_day}
+          {numero.warmup_cap !== null
+            ? <span className="ml-1 text-xs opacity-70">({numero.warmup_cap} msg)</span>
+            : <span className="ml-1 text-xs" style={{ color: '#e07a3c' }}>(nessun tetto)</span>}
+        </td>
         <td className="px-4 py-3 text-right" style={{ color: 'var(--wa-muted)' }}>{numero.sent_today}</td>
         <td className="px-4 py-3">
           {senzaProxy
@@ -144,6 +163,14 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
             {(numero.status === 'retired' || numero.status === 'suspended') && (
               <RiattivaButton numero={numero} onChanged={onChanged} />
             )}
+            {/* Su retired/suspended il bottone non e' solo inutile, e'
+                ingannevole: "Riattiva" riporta warmup_day a 1 (wa_numbers.py,
+                riattiva), quindi il valore impostato qui verrebbe buttato in
+                silenzio subito dopo un toast di successo. Stesso criterio di
+                gating delle altre tre azioni della riga. */}
+            {numero.status !== 'retired' && numero.status !== 'suspended' && (
+              <ModificaWarmupDayButton numero={numero} onChanged={onChanged} />
+            )}
           </div>
         </td>
       </tr>
@@ -151,7 +178,7 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
         // Avviso ESPLICITO in UI (non solo nel log del backend): minaccia T3
         // della SDD -- numeri diversi correlati perche' escono dallo stesso IP.
         <tr>
-          <td colSpan={8} className="px-4 pb-3 pt-0">
+          <td colSpan={9} className="px-4 pb-3 pt-0">
             <div
               className="rounded-lg border px-3 py-2 text-xs"
               style={{ borderColor: '#7a5a2a', backgroundColor: 'rgba(224, 122, 60, 0.12)', color: '#f2c9a0' }}
@@ -305,6 +332,128 @@ function RiattivaButton({ numero, onChanged }: { numero: WaNumber; onChanged: ()
               className="bg-blue-600 hover:bg-blue-700"
             >
               {loading ? 'Riattivo...' : 'Riattiva'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ModificaWarmupDayButton({ numero, onChanged }: { numero: WaNumber; onChanged: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [valore, setValore] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const handleOpenChange = (v: boolean) => {
+    setOpen(v)
+    // Precompilato col valore corrente: si riapre sempre allineato, non
+    // resta appeso a un tentativo precedente annullato.
+    if (v) setValore(String(numero.warmup_day))
+  }
+
+  const numerico = Number(valore)
+  // `Number.isInteger` da solo non basta: `<input type="number">` accetta la
+  // notazione esponenziale, e `Number("1e3")` e' l'intero 1000 -- passava in
+  // silenzio e veniva salvato senza che chi ha digitato "1e3" se ne
+  // accorgesse. La forma va controllata sulla STRINGA, non sul numero.
+  const soloCifre = /^\d+$/.test(valore.trim())
+  const valoreValido = soloCifre && Number.isInteger(numerico) && numerico >= 0
+  // Distingue "non ho ancora scritto niente" da "ho scritto qualcosa di
+  // sbagliato": senza, il bottone si disabilita e non dice perche'.
+  const motivoNonValido = valore.trim().length === 0 || valoreValido
+    ? null
+    : 'Serve un numero intero senza segni, decimali o notazione esponenziale.'
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    // Guardia raddoppiata come in RiattivaButton: il bottone e' gia'
+    // disabled su input non valido, ma il submit da tastiera deve rifiutare
+    // comunque (stesso motivo).
+    if (!valoreValido) return
+    setLoading(true)
+    try {
+      await waApi.numeri.update(numero.id, { warmup_day: numerico })
+      toast.success(`${numero.label}: giorno rampa aggiornato a ${numerico}`)
+      setOpen(false)
+      onChanged()
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Errore')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogTrigger
+        render={
+          <Button
+            size="sm" variant="outline" type="button"
+            style={{ borderColor: 'var(--wa-accent)', color: 'var(--wa-accent)' }}
+          />
+        }
+      >
+        Modifica giorno rampa
+      </DialogTrigger>
+      <DialogContent className="bg-gray-900 border-gray-800 text-white">
+        <DialogHeader>
+          <DialogTitle>Modifica giorno rampa — {numero.label}</DialogTitle>
+          <DialogDescription className="text-gray-400">
+            Il giorno di rampa e&apos; il gradino della rampa di volume: concorre al tetto di
+            invio giornaliero insieme al cap/giorno, e il tetto effettivo e&apos; il piu&apos;
+            basso dei due.
+            {numero.warmup_cap !== null && (
+              <> Oggi questo numero e&apos; al giorno {numero.warmup_day}, che vale{' '}
+                <strong>{numero.warmup_cap} messaggi al giorno</strong>.</>
+            )}
+            {' '}Cambiarlo qui non ferma l&apos;avanzamento automatico: la rampa riprende
+            comunque a salire al prossimo avanzamento, ripartendo dal valore che imposti ora.
+            Per fermare davvero il volume dopo un warning, la leva e&apos; il cap/giorno.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="space-y-1.5">
+            <label htmlFor={`warmup-day-${numero.id}`} className="text-sm text-gray-300">
+              Giorno rampa (numero intero)
+            </label>
+            <Input
+              id={`warmup-day-${numero.id}`}
+              type="number"
+              min={0}
+              step={1}
+              value={valore}
+              onChange={(e) => setValore(e.target.value)}
+              className="bg-gray-800 border-gray-700 text-white"
+            />
+            {/* Lo zero NON e' "il valore piu' prudente": toglie del tutto il
+                tetto di rampa (resta solo il cap/giorno) e il numero non
+                viene piu' avanzato in automatico. Chi lo sceglie pensando di
+                frenare ottiene l'opposto, quindi va detto qui, dove sta per
+                sbagliare. */}
+            {valore.trim() === '0' && (
+              <p className="text-xs" style={{ color: '#e07a3c' }}>
+                Attenzione: 0 non e&apos; il valore piu&apos; prudente. Toglie del tutto il
+                tetto della rampa (resta solo il cap/giorno) e questo numero non verra&apos;
+                piu&apos; avanzato in automatico.
+              </p>
+            )}
+            {motivoNonValido && (
+              <p className="text-xs text-gray-400">{motivoNonValido}</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button" variant="outline" className="border-gray-700 text-gray-300"
+              onClick={() => setOpen(false)} disabled={loading}
+            >
+              Annulla
+            </Button>
+            <Button
+              type="submit" disabled={loading || !valoreValido}
+              className="bg-blue-600 hover:bg-blue-700"
+            >
+              {loading ? 'Salvo...' : 'Salva'}
             </Button>
           </DialogFooter>
         </form>

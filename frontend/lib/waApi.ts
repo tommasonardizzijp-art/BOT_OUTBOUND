@@ -64,6 +64,11 @@ export type WaNumber = {
   proxy_url: string | null
   daily_cap: number
   warmup_day: number
+  // Derivati dal backend (non scrivibili): warmup_day da solo e' un indice
+  // senza significato per chi guarda la pagina -- warmup_cap dice quanti
+  // messaggi sono davvero, ed e' null quando la rampa non pone alcun tetto.
+  warmup_cap: number | null
+  warmup_advanced_date: string | null
   sent_today: number
   sent_date: string | null
   session_checked_at: string | null
@@ -173,7 +178,7 @@ export const waApi = {
     get: (id: string) => req<WaNumber>(`/wa/numbers/${id}`),
     create: (data: WaNumberCreate) =>
       req<WaNumber>('/wa/numbers', { method: 'POST', body: JSON.stringify(data) }),
-    update: (id: string, data: Partial<{ label: string; proxy_url: string | null; daily_cap: number; notes: string }>) =>
+    update: (id: string, data: Partial<{ label: string; proxy_url: string | null; daily_cap: number; notes: string; warmup_day: number }>) =>
       req<WaNumber>(`/wa/numbers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: string) => req<{ eliminato: boolean }>(`/wa/numbers/${id}`, { method: 'DELETE' }),
     // Apre un browser VISIBILE sulla macchina del backend: va premuto solo
