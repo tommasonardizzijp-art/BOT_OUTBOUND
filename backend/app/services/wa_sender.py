@@ -368,6 +368,7 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
             await wa_optout.persist_wa_optout(db, contact.id, prova=testo_in,
                                               campaign_id=campaign.id)
             await _incrementa_contatore_campagna(db, campaign.id, "opted_out")
+            await wa_optout.check_optout_circuit_breaker(db, campaign.id)
             logger.warning(f"[WA] {masked}: STOP arrivato nella finestra TOCTOU, "
                            "invio annullato")
             return EsitoInvio("opted_out", "stop_toctou")
@@ -550,6 +551,7 @@ async def _esito_guardia_negativa(db, cc, contact, campaign, guardia, masked: st
         await wa_optout.persist_wa_optout(db, contact.id, prova=guardia.prova or "",
                                           campaign_id=campaign.id)
         await _incrementa_contatore_campagna(db, campaign.id, "opted_out")
+        await wa_optout.check_optout_circuit_breaker(db, campaign.id)
         logger.warning(f"[WA] {masked}: STOP in coda, invio annullato")
         return EsitoInvio("opted_out", "stop")
 

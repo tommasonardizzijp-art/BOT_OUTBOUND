@@ -374,6 +374,15 @@ class Settings(BaseSettings):
     # looks_like_ambiguous_stop_needs_review per la segnalazione umana.
     wa_stop_words_ambigue: str = "basta"
     wa_global_daily_cap: int = 200              # SDD Q70, safety valve macchina
+    # Circuit breaker sul tasso di opt-out (review P4, 07/08): il numero che
+    # rischia il ban e' del CLIENTE, non nostro. Sotto wa_optout_breaker_min_invii
+    # il campione e' troppo piccolo per significare qualcosa (1 opt-out su 2
+    # invii e' 50%, rumore puro) -- il breaker resta muto finche' non c'e'
+    # abbastanza segnale. Soglia (25%) volutamente piu' alta del solo
+    # "allarme" mostrato in UI (SOGLIA_ALLARME_OPTOUT_PCT=5%, wa_campaigns.py):
+    # quello e' un warning da leggere con calma, questo ferma il canale.
+    wa_optout_breaker_min_invii: int = 10
+    wa_optout_breaker_pct: float = 25.0
 
     # --- Canale WhatsApp: reply-watcher + opt-out (M4) --------------------
     # Lucchetto profilo Chromium. Il conto vero di una mini-sessione nel caso

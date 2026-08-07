@@ -129,3 +129,57 @@ async def persist_wa_optout(db, contact_id: str, *, prova: str,
                     f"contatto {contact_id}: STOP rilevato, {fermate} sequenze fermate",
                     level="warning")
     return fermate
+
+
+async def check_optout_circuit_breaker(db, campaign_id: str | None) -> bool:
+    """Circuit breaker sul tasso di opt-out (review P4, 07/08): il numero
+    che rischia il ban e' del CLIENTE, non nostro, e prima di questo fix
+    nessuna soglia fermava nulla in automatico. Va chiamato DOPO ogni
+    incremento del contatore opted_out di una campagna.
+
+    Sotto wa_optout_breaker_min_invii il campione e' troppo piccolo per
+    significare qualcosa (resta muto, non fa nulla). Sopra la soglia
+    (wa_optout_breaker_pct) ferma l'INTERO canale con lo stesso kill-switch
+    di POST /wa/ops/halt (bot_state_service.halt_wa) -- non solo la
+    campagna: un tasso di opt-out alto e' un segnale sul NUMERO (template
+    sbagliato, lista sporca, numero gia' segnalato), non sulla singola riga
+    di configurazione.
+
+    Idempotente per l'alert: se il canale e' gia' fermo (da questo breaker
+    o da un halt manuale) non manda un secondo Telegram identico a ogni
+    opt-out successivo -- halt_wa stesso resta innocuo da richiamare piu'
+    volte (riscrive solo reason/timestamp), ma lo spam Telegram no."""
+    from app.services import bot_state_service, notifier
+    from app.models.wa import WaCampaign
+
+    if not campaign_id:
+        return False
+
+    campagna = await db.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
+    if campagna is None:
+        return False
+
+    inviati = campagna.sent or 0
+    if inviati < settings.wa_optout_breaker_min_invii:
+        return False
+
+    tasso = 100.0 * (campagna.opted_out or 0) / inviati
+    if tasso <= settings.wa_optout_breaker_pct:
+        return False
+
+    if await bot_state_service.is_wa_halted(db):
+        return False
+
+    motivo = (f"circuit breaker opt-out: campagna {campaign_id[:8]} al "
+              f"{tasso:.1f}% ({campagna.opted_out}/{inviati} invii), soglia "
+              f"{settings.wa_optout_breaker_pct}%")
+    await bot_state_service.halt_wa(reason=motivo, by="circuit_breaker", db=db)
+    try:
+        await notifier.send_telegram(
+            f"WhatsApp FERMATO in automatico -- {motivo}. Verifica prima di "
+            "riattivare (POST /wa/ops/resume): puo' essere un template che "
+            "sta convincendo la gente a uscire, non solo rumore statistico.",
+            level="error")
+    except Exception as exc:
+        logger.error(f"[WA] alert circuit breaker non inviato: {type(exc).__name__}")
+    return True

@@ -170,6 +170,7 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
             campaign_id=cc_attiva.campaign_id if cc_attiva else None)
         if cc_attiva is not None and not gia_optato:
             await _incrementa_contatore_campagna(db, cc_attiva.campaign_id, "opted_out")
+            await wa_optout.check_optout_circuit_breaker(db, cc_attiva.campaign_id)
         db.add(WaInboundEvent(tenant_id=tenant_id, wa_number_id=wa_number_id,
                               contact_id=contatto.id, preview_text=row.preview,
                               matched_by=matched_by, processed=True))
