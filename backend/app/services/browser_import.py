@@ -52,6 +52,7 @@ from app.services.browser_bio import (
     _scraping_accounts_of_campaign,
     _soft_block_incr,
     _soft_block_reset,
+    contatti_richiesti,
     human_profile_pause,
     maybe_micro_scroll,
     web_user_to_shim,
@@ -134,7 +135,7 @@ async def resolve_and_store_bio_browser(row, campaign, db, browser_session) -> t
 
     # Arricchimento contatti business via /info/ in-page (identico a fetch_and_store_bio_browser):
     # web_profile_info torna business_email=null, i contatti veri stanno su /api/v1/users/{pk}/info/.
-    if settings.bio_browser_contact_info_enabled:
+    if contatti_richiesti(campaign):
         info = await _fetch_public_contact_inpage(raw_page, shim.pk)
         if isinstance(info, dict) and info.get("__rate_limited"):
             return "soft_block", Exception(f"/info/ HTTP {info['__rate_limited']}")

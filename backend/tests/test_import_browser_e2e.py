@@ -112,9 +112,13 @@ async def _seed_scraping_account(cid: str) -> str:
     return acc_id
 
 
-async def _ui_create_and_start(monkeypatch, *, engine: str, usernames: list[str]):
+async def _ui_create_and_start(monkeypatch, *, engine: str, usernames: list[str], enrichment_level: str | None = None):
     """Riproduce create_campaign + import_profiles + assegnazione account + start-scrape,
-    con SOLO il boundary Redis della UI mockato. Ritorna (cid, enqueue_calls)."""
+    con SOLO il boundary Redis della UI mockato. Ritorna (cid, enqueue_calls).
+
+    `enrichment_level`: CampaignCreate non lo espone ancora (fuori scope Task 8), quindi
+    lo settiamo direttamente sulla row dopo la create — come farebbe la migration su una
+    campagna gia' esistente."""
     from app.api import campaigns as capi
     from app.services import work_enqueue as we
     from app.schemas.campaign import CampaignCreate
@@ -147,6 +151,11 @@ async def _ui_create_and_start(monkeypatch, *, engine: str, usernames: list[str]
     async with AsyncSessionLocal() as db:
         resp = await capi.create_campaign(payload, db)
     cid = resp.id
+    if enrichment_level is not None:
+        async with AsyncSessionLocal() as db:
+            camp = await db.get(Campaign, cid)
+            camp.enrichment_level = enrichment_level
+            await db.commit()
     assert resp.source_type == "import"
     assert resp.bio_engine == engine
     assert resp.status == CampaignStatus.draft
@@ -211,7 +220,13 @@ async def test_ui_import_browser_e2e_zero_api(monkeypatch):
     _install_api_tripwires(monkeypatch, api_calls=api_calls, pool_builds=pool_builds, raising=True)
 
     # --- Flusso UI reale (create + upload + assegna account + start).
-    cid, enqueue_calls = await _ui_create_and_start(monkeypatch, engine="browser", usernames=usernames)
+    # enrichment_level='contacts': questo test esercita apposta l'arricchimento
+    # contatti via /info/ (asserzione su gamma.phone sotto) — col gate del Task 8
+    # una campagna a un livello diverso non chiamerebbe piu' /info/.
+    from app.models.campaign import ENRICHMENT_CONTACTS
+    cid, enqueue_calls = await _ui_create_and_start(
+        monkeypatch, engine="browser", usernames=usernames, enrichment_level=ENRICHMENT_CONTACTS,
+    )
 
     # --- Mock del SOLO boundary browser/IG (nessun Patchright, nessun IG, nessun Redis).
     monkeypatch.setattr(bi, "BrowserSession", _FakeSession)

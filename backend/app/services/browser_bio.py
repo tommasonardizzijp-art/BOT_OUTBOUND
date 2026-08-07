@@ -298,6 +298,24 @@ async def _fetch_public_contact_inpage(raw_page, pk) -> dict | None:
         return None
 
 
+def contatti_richiesti(campaign) -> bool:
+    """True se questa campagna vuole email/telefono, cioe' se `/info/` puo' partire.
+
+    Due condizioni in AND:
+      - l'interruttore globale e' acceso (kill-switch operativo, vince su tutto);
+      - il livello della campagna e' 'contacts'.
+
+    Difensivo sulla retrocompatibilita': una campagna senza il campo si comporta
+    come prima dell'introduzione dei livelli (chiama /info/), altrimenti la
+    migrazione spegnerebbe in silenzio la raccolta contatti su campagne che la
+    volevano."""
+    from app.models.campaign import ENRICHMENT_CONTACTS
+    if not settings.bio_browser_contact_info_enabled:
+        return False
+    livello = getattr(campaign, "enrichment_level", None)
+    return livello is None or livello == ENRICHMENT_CONTACTS
+
+
 async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -> tuple[str, Exception | None]:
     """Come `fetch_and_store_bio` ma via browser. Scrive gli STESSI campi Follower +
     upsert_lead. NON consuma il cap API (nessun user_info_v1).
@@ -340,7 +358,7 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     # (business_email=null). Li prendiamo da /api/v1/users/{pk}/info/ (public_email/
     # public_phone_number) con un in-page fetch web-autenticato. Senza questo, il
     # motore browser perde ~95% delle email (verificato sul campo il 08/07).
-    if settings.bio_browser_contact_info_enabled:
+    if contatti_richiesti(campaign):
         info = await _fetch_public_contact_inpage(raw_page, shim.pk)
         if isinstance(info, dict) and info.get("__rate_limited"):
             # /info/ rate-limitato: NON ingoiare (era il bug INFO-1/PR-01). Propaga
