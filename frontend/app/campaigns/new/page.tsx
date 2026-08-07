@@ -38,6 +38,7 @@ export default function NewCampaignPage() {
   // Inbox: unico motore reale = API (il browser DOM-listing è stato rimosso, no-op lato BE).
   const [inboxEngine, setInboxEngine] = useState<'browser' | 'api'>('api')
   const [bioEngine, setBioEngine] = useState<'api' | 'browser'>('api')
+  const [enrichmentLevel, setEnrichmentLevel] = useState<'none' | 'bio' | 'contacts'>('none')
   const [messagingEnabled, setMessagingEnabled] = useState(true)
   const [advancedConfig, setAdvancedConfig] = useState({
     scrape_session_size: '250',
@@ -100,6 +101,7 @@ export default function NewCampaignPage() {
         scrape_mode: form.scrape_mode,
         ...(form.scrape_mode === 'dm_threads' ? { inbox_engine: inboxEngine } : {}),
         bio_engine: bioEngine,
+        enrichment_level: enrichmentLevel,
         messaging_enabled: messagingEnabled,
         base_message_template: messagingEnabled ? form.base_message_template : null,
         message_template_b: messagingEnabled && showTemplateB && form.message_template_b.trim() ? form.message_template_b : null,
@@ -488,6 +490,46 @@ export default function NewCampaignPage() {
                     className="bg-gray-800 border-gray-700 text-white h-7 text-xs w-20"
                   />
                 </div>
+              )}
+            </div>
+
+            {/* Livello di arricchimento: SE aprire i profili (asse ortogonale al motore Fase Bio,
+                che decide COME). Nessuna chiamata API qui — si scrive solo lo state locale, il
+                livello parte col payload di creazione. */}
+            <div className="rounded-lg border border-gray-700/50 bg-gray-800/30 px-4 py-3 space-y-3">
+              <div>
+                <p className="text-sm text-gray-300 font-medium">Livello di arricchimento</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Decide se aprire i profili prima di scrivere. Aprirli costa account e rischio:
+                  accendilo solo se i dati ti servono davvero.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                {([
+                  { v: 'none', t: '✉️ Solo DM', d: 'Non apre i profili' },
+                  { v: 'bio', t: '📄 Bio', d: 'Apre i profili, niente contatti' },
+                  { v: 'contacts', t: '📇 Bio + contatti', d: 'Aggiunge email e telefono' },
+                ] as const).map(({ v, t, d }) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setEnrichmentLevel(v)}
+                    className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${
+                      enrichmentLevel === v
+                        ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                        : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+                    }`}
+                  >
+                    {t}
+                    <span className="block text-xs font-normal mt-0.5 opacity-70">{d}</span>
+                  </button>
+                ))}
+              </div>
+              {enrichmentLevel === 'none' && (
+                <p className="text-xs text-amber-400/80">
+                  Circa un contatto su quattro non ha il nome nella lista: in quei DM
+                  «{'{nome}'}» diventa «@nomeutente». Usa un testo che regga anche così.
+                </p>
               )}
             </div>
 
