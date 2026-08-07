@@ -384,3 +384,39 @@ async def test_crea_senza_daily_cap_usa_il_default(db_session):
         {"tenant_id": tenant.id, "label": "N-default", "numero": "+393421460098"},
         db=db_session)
     assert risposta["daily_cap"] == settings.wa_daily_cap_default
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint,fake_name", [("login", "assisted_login"),
+                                                 ("check", "check_session")])
+async def test_endpoint_browser_risponde_503_parlante_se_il_loop_non_regge_i_subprocess(
+        db_session, monkeypatch, endpoint, fake_name):
+    """Su Windows con `uvicorn --reload` il processo gira su SelectorEventLoop
+    e nessun browser puo' partire (vedi WaBrowserLoopUnsupported). Prima
+    l'eccezione arrivava nuda al middleware e l'operatore leggeva solo
+    "Errore interno temporaneo del server": nessun indizio su cosa fosse
+    rotto, e il collaudo dell'08/08 e' rimasto fermo li'.
+
+    503 e non 500: la richiesta e' legittima, e' il processo che non puo'
+    servirla. E il messaggio deve contenere il rimedio -- e' l'unica cosa
+    che l'operatore vede."""
+    from fastapi import HTTPException
+    from app.services import wa_session
+
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant, status=WaNumberStatus.pending_qr)
+    await db_session.commit()
+
+    _lock_libero(monkeypatch)
+
+    async def _loop_sbagliato(number_id):
+        raise wa_session.WaBrowserLoopUnsupported(
+            "Impossibile aprire il browser WhatsApp: ... Riavviare il backend "
+            "SENZA --reload: uvicorn app.main:app --port 8000"
+        )
+    monkeypatch.setattr(wa_session, fake_name, _loop_sbagliato)
+
+    with pytest.raises(HTTPException) as exc:
+        await getattr(wa_numbers, endpoint)(n.id, db=db_session)
+    assert exc.value.status_code == 503
+    assert "--reload" in exc.value.detail

@@ -891,3 +891,60 @@ async def test_adv43_eccezione_nel_context_chiude_comunque_e_libera_il_lock(wa_n
     assert probe.close_count == 1  # il finally ha chiuso il context comunque
     lock = _get_wa_lock(number_id)
     assert not lock.locked()  # il lock non resta trattenuto per sempre
+
+
+# ---------------------------------------------------------------------------
+# Event loop incapace di subprocess (Windows + uvicorn --reload)
+#
+# Il canale WhatsApp apre un browser dentro il processo web in due soli punti:
+# login QR e verifica sessione. Su Windows uvicorn passa a SelectorEventLoop
+# quando use_subprocess e' vero (cioe' con --reload o --workers>1), e quel
+# loop non implementa _make_subprocess_transport: Patchright non riesce ad
+# avviare il driver Node e muore con un NotImplementedError nudo, che il
+# middleware converte nel 500 generico. Diagnosi gia' pagata una volta
+# (collaudo 08/08): questi test la fissano.
+# ---------------------------------------------------------------------------
+
+def test_loop_non_proactor_su_windows_non_puo_avviare_subprocess():
+    """Il criterio e' POSITIVO: su win32 deve essere un ProactorEventLoop.
+    `piattaforma` iniettata perche' il caso vada verificato anche dalla CI
+    Linux, dove asyncio.ProactorEventLoop non esiste proprio."""
+    loop_qualunque = SimpleNamespace()
+    assert wa_session._loop_puo_avviare_subprocess(loop_qualunque, piattaforma="win32") is False
+
+
+def test_fuori_da_windows_ogni_loop_va_bene():
+    """Su Linux/macOS il SelectorEventLoop i subprocess li sa avviare: la
+    guardia non deve bloccare nulla li', o romperebbe la CI e il deploy."""
+    loop_qualunque = SimpleNamespace()
+    assert wa_session._loop_puo_avviare_subprocess(loop_qualunque, piattaforma="linux") is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ProactorEventLoop esiste solo su Windows")
+def test_proactor_su_windows_puo_avviare_subprocess():
+    """L'altra meta' del criterio: il loop GIUSTO deve passare. Senza questo
+    test la guardia potrebbe bloccare tutto e i due test sopra resterebbero
+    verdi lo stesso."""
+    loop = asyncio.ProactorEventLoop()
+    try:
+        assert wa_session._loop_puo_avviare_subprocess(loop, piattaforma="win32") is True
+    finally:
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_loop_incapace_solleva_prima_di_toccare_il_profilo(monkeypatch, numero_id_usa_e_getta):
+    """Stessa proprieta' del proxy malformato (adv38): si fallisce PRIMA di
+    lanciare il browser e prima di toccare il profilo su disco. Un mkdir o
+    una rimozione di SingletonLock fatti mentre un altro Chromium e' vivo
+    sono esattamente la corruzione che il lock esiste per impedire."""
+    probe = _LaunchProbe(launch_delay=0.0)
+    _patch_launcher(monkeypatch, probe)
+    monkeypatch.setattr(wa_session, "_loop_puo_avviare_subprocess", lambda *a, **k: False)
+
+    with pytest.raises(wa_session.WaBrowserLoopUnsupported, match="--reload"):
+        async with _open_wa_browser(numero_id_usa_e_getta, headless=True, proxy_url=None):
+            pass
+
+    assert probe.launch_count == 0
+    assert not profile_dir_for(numero_id_usa_e_getta).exists()

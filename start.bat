@@ -48,8 +48,21 @@ popd
 echo.
 
 :: Start Backend
+::
+:: NIENTE --reload, e non e' una preferenza: su Windows uvicorn sceglie
+:: SelectorEventLoop quando use_subprocess e' vero (uvicorn/loops/asyncio.py),
+:: e use_subprocess e' "reload or workers > 1" (uvicorn/config.py). Il
+:: SelectorEventLoop di Windows non implementa _make_subprocess_transport,
+:: quindi Patchright non riesce ad avviare il driver Node e il canale
+:: WhatsApp perde le due azioni che aprono un browser dentro il processo web:
+:: login QR (POST /api/wa/numbers/{id}/login) e verifica sessione (/check).
+:: Falliscono con NotImplementedError, che il middleware converte in un 500
+:: generico -- diagnosi cara, gia' pagata una volta l'08/08.
+:: Questo file avvia la macchina di Tommaso, che e' la produzione: l'hot
+:: reload non serve, e riavviare il processo mentre un browser WhatsApp sta
+:: lavorando e' comunque da evitare.
 echo [3/5] Avvio backend FastAPI (porta 8000)...
-start "BOT OUTBOUND - Backend" cmd /k "cd /d %~dp0backend && venv\Scripts\activate && uvicorn app.main:app --reload --port 8000"
+start "BOT OUTBOUND - Backend" cmd /k "cd /d %~dp0backend && venv\Scripts\activate && uvicorn app.main:app --port 8000"
 timeout /t 3 /nobreak >nul
 
 :: Start ARQ Worker
