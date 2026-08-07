@@ -399,275 +399,282 @@ class InstagramPage:
         page.on("response", _on_response)
         try:
             await page.goto(profile_url, wait_until="domcontentloaded")
-        finally:
-            try:
-                page.remove_listener("response", _on_response)
-            except Exception:
-                pass
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+            await asyncio.sleep(random.uniform(1.5, 3.0))
 
-        # Blocco IG (scraping_warning / challenge / checkpoint / suspended): fermarsi
-        # QUI. Da dietro l'avviso la pagina profilo non si dipinge, i controlli DM non
-        # si trovano e il lead finirebbe buttato come 'dm_restricted'. Il worker DM
-        # gestisce gia' AccountChallengeError isolando l'account e sbloccando il
-        # follower senza marcarlo (campaign_orchestrator.py:721).
-        blocco = detect_block_interstitial(page.url)
-        if blocco:
-            logger.error(f"@{username}: interstiziale IG '{blocco}' — invio annullato ({page.url})")
-            raise AccountChallengeError(
-                account_id=self._account_id or "sconosciuto",
-                challenge_url=page.url,
-            )
+            # Blocco IG (scraping_warning / challenge / checkpoint / suspended): fermarsi
+            # QUI. Da dietro l'avviso la pagina profilo non si dipinge, i controlli DM non
+            # si trovano e il lead finirebbe buttato come 'dm_restricted'. Il worker DM
+            # gestisce gia' AccountChallengeError isolando l'account e sbloccando il
+            # follower senza marcarlo (campaign_orchestrator.py:721).
+            blocco = detect_block_interstitial(page.url)
+            if blocco:
+                logger.error(f"@{username}: interstiziale IG '{blocco}' — invio annullato ({page.url})")
+                raise AccountChallengeError(
+                    account_id=self._account_id or "sconosciuto",
+                    challenge_url=page.url,
+                )
 
-        # Instagram occasionally serves a "Something went wrong" error page.
-        # A single reload always fixes it — detect and retry once before giving up.
-        if await page.locator('text="Something went wrong"').count() > 0:
-            logger.info(f"@{username}: IG error page detected — reloading once")
-            await page.reload(wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(2.0, 3.5))
+            # Instagram occasionally serves a "Something went wrong" error page.
+            # A single reload always fixes it — detect and retry once before giving up.
+            if await page.locator('text="Something went wrong"').count() > 0:
+                logger.info(f"@{username}: IG error page detected — reloading once")
+                await page.reload(wait_until="domcontentloaded")
+                await asyncio.sleep(random.uniform(2.0, 3.5))
 
-        # Aspetta che il profilo dipinga PRIMA di cercare i controlli DM.
-        # Root cause dei falsi "dm_restricted": la pagina non era ancora
-        # renderizzata → bottone Messaggio/menu non trovati → lead buttato come
-        # "non accetta DM". Ritorna subito se già dipinto (nessun tempo aggiunto
-        # nel caso normale, timing anti-detection invariato).
-        await self._wait_profile_rendered(page, username)
+            # Aspetta che il profilo dipinga PRIMA di cercare i controlli DM.
+            # Root cause dei falsi "dm_restricted": la pagina non era ancora
+            # renderizzata → bottone Messaggio/menu non trovati → lead buttato come
+            # "non accetta DM". Ritorna subito se già dipinto (nessun tempo aggiunto
+            # nel caso normale, timing anti-detection invariato).
+            await self._wait_profile_rendered(page, username)
 
-        # Dismiss modals that may appear on page load
-        await self._dismiss_ig_modals(page, username)
-
-        # Close Stories viewer if Instagram auto-opened it instead of profile
-        await self._dismiss_stories_if_open(page, username)
-
-        # Check if profile exists / account is private / page not available.
-        # IG serve la pagina "non disponibile" nella lingua della UI: il match
-        # deve essere multilingua (il vecchio check solo-EN lasciava proseguire
-        # il bot alla cieca con UI italiana — caso reale rubina.cartomanzia).
-        page_gone: bool = await page.evaluate(
-            "() => /sorry, this page isn|page isn't available|"
-            "spiacenti, questa pagina non|pagina non .{0,3}disponibile|"
-            "cette page n'est pas disponible|seite ist leider nicht verf/i"
-            ".test(document.body.innerText)"
-        )
-        if page_gone:
-            raise DMRestrictedError(f"Profile @{username} not found or unavailable")
-        # Profili morti a volte vengono REDIRETTI (es. al feed home) invece di
-        # mostrare l'errore: se l'URL non contiene più lo username non siamo
-        # sul profilo — fermarsi qui, non cercare bottoni sul feed.
-        if username.lower() not in page.url.lower():
-            raise DMRestrictedError(
-                f"Profile @{username} unavailable — IG redirected to {page.url}"
-            )
-
-        # Browse profile briefly (human-like) — duration scaled by per-account timing multiplier.
-        # Private profiles get a short browse: a human sees the lock icon and acts immediately.
-        # Fresh / low-warmup accounts get extended browse (90-360s) to dilute "login → DM" pattern.
-        # Detect private account via JS regex on body text — more reliable than
-        # DOM selectors which break when IG changes element structure or text.
-        # Pattern covers EN/IT/FR/DE and any capitalization variant.
-        is_private: bool = await page.evaluate(
-            "() => /this account is private|questo account.{0,10}privat|ce compte est priv|dieses konto ist privat/i"
-            ".test(document.body.innerText)"
-        )
-        # Sparse = public but fewer than 3 visible posts (new/inactive accounts).
-        # A human glances at the empty grid and moves straight to DM — no long scrolling.
-        is_sparse: bool = (not is_private) and await page.evaluate("""
-            () => {
-                const posts = document.querySelectorAll(
-                    'main article a[href*="/p/"], main article a[href*="/reel/"]'
-                );
-                return posts.length < 3;
-            }
-        """)
-        if is_private:
-            browse_time = random.uniform(1.5, 4.0) * self._tm
-            logger.info(f"@{username}: private profile — short browse {browse_time:.0f}s")
-        elif is_sparse:
-            browse_time = random.uniform(3.0, 8.0) * self._tm
-            logger.info(f"@{username}: sparse profile (<3 posts) — short browse {browse_time:.0f}s")
-        elif self._extended_browse:
-            browse_time = extended_pre_dm_browse_seconds() * self._tm
-            logger.info(f"Extended browse for fresh account: @{username} {browse_time:.0f}s")
-        else:
-            browse_time = pre_dm_browse_seconds() * self._tm
-            logger.debug(f"Browsing @{username}'s profile for {browse_time:.0f}s (tm={self._tm:.2f})")
-
-        # Attempt to view stories before scrolling profile (~35% of visits, non-private/sparse only).
-        # If stories open, watches briefly then closes them before continuing.
-        if not is_private and not is_sparse:
-            await self._maybe_view_stories(page, username)
-
-        await self._simulate_browsing(page, browse_time)
-
-        # Scroll back to top so the Message button is visible again
-        await page.evaluate("window.scrollTo({top: 0, behavior: 'smooth'})")
-        await asyncio.sleep(random.uniform(0.8, 1.5))
-
-        # Dismiss again — sleep mode popup can appear mid-browsing
-        await self._dismiss_ig_modals(page, username)
-
-        # Safety net: if stories are still open (e.g. _maybe_view_stories close failed),
-        # dismiss them now before attempting to find the Message button.
-        await self._dismiss_stories_if_open(page, username)
-
-        # Chiudi un eventuale dialog che copre il profilo (es. modale 'Link' dei
-        # link-in-bio aperto da un tap accidentale) prima di cercare Messaggio.
-        await self._dismiss_blocking_dialog(page, username)
-
-        # Click "Message" button (handles EN/IT locale and mutual-follow layout)
-        await self._click_message_button(page, username)
-
-        # Wait for navigation to DM thread (/direct/t/...)
-        navigated_to_direct = False
-        try:
-            await page.wait_for_url(lambda url: '/direct/' in url, timeout=8000)
-            navigated_to_direct = True
-            logger.debug(f"@{username}: navigato al thread DM ({page.url})")
-        except Exception:
-            logger.debug(f"@{username}: nessuna navigazione a /direct/ — controllo modal (URL: {page.url})")
-
-        # Wait for the UI to fully settle after navigation/modal open
-        await asyncio.sleep(random.uniform(2.5, 4.0))
-
-        # Dismiss any popup that appeared after DM thread opened
-        await self._dismiss_ig_modals(page, username)
-
-        # Find DM input — una sola attesa sull'unione dei selettori (no timeout
-        # impilati per locale: vedi _locate_dm_input).
-        msg_input, found_selector = await self._locate_dm_input(page)
-        # Anti-misinstradamento: verifica che il thread aperto sia DAVVERO del
-        # bersaglio prima di scrivere (vedi _verify_dm_thread).
-        thread_ok = msg_input is not None and await self._verify_dm_thread(page, username)
-
-        if msg_input is None or not thread_ok:
-            # Recovery incondizionato (una volta): input mancante OPPURE thread
-            # sbagliato aperto (click 'Messaggio' atterrato sull'inbox con un
-            # altro thread in cima). In entrambi i casi tornare al profilo con
-            # goto e ripartire è più robusto che riconoscere ogni singolo stato.
-            # (Casi reali: highlights viewer aperto da un click impreciso; e 26
-            # DM finiti nel thread di @giovanni1927 perché il thread non veniva
-            # verificato.)
-            reason = "DM input non trovato" if msg_input is None else "thread aperto NON suo"
-            logger.info(
-                f"@{username}: {reason} (URL: {page.url}) — "
-                f"torno al profilo e riprovo una volta"
-            )
-            await self._dismiss_stories_if_open(page, username)
-            await page.goto(profile_url, wait_until="domcontentloaded")
-            await asyncio.sleep(random.uniform(1.5, 2.5))
+            # Dismiss modals that may appear on page load
             await self._dismiss_ig_modals(page, username)
+
+            # Close Stories viewer if Instagram auto-opened it instead of profile
+            await self._dismiss_stories_if_open(page, username)
+
+            # Check if profile exists / account is private / page not available.
+            # IG serve la pagina "non disponibile" nella lingua della UI: il match
+            # deve essere multilingua (il vecchio check solo-EN lasciava proseguire
+            # il bot alla cieca con UI italiana — caso reale rubina.cartomanzia).
+            page_gone: bool = await page.evaluate(
+                "() => /sorry, this page isn|page isn't available|"
+                "spiacenti, questa pagina non|pagina non .{0,3}disponibile|"
+                "cette page n'est pas disponible|seite ist leider nicht verf/i"
+                ".test(document.body.innerText)"
+            )
+            if page_gone:
+                raise DMRestrictedError(f"Profile @{username} not found or unavailable")
+            # Profili morti a volte vengono REDIRETTI (es. al feed home) invece di
+            # mostrare l'errore: se l'URL non contiene più lo username non siamo
+            # sul profilo — fermarsi qui, non cercare bottoni sul feed.
+            if username.lower() not in page.url.lower():
+                raise DMRestrictedError(
+                    f"Profile @{username} unavailable — IG redirected to {page.url}"
+                )
+
+            # Browse profile briefly (human-like) — duration scaled by per-account timing multiplier.
+            # Private profiles get a short browse: a human sees the lock icon and acts immediately.
+            # Fresh / low-warmup accounts get extended browse (90-360s) to dilute "login → DM" pattern.
+            # Detect private account via JS regex on body text — more reliable than
+            # DOM selectors which break when IG changes element structure or text.
+            # Pattern covers EN/IT/FR/DE and any capitalization variant.
+            is_private: bool = await page.evaluate(
+                "() => /this account is private|questo account.{0,10}privat|ce compte est priv|dieses konto ist privat/i"
+                ".test(document.body.innerText)"
+            )
+            # Sparse = public but fewer than 3 visible posts (new/inactive accounts).
+            # A human glances at the empty grid and moves straight to DM — no long scrolling.
+            is_sparse: bool = (not is_private) and await page.evaluate("""
+                () => {
+                    const posts = document.querySelectorAll(
+                        'main article a[href*="/p/"], main article a[href*="/reel/"]'
+                    );
+                    return posts.length < 3;
+                }
+            """)
+            if is_private:
+                browse_time = random.uniform(1.5, 4.0) * self._tm
+                logger.info(f"@{username}: private profile — short browse {browse_time:.0f}s")
+            elif is_sparse:
+                browse_time = random.uniform(3.0, 8.0) * self._tm
+                logger.info(f"@{username}: sparse profile (<3 posts) — short browse {browse_time:.0f}s")
+            elif self._extended_browse:
+                browse_time = extended_pre_dm_browse_seconds() * self._tm
+                logger.info(f"Extended browse for fresh account: @{username} {browse_time:.0f}s")
+            else:
+                browse_time = pre_dm_browse_seconds() * self._tm
+                logger.debug(f"Browsing @{username}'s profile for {browse_time:.0f}s (tm={self._tm:.2f})")
+
+            # Attempt to view stories before scrolling profile (~35% of visits, non-private/sparse only).
+            # If stories open, watches briefly then closes them before continuing.
+            if not is_private and not is_sparse:
+                await self._maybe_view_stories(page, username)
+
+            await self._simulate_browsing(page, browse_time)
+
+            # Scroll back to top so the Message button is visible again
+            await page.evaluate("window.scrollTo({top: 0, behavior: 'smooth'})")
+            await asyncio.sleep(random.uniform(0.8, 1.5))
+
+            # Dismiss again — sleep mode popup can appear mid-browsing
+            await self._dismiss_ig_modals(page, username)
+
+            # Safety net: if stories are still open (e.g. _maybe_view_stories close failed),
+            # dismiss them now before attempting to find the Message button.
+            await self._dismiss_stories_if_open(page, username)
+
+            # Chiudi un eventuale dialog che copre il profilo (es. modale 'Link' dei
+            # link-in-bio aperto da un tap accidentale) prima di cercare Messaggio.
             await self._dismiss_blocking_dialog(page, username)
+
+            # Click "Message" button (handles EN/IT locale and mutual-follow layout)
             await self._click_message_button(page, username)
+
+            # Wait for navigation to DM thread (/direct/t/...)
+            navigated_to_direct = False
             try:
                 await page.wait_for_url(lambda url: '/direct/' in url, timeout=8000)
                 navigated_to_direct = True
                 logger.debug(f"@{username}: navigato al thread DM ({page.url})")
             except Exception:
-                logger.debug(f"@{username}: retry DM click did not navigate - checking modal (URL: {page.url})")
+                logger.debug(f"@{username}: nessuna navigazione a /direct/ — controllo modal (URL: {page.url})")
+
+            # Wait for the UI to fully settle after navigation/modal open
             await asyncio.sleep(random.uniform(2.5, 4.0))
+
+            # Dismiss any popup that appeared after DM thread opened
             await self._dismiss_ig_modals(page, username)
 
+            # Find DM input — una sola attesa sull'unione dei selettori (no timeout
+            # impilati per locale: vedi _locate_dm_input).
             msg_input, found_selector = await self._locate_dm_input(page)
+            # Anti-misinstradamento: verifica che il thread aperto sia DAVVERO del
+            # bersaglio prima di scrivere (vedi _verify_dm_thread).
             thread_ok = msg_input is not None and await self._verify_dm_thread(page, username)
 
-        if msg_input is None:
-            try:
-                path = f"data/debug_no_input_{username}.png"
-                await page.screenshot(path=path)
-                from app.services.notifier import send_telegram_photo
-                asyncio.create_task(send_telegram_photo(
-                    path,
-                    caption=f"Critical DM error: input non trovato per @{username}",
-                    level="error",
-                ))
-                logger.warning(f"@{username}: screenshot → data/debug_no_input_{username}.png")
-            except Exception:
-                pass
-            if not navigated_to_direct:
+            if msg_input is None or not thread_ok:
+                # Recovery incondizionato (una volta): input mancante OPPURE thread
+                # sbagliato aperto (click 'Messaggio' atterrato sull'inbox con un
+                # altro thread in cima). In entrambi i casi tornare al profilo con
+                # goto e ripartire è più robusto che riconoscere ogni singolo stato.
+                # (Casi reali: highlights viewer aperto da un click impreciso; e 26
+                # DM finiti nel thread di @giovanni1927 perché il thread non veniva
+                # verificato.)
+                reason = "DM input non trovato" if msg_input is None else "thread aperto NON suo"
+                logger.info(
+                    f"@{username}: {reason} (URL: {page.url}) — "
+                    f"torno al profilo e riprovo una volta"
+                )
+                await self._dismiss_stories_if_open(page, username)
+                await page.goto(profile_url, wait_until="domcontentloaded")
+                await asyncio.sleep(random.uniform(1.5, 2.5))
+                await self._dismiss_ig_modals(page, username)
+                await self._dismiss_blocking_dialog(page, username)
+                await self._click_message_button(page, username)
+                try:
+                    await page.wait_for_url(lambda url: '/direct/' in url, timeout=8000)
+                    navigated_to_direct = True
+                    logger.debug(f"@{username}: navigato al thread DM ({page.url})")
+                except Exception:
+                    logger.debug(f"@{username}: retry DM click did not navigate - checking modal (URL: {page.url})")
+                await asyncio.sleep(random.uniform(2.5, 4.0))
+                await self._dismiss_ig_modals(page, username)
+
+                msg_input, found_selector = await self._locate_dm_input(page)
+                thread_ok = msg_input is not None and await self._verify_dm_thread(page, username)
+
+            if msg_input is None:
+                try:
+                    path = f"data/debug_no_input_{username}.png"
+                    await page.screenshot(path=path)
+                    from app.services.notifier import send_telegram_photo
+                    asyncio.create_task(send_telegram_photo(
+                        path,
+                        caption=f"Critical DM error: input non trovato per @{username}",
+                        level="error",
+                    ))
+                    logger.warning(f"@{username}: screenshot → data/debug_no_input_{username}.png")
+                except Exception:
+                    pass
+                if not navigated_to_direct:
+                    raise DMSendError(
+                        f"@{username}: click 'Message' non ha aperto thread DM "
+                        f"(URL: {page.url}). Possibile miss del click o layout cambiato."
+                    )
+                raise DMSendError(f"@{username}: DM input non trovato dopo navigazione a /direct/")
+
+            # Hard gate anti-misinstradamento: l'input c'è ma il thread aperto NON
+            # risulta del bersaglio (nemmeno dopo il retry). NON scrivere: meglio un
+            # mancato invio (retry pulito, il chiamante non marca 'sent') che un DM
+            # consegnato alla persona sbagliata con il lead segnato 'sent' ma mai
+            # contattato. Vedi _verify_dm_thread.
+            if not thread_ok:
+                try:
+                    path = f"data/debug_wrong_thread_{username}.png"
+                    await page.screenshot(path=path)
+                    from app.services.notifier import send_telegram_photo
+                    asyncio.create_task(send_telegram_photo(
+                        path,
+                        caption=(
+                            f"Critical DM error: thread aperto NON di @{username} — "
+                            f"invio annullato per non scrivere alla persona sbagliata"
+                        ),
+                        level="error",
+                    ))
+                    logger.warning(
+                        f"@{username}: thread non verificato → data/debug_wrong_thread_{username}.png"
+                    )
+                except Exception:
+                    pass
                 raise DMSendError(
-                    f"@{username}: click 'Message' non ha aperto thread DM "
-                    f"(URL: {page.url}). Possibile miss del click o layout cambiato."
+                    f"@{username}: thread DM aperto non appartiene al bersaglio "
+                    f"(URL: {page.url}) — invio annullato (anti-misinstradamento)"
                 )
-            raise DMSendError(f"@{username}: DM input non trovato dopo navigazione a /direct/")
 
-        # Hard gate anti-misinstradamento: l'input c'è ma il thread aperto NON
-        # risulta del bersaglio (nemmeno dopo il retry). NON scrivere: meglio un
-        # mancato invio (retry pulito, il chiamante non marca 'sent') che un DM
-        # consegnato alla persona sbagliata con il lead segnato 'sent' ma mai
-        # contattato. Vedi _verify_dm_thread.
-        if not thread_ok:
+            logger.debug(f"@{username}: input trovato — selettore: {found_selector}")
+
+            # Small extra pause so the input is fully interactive before typing
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+
+            # Normalizza CRLF ma PRESERVA gli a-capo: _human_type li batte come
+            # Shift+Enter (Enter da solo invierebbe il DM). Collassa 3+ righe vuote.
+            import re as _re
+            message = message.replace('\r\n', '\n').replace('\r', '\n')
+            message = _re.sub(r'\n{3,}', '\n\n', message).strip()
+
+            # Type and send the message
+            await self._human_type(msg_input, message)
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+
+            # Pre-send safety check: abort if another worker already processed this follower.
+            # This must run just before pressing Enter so the DM is never delivered
+            # if the check fails. DMAbortedBeforeSendError is raised BEFORE Enter,
+            # so message.status='sending' was set but the DM was NOT delivered.
+            if pre_send_callback is not None:
+                should_proceed = await pre_send_callback()
+                if not should_proceed:
+                    raise DMAbortedBeforeSendError(
+                        f"@{username}: pre-send check returned False - aborting before Enter"
+                    )
+
+            # Send by pressing Enter — PUNTO DI NON RITORNO: da qui il DM e' partito.
+            await page.keyboard.press("Enter")
+
+            # Marca 'sending' ADESSO (non prima): qualunque fallimento sopra ha lasciato
+            # il messaggio in 'message_generated' -> retry pulito, mai 'sending'. La
+            # callback fa un commit DB; se fallisce non e' fatale (il DM e' gia' partito
+            # e il chiamante marchera' 'sent' al ritorno di send_dm).
+            if on_enter is not None:
+                try:
+                    await on_enter()
+                except Exception as e:
+                    logger.warning(f"@{username}: on_enter callback fallita (non-fatale): {e}")
+
+            await asyncio.sleep(random.uniform(1, 2))
+
+            logger.info(f"DM sent to @{username}")
+
+            # Post-DM dwell: linger in thread reading own message + scroll up to read past msgs.
+            # Eliminates the "send → instant close" pattern that looks scripted.
+            dwell = post_dm_dwell_seconds() * self._tm
             try:
-                path = f"data/debug_wrong_thread_{username}.png"
-                await page.screenshot(path=path)
-                from app.services.notifier import send_telegram_photo
-                asyncio.create_task(send_telegram_photo(
-                    path,
-                    caption=(
-                        f"Critical DM error: thread aperto NON di @{username} — "
-                        f"invio annullato per non scrivere alla persona sbagliata"
-                    ),
-                    level="error",
-                ))
-                logger.warning(
-                    f"@{username}: thread non verificato → data/debug_wrong_thread_{username}.png"
-                )
+                await self._post_dm_linger(page, dwell)
+            except Exception as e:
+                logger.debug(f"@{username}: post-DM dwell skipped ({e})")
+        finally:
+            # Il listener resta agganciato per TUTTA la visita del profilo (fino
+            # a qui), non solo per il goto: il GraphQL che IG spara arriva DOPO
+            # l'idratazione della SPA (mediana 3.99s, min 2.74, max 5.45 - misure
+            # reali 07/08). Il vecchio confine (solo il goto, che ritorna a
+            # domcontentloaded dopo ~1s) chiudeva la finestra ~3s prima che il
+            # dato arrivasse: in produzione non catturava quasi mai. Rimosso qui
+            # su OGNI uscita: successo, blocco IG, o qualunque eccezione.
+            try:
+                page.remove_listener("response", _on_response)
             except Exception:
                 pass
-            raise DMSendError(
-                f"@{username}: thread DM aperto non appartiene al bersaglio "
-                f"(URL: {page.url}) — invio annullato (anti-misinstradamento)"
-            )
-
-        logger.debug(f"@{username}: input trovato — selettore: {found_selector}")
-
-        # Small extra pause so the input is fully interactive before typing
-        await asyncio.sleep(random.uniform(0.5, 1.0))
-
-        # Normalizza CRLF ma PRESERVA gli a-capo: _human_type li batte come
-        # Shift+Enter (Enter da solo invierebbe il DM). Collassa 3+ righe vuote.
-        import re as _re
-        message = message.replace('\r\n', '\n').replace('\r', '\n')
-        message = _re.sub(r'\n{3,}', '\n\n', message).strip()
-
-        # Type and send the message
-        await self._human_type(msg_input, message)
-        await asyncio.sleep(random.uniform(0.5, 1.5))
-
-        # Pre-send safety check: abort if another worker already processed this follower.
-        # This must run just before pressing Enter so the DM is never delivered
-        # if the check fails. DMAbortedBeforeSendError is raised BEFORE Enter,
-        # so message.status='sending' was set but the DM was NOT delivered.
-        if pre_send_callback is not None:
-            should_proceed = await pre_send_callback()
-            if not should_proceed:
-                raise DMAbortedBeforeSendError(
-                    f"@{username}: pre-send check returned False - aborting before Enter"
-                )
-
-        # Send by pressing Enter — PUNTO DI NON RITORNO: da qui il DM e' partito.
-        await page.keyboard.press("Enter")
-
-        # Marca 'sending' ADESSO (non prima): qualunque fallimento sopra ha lasciato
-        # il messaggio in 'message_generated' -> retry pulito, mai 'sending'. La
-        # callback fa un commit DB; se fallisce non e' fatale (il DM e' gia' partito
-        # e il chiamante marchera' 'sent' al ritorno di send_dm).
-        if on_enter is not None:
-            try:
-                await on_enter()
-            except Exception as e:
-                logger.warning(f"@{username}: on_enter callback fallita (non-fatale): {e}")
-
-        await asyncio.sleep(random.uniform(1, 2))
-
-        logger.info(f"DM sent to @{username}")
-
-        # Post-DM dwell: linger in thread reading own message + scroll up to read past msgs.
-        # Eliminates the "send → instant close" pattern that looks scripted.
-        dwell = post_dm_dwell_seconds() * self._tm
-        try:
-            await self._post_dm_linger(page, dwell)
-        except Exception as e:
-            logger.debug(f"@{username}: post-DM dwell skipped ({e})")
 
     async def _human_type(self, element, text: str) -> None:
         """Delega a browser.human_input (estratto in M1). Il comportamento non cambia:

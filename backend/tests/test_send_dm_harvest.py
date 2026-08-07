@@ -100,6 +100,50 @@ def test_senza_graphql_la_cattura_e_none_e_non_esplode(monkeypatch):
     assert page.last_profile_capture is None
 
 
+def test_la_finestra_di_cattura_copre_lattesa_dopo_il_goto(monkeypatch):
+    """Il GraphQL del profilo lo spara la SPA DOPO l'idratazione (mediana
+    3.99s, min 2.74 - misure reali 07/08), non durante il `goto` (che ritorna
+    a domcontentloaded, ~1s). Qui il fake simula l'ordine temporale vero: il
+    `goto` non consegna nulla, la risposta arriva durante la PRIMA attesa che
+    send_dm fa comunque subito dopo (asyncio.sleep(1.5-3.0) gia' esistente).
+    Se il listener si stacca appena il goto ritorna, questa risposta arriva a
+    listener gia' rimosso e va persa — bug reale trovato dopo la chiusura del
+    modulo."""
+    fake = _FakePage()
+    fake._handlers = []
+
+    chiamate_sleep = []
+
+    async def _sleep_che_consegna_tardi(*a, **k):
+        chiamate_sleep.append(a)
+        if len(chiamate_sleep) == 1:
+            # Prima attesa dopo il goto: e' qui, non nel goto, che nella
+            # realta' arriva il GraphQL.
+            for h in list(fake._handlers):
+                await h(_FakeResponse("https://www.instagram.com/api/graphql", PAYLOAD))
+        return None
+    monkeypatch.setattr(asyncio, "sleep", _sleep_che_consegna_tardi)
+
+    async def _goto_che_non_consegna_nulla(url, **kwargs):
+        return None  # il goto NON spara la query: arriva dopo, non durante
+    fake.goto = _goto_che_non_consegna_nulla
+
+    page = InstagramPage(None)
+
+    async def _get_page():
+        return fake
+    page._get_page = _get_page
+    page._account_id = "acc-1"
+
+    try:
+        asyncio.run(page.send_dm(username="mario_rossi", message="ciao"))
+    except Exception:
+        pass  # l'invio fallisce sulla pagina finta: qui interessa la cattura
+
+    assert page.last_profile_capture is not None
+    assert page.last_profile_capture["username"] == "mario_rossi"
+
+
 def test_harvest_che_esplode_non_ferma_il_dm(monkeypatch):
     """Se il parsing del payload GraphQL solleva, la cattura resta None ma il
     DM non deve fallire PER COLPA dell'harvest: e' il meccanismo che garantisce
