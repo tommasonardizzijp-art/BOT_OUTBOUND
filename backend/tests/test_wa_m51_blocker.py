@@ -309,3 +309,114 @@ async def test_t4_la_scadenza_del_timer_toglie_ancora_il_cooldown(db_session, mo
 
     assert numero.id in rilasciati
     assert numero.status == WaNumberStatus.active
+
+
+# ---------------------------------------------------------------------------
+# T5 — nessuna campagna running senza worker
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def _enqueue_spia(monkeypatch):
+    accodate: list[str] = []
+
+    async def _finta_enqueue(campaign_id: str) -> int:
+        accodate.append(campaign_id)
+        return 1
+
+    monkeypatch.setattr("app.workers.wa_worker.enqueue_wa_workers", _finta_enqueue)
+    return accodate
+
+
+@pytest.mark.asyncio
+async def test_t5_supervisore_riaccoda_una_running_con_lavoro(db_session, _enqueue_spia):
+    """Dopo un riavvio del PC (o un resume da kill-switch) la campagna resta
+    running senza nessun job: la guardia di cold-start copre solo le campagne
+    Instagram. Il supervisore se ne accorge e riaccoda."""
+    from app.models.wa import WaCampaignStatus
+    from app.workers import cron_worker
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    await db_session.commit()
+
+    esito = await cron_worker.wa_campaign_supervisor({})
+
+    assert ctx["campaign"].id in _enqueue_spia
+    assert esito["riaccodate"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_t5_supervisore_non_riaccoda_senza_lavoro(db_session, _enqueue_spia):
+    """Se non c'e' nessuna riga eleggibile non si riaccoda: aprire il browser
+    ogni quindici minuti per scoprire che non c'e' niente da fare e' proprio il
+    rumore che il pacing anti-detect esiste per evitare."""
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from app.workers import cron_worker
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    ctx["cc"].status = WaContactStatus.completed
+    ctx["cc"].next_action_at = None
+    await db_session.commit()
+
+    await cron_worker.wa_campaign_supervisor({})
+
+    assert ctx["campaign"].id not in _enqueue_spia
+
+
+@pytest.mark.asyncio
+async def test_t5_supervisore_ignora_appuntamenti_futuri(db_session, _enqueue_spia):
+    """Una riga con next_action_at nel futuro non e' lavoro pronto: si riaccoda
+    quando arriva il suo turno, non prima."""
+    from datetime import timedelta
+
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from app.workers import cron_worker
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    ctx["cc"].status = WaContactStatus.in_sequence
+    ctx["cc"].next_action_at = datetime.utcnow() + timedelta(days=2)
+    await db_session.commit()
+
+    await cron_worker.wa_campaign_supervisor({})
+
+    assert ctx["campaign"].id not in _enqueue_spia
+
+
+@pytest.mark.asyncio
+async def test_t5_supervisore_ignora_numero_non_attivo(db_session, _enqueue_spia):
+    """Su un numero caduto non si riaccoda: il worker rifiuterebbe l'invio e
+    non rischedulerebbe, quindi l'unico effetto sarebbe rumore nei log."""
+    from app.models.wa import WaCampaignStatus, WaNumberStatus
+    from app.workers import cron_worker
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    ctx["number"].status = WaNumberStatus.qr_required
+    await db_session.commit()
+
+    await cron_worker.wa_campaign_supervisor({})
+
+    assert ctx["campaign"].id not in _enqueue_spia
+
+
+@pytest.mark.asyncio
+async def test_t5_supervisore_muto_a_canale_fermo(db_session, monkeypatch, _enqueue_spia):
+    """Kill-switch attivo: non si riaccoda niente. Il job uscirebbe subito con
+    motivo wa_halted senza rischedulare."""
+    from app.models.wa import WaCampaignStatus
+    from app.services import bot_state_service
+    from app.workers import cron_worker
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    await db_session.commit()
+
+    async def _fermo(db=None):
+        return True
+    monkeypatch.setattr(bot_state_service, "is_wa_halted", _fermo)
+
+    await cron_worker.wa_campaign_supervisor({})
+
+    assert _enqueue_spia == []

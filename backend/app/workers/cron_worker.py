@@ -153,6 +153,91 @@ async def wa_reply_scan(ctx: dict) -> dict:
     return esito
 
 
+async def wa_campaign_supervisor(ctx: dict) -> dict:
+    """Nessuna campagna 'running' deve restare senza il suo job di invio.
+
+    "running senza worker" era uno stato che il sistema non sapeva ne'
+    rappresentare ne' rilevare, e ci si arrivava da quattro strade diverse
+    (review 07/08): l'avvio dalla UI (chiuso a monte, ora `avvia()` accoda), un
+    riavvio del PC (la guardia di cold-start in work_enqueue filtra su
+    `Campaign`, cioe' solo Instagram), un `POST /wa/ops/resume` dopo il
+    kill-switch (il task era uscito senza rischedulare, perche' 'wa_halted' e'
+    un motivo terminale per wa_send_task), e un job perso per un blip di Redis.
+    Questo cron e' la rete sotto tutte e quattro.
+
+    Non serve ispezionare Redis per sapere se il job c'e': ARQ scarta da solo
+    un enqueue con un `_job_id` gia' presente. E' la stessa proprieta' su cui
+    conta gia' wa_send_job_id ("un solo job di invio per numero"), qui usata al
+    contrario -- si riaccoda e basta, e se il job c'era non succede niente.
+
+    Il filtro "almeno una riga eleggibile ADESSO" non e' un'ottimizzazione: e'
+    cio' che impedisce di aprire il browser ogni quindici minuti su una
+    campagna che non ha piu' niente da fare, cioe' rumore su un canale il cui
+    pacing esiste per non farsi notare. La condizione ricalca la query di
+    eleggibilita' del contratto 7.3 (wa_worker.claim_next_wa_contact): se
+    cambia li', va cambiata anche qui.
+    """
+    from datetime import datetime, timedelta
+
+    from loguru import logger
+    from sqlalchemy import or_, select
+
+    from app.config import settings
+    from app.database import AsyncSessionLocal
+    from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                               WaContact, WaContactStatus, WaNumber, WaNumberStatus)
+    from app.services import bot_state_service
+    from app.workers.wa_worker import enqueue_wa_workers
+
+    esito = {"controllate": 0, "riaccodate": 0}
+
+    if await bot_state_service.is_wa_halted():
+        # A canale fermo il job uscirebbe subito con motivo 'wa_halted' senza
+        # rischedulare: l'unico effetto sarebbe una riga di log per campagna,
+        # ogni quindici minuti, per tutta la durata dell'incidente.
+        return esito
+
+    now = datetime.utcnow()
+    stale_cutoff = now - timedelta(minutes=int(settings.wa_lock_timeout_min))
+
+    async with AsyncSessionLocal() as db:
+        righe = (await db.execute(
+            select(WaCampaign.id)
+            .join(WaNumber, WaNumber.id == WaCampaign.wa_number_id)
+            .join(WaCampaignContact, WaCampaignContact.campaign_id == WaCampaign.id)
+            .join(WaContact, WaContact.id == WaCampaignContact.contact_id)
+            .where(
+                WaCampaign.status == WaCampaignStatus.running,
+                WaNumber.status == WaNumberStatus.active,
+                WaCampaignContact.status.in_([WaContactStatus.queued,
+                                              WaContactStatus.in_sequence]),
+                WaCampaignContact.next_action_at.is_not(None),
+                WaCampaignContact.next_action_at <= now,
+                or_(WaCampaignContact.locked_by.is_(None),
+                    WaCampaignContact.locked_at < stale_cutoff),
+                WaCampaignContact.failure_count < int(settings.wa_max_failures_per_contact),
+                WaContact.opted_out.is_(False),
+                WaContact.do_not_contact.is_(False),
+            )
+            .distinct()
+        )).all()
+
+    for (campaign_id,) in righe:
+        esito["controllate"] += 1
+        try:
+            if await enqueue_wa_workers(campaign_id):
+                esito["riaccodate"] += 1
+                logger.warning(f"[WA] supervisore: campagna {campaign_id} era "
+                               "running senza job di invio, riaccodata")
+        except Exception as exc:
+            # Un guasto su una campagna non deve fermare le altre: stesso
+            # pattern per-elemento gia' in uso in wa_session_healthcheck.
+            logger.error(f"[WA] supervisore: riaccodamento di {campaign_id} "
+                         f"fallito ({type(exc).__name__})")
+
+    return esito
+
+
 class CronWorkerSettings:
     functions = []
     cron_jobs = [
@@ -168,6 +253,10 @@ class CronWorkerSettings:
         cron(telegram_commands, minute=set(range(60))),
         cron(wa_session_healthcheck, minute={0, 30}, hour=set(range(9, 20))),
         cron(wa_reply_scan, minute={15, 45}, hour=set(range(9, 20))),
+        # Sfasato rispetto a health-check (0/30) e reply-scan (15/45): i tre
+        # cron WA competono per lo stesso lucchetto profilo, e farli partire
+        # insieme significherebbe che due su tre trovano occupato e saltano.
+        cron(wa_campaign_supervisor, minute={10, 25, 40, 55}, hour=set(range(9, 20))),
     ]
     queue_name = ARQ_CRON_QUEUE
     redis_settings = arq_redis_settings()
