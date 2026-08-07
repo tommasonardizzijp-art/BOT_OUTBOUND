@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from app.database import Base
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, ENRICHMENT_BIO
 from app.models.follower import Follower, FollowerStatus
 import app.models.account  # noqa: F401
 import app.models.campaign_account  # noqa: F401
@@ -119,6 +119,7 @@ def _setup(monkeypatch, outcomes: list[str]):
                 target_username="target",
                 status=CampaignStatus.scraping,
                 messaging_enabled=False,
+                enrichment_level=ENRICHMENT_BIO,
             ))
             for i in range(4):
                 db.add(Follower(

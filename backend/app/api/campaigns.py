@@ -634,6 +634,13 @@ async def stop_list(campaign_id: str, db: AsyncSession = Depends(get_db)):
 @router.post("/{campaign_id}/bios/start", response_model=CampaignResponse)
 async def start_bios(campaign_id: str, body: PhaseStartBody | None = None, db: AsyncSession = Depends(get_db)):
     campaign = await _get_or_404(campaign_id, db)
+    from app.services.scrape_bios import enrichment_blocca_la_fase_bio
+    if enrichment_blocca_la_fase_bio(campaign):
+        raise HTTPException(
+            status_code=400,
+            detail="Questa campagna ha livello di arricchimento 'none': non apre i profili. "
+                   "Alza il livello a 'bio' o 'contacts' per avviare la Fase Bio.",
+        )
     if campaign.status not in (
         CampaignStatus.ready, CampaignStatus.paused, CampaignStatus.error, CampaignStatus.scraping_break,
     ):
