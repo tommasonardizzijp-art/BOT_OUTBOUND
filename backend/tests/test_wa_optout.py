@@ -39,6 +39,43 @@ def test_looks_like_stop_su_none_non_solleva():
     assert wa_optout.looks_like_stop(None) is False
 
 
+@pytest.mark.parametrize("testo", [
+    "mi basta sapere se siete aperti",
+    "basta poco per convincermi",
+    "basta che mi confermiate l'orario",
+])
+def test_looks_like_stop_basta_ambigua_in_frase_lunga_non_e_optout(testo):
+    """Review G6 (07/08): 'basta' e' comunissima in frasi che non sono un
+    opt-out. Un falso opt-out e' permanente e irreversibile -- il costo di
+    sbagliare qui e' molto peggio del costo di chiedere una revisione umana."""
+    assert wa_optout.looks_like_stop(testo) is False
+
+
+@pytest.mark.parametrize("testo", [
+    "mi basta sapere se siete aperti",
+    "basta poco per convincermi",
+])
+def test_looks_like_ambiguous_stop_needs_review_su_frase_lunga(testo):
+    assert wa_optout.looks_like_ambiguous_stop_needs_review(testo) is True
+
+
+@pytest.mark.parametrize("testo", [
+    "basta",
+    "  basta  ",
+    "ok grazie",
+    "STOP",
+    "",
+])
+def test_looks_like_ambiguous_stop_needs_review_non_scatta(testo):
+    """Ne' su un 'basta' gia' gestito da looks_like_stop (corto, opt-out
+    diretto), ne' su testi senza la parola ambigua."""
+    assert wa_optout.looks_like_ambiguous_stop_needs_review(testo) is False
+
+
+def test_looks_like_ambiguous_stop_needs_review_su_none_non_solleva():
+    assert wa_optout.looks_like_ambiguous_stop_needs_review(None) is False
+
+
 @pytest.mark.asyncio
 async def test_persist_wa_optout_ferma_tutte_le_campagne_del_tenant(db_session):
     from app.models.tenant import Tenant

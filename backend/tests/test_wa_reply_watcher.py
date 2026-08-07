@@ -182,6 +182,46 @@ async def test_process_row_optout(db_session):
 
 
 @pytest.mark.asyncio
+async def test_process_row_basta_ambigua_lunga_non_fa_optout_ma_alerta(db_session, monkeypatch):
+    """Review G6 (07/08): 'basta' in una frase lunga non e' un opt-out
+    automatico -- la sequenza si ferma comunque (una risposta qualsiasi la
+    ferma), ma il contatto NON va marcato opted_out/do_not_contact, e deve
+    partire un alert per la revisione umana."""
+    from app.services.wa_reply_watcher import process_chat_row
+    from app.models.wa import WaCampaignContact, WaContactStatus
+    from app.services import notifier
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    chiamate = []
+
+    async def _spy(msg, **kw):
+        chiamate.append(msg)
+
+    monkeypatch.setattr(notifier, "send_telegram", _spy)
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    campagna, step = await make_campaign(db_session, tenant, numero)
+    cc = await make_campaign_contact(db_session, campagna, contatto,
+                                      status=WaContactStatus.in_sequence, current_step=0)
+    await db_session.commit()
+
+    esito = await process_chat_row(
+        db_session, tenant_id=tenant.id, wa_number_id=numero.id,
+        row=_row("Marco", preview="mi basta sapere se siete aperti"))
+    assert esito["esito"] == "replied"
+
+    await db_session.refresh(contatto)
+    await db_session.refresh(cc)
+    assert contatto.opted_out is False
+    assert cc.status == WaContactStatus.replied
+    assert len(chiamate) == 1
+    assert "basta" in chiamate[0].lower()
+
+
+@pytest.mark.asyncio
 async def test_process_row_replied(db_session):
     from app.services.wa_reply_watcher import process_chat_row
     from app.models.wa import WaCampaignContact, WaContactStatus

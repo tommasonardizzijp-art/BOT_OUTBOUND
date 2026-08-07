@@ -364,7 +364,15 @@ class Settings(BaseSettings):
     # Stesso valore di campaign_orchestrator.LOCK_TIMEOUT_MINUTES.
     wa_lock_timeout_min: int = 20
     wa_max_failures_per_contact: int = 3        # SDD 8.2
-    wa_stop_words: str = "stop,basta,cancellami,non scrivermi,unsubscribe,rimuovimi"
+    # Parole DURE: opt-out immediato, nessun caso ambiguo in italiano comune
+    # (review G6, 07/08). "basta" spostata sotto: e' comunissima in frasi che
+    # non sono un opt-out ("mi basta sapere se siete aperti").
+    wa_stop_words: str = "stop,cancellami,non scrivermi,unsubscribe,rimuovimi"
+    # Parole AMBIGUE: opt-out immediato SOLO se il messaggio e' sostanzialmente
+    # quella parola sola (wa_optout.looks_like_stop, testo normalizzato <= 3
+    # parole); altrimenti nessun opt-out automatico -- vedi
+    # looks_like_ambiguous_stop_needs_review per la segnalazione umana.
+    wa_stop_words_ambigue: str = "basta"
     wa_global_daily_cap: int = 200              # SDD Q70, safety valve macchina
 
     # --- Canale WhatsApp: reply-watcher + opt-out (M4) --------------------

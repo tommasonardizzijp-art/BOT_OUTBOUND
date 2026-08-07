@@ -19,28 +19,62 @@ from app.config import settings
 from app.utils import events
 
 
-def _stop_pattern() -> re.Pattern:
+def _pattern(parole_csv: str) -> re.Pattern:
     """Parole/frasi intere, case-insensitive. \\b su entrambi i lati: senza,
     'stopper' verrebbe letto come uno STOP e un cliente perderebbe un
     contatto per una parola qualsiasi."""
-    parole = [p.strip() for p in (settings.wa_stop_words or "").split(",") if p.strip()]
+    parole = [p.strip() for p in (parole_csv or "").split(",") if p.strip()]
     if not parole:
         return re.compile(r"(?!x)x")  # non matcha mai: lista vuota = nessun STOP
     alternative = "|".join(re.escape(p) for p in parole)
     return re.compile(rf"\b({alternative})\b", re.IGNORECASE)
 
 
+_SOGLIA_PAROLE_AMBIGUA = 3
+
+
 def looks_like_stop(text) -> bool:
-    """True se il testo contiene una parola di opt-out. Non solleva MAI:
-    finisce dentro una guardia di sicurezza, e un'eccezione qui
-    trasformerebbe un controllo in un crash intermittente."""
+    """True se il testo e' un opt-out da trattare come immediato: una parola
+    DURA in qualunque punto del messaggio, oppure una parola AMBIGUA (es.
+    'basta') quando il messaggio e' sostanzialmente quella parola sola
+    (testo normalizzato <= 3 parole). Un'ambigua dentro un messaggio piu'
+    lungo ('mi basta sapere se siete aperti') NON e' opt-out qui -- vedi
+    looks_like_ambiguous_stop_needs_review (review G6, 07/08: un falso
+    opt-out e' un cliente perso per sempre, chi vuole uscire davvero puo'
+    sempre ripetere con una parola dura, e' la CTA che gli mandiamo noi).
+
+    Non solleva MAI: finisce dentro una guardia di sicurezza, e un'eccezione
+    qui trasformerebbe un controllo in un crash intermittente."""
     if not isinstance(text, str) or not text.strip():
         return False
     try:
-        return bool(_stop_pattern().search(text))
+        if _pattern(settings.wa_stop_words).search(text):
+            return True
+        if _pattern(settings.wa_stop_words_ambigue).search(text):
+            return len(text.strip().split()) <= _SOGLIA_PAROLE_AMBIGUA
+        return False
     except Exception as exc:  # pragma: no cover - difesa, non logica
         logger.error(f"looks_like_stop: pattern non valido ({exc}) -- "
                      "trattato come NESSUNO stop, il chiamante ha la sentinella")
+        return False
+
+
+def looks_like_ambiguous_stop_needs_review(text) -> bool:
+    """True se il testo contiene una parola AMBIGUA ma il messaggio e'
+    troppo lungo per l'opt-out automatico di looks_like_stop -- non si marca
+    nulla, ma qualcuno deve leggerlo a mano (il costo di ignorarlo del tutto
+    e' lo stesso identico falso-opt-out che questa funzione esiste per
+    evitare, solo spostato da 'automatico e silenzioso' a 'mai visto da
+    nessuno'). Stessa garanzia di non-sollevare di looks_like_stop."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    try:
+        if not _pattern(settings.wa_stop_words_ambigue).search(text):
+            return False
+        return len(text.strip().split()) > _SOGLIA_PAROLE_AMBIGUA
+    except Exception as exc:  # pragma: no cover - difesa, non logica
+        logger.error(f"looks_like_ambiguous_stop_needs_review: pattern non "
+                     f"valido ({exc})")
         return False
 
 
