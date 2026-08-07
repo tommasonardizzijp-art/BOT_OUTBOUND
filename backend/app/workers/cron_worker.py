@@ -238,6 +238,24 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     return esito
 
 
+async def release_stale_wa_profile_locks(ctx: dict) -> dict:
+    """Pulizia proattiva di wa:profile-lock:* (wa_profile_lock.release_stale),
+    a tutte le ore -- a differenza di wa_session_healthcheck, non apre
+    nessun browser e non compete per il lock stesso, quindi non ha motivo
+    di stare dentro la finestra attiva: un worker puo' morire alle 3 di
+    notte e lasciare il canale bloccato fino a 90 min senza che nessuno se
+    ne accorga prima delle 9. Rationale della soglia nel docstring di
+    release_stale in wa_profile_lock.py."""
+    from loguru import logger
+
+    from app.services import wa_profile_lock
+
+    rilasciati = await wa_profile_lock.release_stale()
+    if rilasciati:
+        logger.info(f"[WA] cron lock stale: {rilasciati} lock profilo rilasciati")
+    return {"lock_profilo_rilasciati": rilasciati}
+
+
 class CronWorkerSettings:
     functions = []
     cron_jobs = [
@@ -268,6 +286,11 @@ class CronWorkerSettings:
         # per-campagna: un tenant con orari diversi sarebbe rimasto del tutto
         # fuori dalla rete.
         cron(wa_campaign_supervisor, minute={10, 25, 40, 55}),
+        # Sfasato dagli altri tre cron WA (0/30, 15/45, 10/25/40/55): non
+        # apre browser ne' tocca il lock, quindi non c'e' motivo di
+        # allinearlo, ma restare fuori dai loro minuti rende i log piu'
+        # facili da leggere in sequenza.
+        cron(release_stale_wa_profile_locks, minute={5, 20, 35, 50}),
     ]
     queue_name = ARQ_CRON_QUEUE
     redis_settings = arq_redis_settings()

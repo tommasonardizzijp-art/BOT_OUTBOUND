@@ -734,19 +734,29 @@ async def _redis_o_skip():
 
 
 @pytest.mark.asyncio
-async def test_d20_due_enqueue_job_stesso_job_id_arq_scarta_il_duplicato(db_session, _redis_o_skip):
+async def test_d20_due_enqueue_job_stesso_job_id_arq_scarta_il_duplicato(db_session, _redis_o_skip, monkeypatch):
     """Adversarial #20: un solo job attivo per numero -- niente doppia
-    mini-sessione parallela sullo stesso numero (romperebbe il pacing)."""
+    mini-sessione parallela sullo stesso numero (romperebbe il pacing).
+
+    Il secondo enqueue scartato deve anche loggarsi: prima di questo fix
+    tornava 'accodati:0' in silenzio, indistinguibile da un guasto vero
+    (collaudo A3, 07/08 -- vedi docstring in enqueue_wa_workers). Spy
+    diretto sul logger, non caplog: loguru non e' agganciato allo stdlib
+    logging in questo repo, caplog non vedrebbe nulla."""
     import arq
     from app.services.work_enqueue import arq_redis_settings
 
     ctx = await _scenario_claim(db_session)
     await db_session.commit()
 
+    messaggi = []
+    monkeypatch.setattr(wa_worker.logger, "info", lambda msg, *a, **k: messaggi.append(msg))
+
     n1 = await wa_worker.enqueue_wa_workers(ctx["campaign"].id)
     n2 = await wa_worker.enqueue_wa_workers(ctx["campaign"].id)
     assert n1 == 1
     assert n2 == 0
+    assert any("gia' schedulato" in m for m in messaggi)
 
     redis = await arq.create_pool(arq_redis_settings())
     try:
