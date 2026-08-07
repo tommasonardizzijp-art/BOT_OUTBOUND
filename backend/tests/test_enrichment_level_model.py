@@ -11,12 +11,25 @@ def test_livelli_dichiarati():
 
 
 def test_default_none_sulle_campagne_nuove():
-    c = Campaign(name="test")
     # SQLAlchemy applica i default di colonna solo al flush, non al costruttore
     # (stesso pattern gia' noto in questa codebase, vedi
     # test_template_mode_schema.py::test_campaign_model_defaults per ai_enabled):
-    # pre-flush l'attributo resta None, post-flush/DB e' sempre 'none'.
-    assert c.enrichment_level == ENRICHMENT_NONE or c.enrichment_level is None
+    # per verificare il default reale serve un flush vero, non solo l'oggetto
+    # appena costruito -- altrimenti l'assert passerebbe anche con un default
+    # sbagliato dichiarato sulla colonna. Engine sqlite in-memory dedicato:
+    # Campaign non ha ForeignKey, non serve lo schema completo dell'app.
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.database import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine, tables=[Campaign.__table__])
+    Session = sessionmaker(bind=engine)
+    with Session() as s:
+        c = Campaign(name="test")
+        s.add(c)
+        s.flush()
+        assert c.enrichment_level == ENRICHMENT_NONE
 
 
 def test_il_livello_e_indipendente_dal_motore():
