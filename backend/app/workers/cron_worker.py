@@ -2,8 +2,10 @@
 
 Run: arq app.workers.cron_worker.CronWorkerSettings
 """
+import httpx
 from arq import cron
 
+from app.config import settings
 from app.services.work_enqueue import ARQ_CRON_QUEUE, arq_redis_settings
 from app.services import wa_profile_lock, wa_reply_watcher
 from app.services.wa_session import check_session
@@ -238,6 +240,38 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     return esito
 
 
+async def wa_deadman_ping(ctx: dict) -> dict:
+    """Dead-man's switch esterno (review P6, 07/08): se il backend/cron gira,
+    manda un ping a un servizio esterno che aspetta di sentirsi contattato a
+    intervalli regolari. Se il PC si spegne, il ping smette di arrivare e
+    l'allarme parte DAL SERVIZIO ESTERNO, non da questo processo -- e' l'unico
+    modo che un health-check interno non puo' dare: un processo morto non puo'
+    avvisare che e' morto.
+
+    wa_deadman_ping_url vuoto = disabilitato (fail-safe: nessun URL
+    configurato non deve fallire ne' loggare rumore a ogni giro)."""
+    from loguru import logger
+
+    url = (settings.wa_deadman_ping_url or "").strip()
+    if not url:
+        logger.debug("[WA] dead-man's switch: WA_DEADMAN_PING_URL non "
+                     "configurato, ping saltato")
+        return {"inviato": False, "motivo": "non_configurato"}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+        return {"inviato": True}
+    except Exception as exc:
+        # Un ping fallito NON deve fermare il cron worker (e' proprio
+        # l'assenza di ping, rilevata dal servizio esterno, il segnale che
+        # conta): si logga e basta, il prossimo giro riprova.
+        logger.warning(f"[WA] dead-man's switch: ping fallito "
+                       f"({type(exc).__name__}: {exc})")
+        return {"inviato": False, "motivo": type(exc).__name__}
+
+
 async def release_stale_wa_profile_locks(ctx: dict) -> dict:
     """Pulizia proattiva di wa:profile-lock:* (wa_profile_lock.release_stale),
     a tutte le ore -- a differenza di wa_session_healthcheck, non apre
@@ -291,6 +325,11 @@ class CronWorkerSettings:
         # allinearlo, ma restare fuori dai loro minuti rende i log piu'
         # facili da leggere in sequenza.
         cron(release_stale_wa_profile_locks, minute={5, 20, 35, 50}),
+        # Ogni 5 min, a tutte le ore: il dead-man's switch deve sapere che il
+        # processo e' vivo anche fuori dalla finestra attiva del canale --
+        # se il PC si spegne alle 3 di notte, l'allarme deve partire quando
+        # succede, non aspettare le 9.
+        cron(wa_deadman_ping, minute=set(range(0, 60, 5))),
     ]
     queue_name = ARQ_CRON_QUEUE
     redis_settings = arq_redis_settings()

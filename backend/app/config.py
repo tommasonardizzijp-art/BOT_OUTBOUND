@@ -383,6 +383,14 @@ class Settings(BaseSettings):
     # quello e' un warning da leggere con calma, questo ferma il canale.
     wa_optout_breaker_min_invii: int = 10
     wa_optout_breaker_pct: float = 25.0
+    # Dead-man's switch esterno (review P6, 07/08): il backend gira sul PC
+    # di casa -- se il PC si spegne, l'health-check che dovrebbe avvisare e'
+    # dentro il processo morto, non avvisa nessuno. Un ping periodico verso
+    # un servizio esterno (healthchecks.io o simile, URL con token univoco
+    # generato LORO) e' l'unico allarme che sopravvive al processo che
+    # dovrebbe generarlo. Vuoto = disabilitato, fail-safe: nessun URL
+    # configurato non deve rompere il boot ne' i cron esistenti.
+    wa_deadman_ping_url: str = ""
 
     # --- Canale WhatsApp: reply-watcher + opt-out (M4) --------------------
     # Lucchetto profilo Chromium. Il conto vero di una mini-sessione nel caso
