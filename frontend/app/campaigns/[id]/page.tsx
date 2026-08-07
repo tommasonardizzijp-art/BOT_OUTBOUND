@@ -353,9 +353,11 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
 
   const router = useRouter()
 
-  // M10: A/B stats (only poll if campaign has template_b)
+  // M10: statistiche per variante (A/B/C/D). Si interrogano anche con un solo
+  // template: il pannello tiene quattro caselle fisse e le varianti non usate
+  // restano vuote invece di far cambiare layout alla card.
   const { data: abStats } = useSWR<ABStats>(
-    campaign?.message_template_b ? `ab-stats-${id}` : null,
+    campaign?.messaging_enabled ? `ab-stats-${id}` : null,
     () => api.campaigns.abStats(id),
     { refreshInterval: 15000 }
   )
@@ -802,6 +804,15 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
   const accountsLoaded = allAccounts !== undefined
 
   const hasAssignedAccounts = (campaignAccounts?.filter(ca => ca.is_active) ?? []).length > 0
+
+  // Lettere delle varianti compilate: badge "A/B", "A/B/C/D", ... (nessun badge se
+  // c'e' solo la A: non e' un test, e' un template unico).
+  const variantiAttive = [
+    campaign.base_message_template ? 'A' : null,
+    campaign.message_template_b ? 'B' : null,
+    campaign.message_template_c ? 'C' : null,
+    campaign.message_template_d ? 'D' : null,
+  ].filter(Boolean) as string[]
 
   return (
     <div className="space-y-6">
@@ -1493,8 +1504,10 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               <span className={`ml-2 text-xs px-2 py-0.5 rounded ${campaign.ai_enabled ? 'bg-purple-900 text-purple-300' : 'bg-gray-800 text-gray-400'}`}>
                 {campaign.ai_enabled ? '🤖 AI attiva' : '📋 Template'}
               </span>
-              {campaign.message_template_b && (
-                <Badge variant="outline" className="ml-2 text-xs border-purple-700 text-purple-400">A/B</Badge>
+              {variantiAttive.length > 1 && (
+                <Badge variant="outline" className="ml-2 text-xs border-purple-700 text-purple-400">
+                  {variantiAttive.join('/')}
+                </Badge>
               )}
             </CardTitle>
             {/* Template/AI editabili in QUALSIASI stato (anche running): il backend li
@@ -1520,7 +1533,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           </div>
         </CardHeader>
         <CardContent>
-          {campaign.message_template_b && (
+          {variantiAttive.length > 1 && (
             <p className="text-xs text-gray-500 mb-1">Template A</p>
           )}
           {campaign.messaging_enabled && campaign.base_message_template ? (
@@ -1528,13 +1541,20 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           ) : (
             <p className="text-sm text-gray-500">Messaggistica disattivata. I lead restano disponibili per export o attivazione successiva.</p>
           )}
-          {campaign.message_template_b && (
-            <>
+          {/* B/C/D: mostrate solo se compilate — il testo di una variante inesistente
+              non e' una casella vuota da tenere, e' rumore. Le caselle fisse stanno
+              nel pannello dei risultati sotto. */}
+          {([
+            ['Template B', campaign.message_template_b],
+            ['Template C', campaign.message_template_c],
+            ['Template D', campaign.message_template_d],
+          ] as const).map(([label, testo]) => testo ? (
+            <div key={label}>
               <Separator className="my-3 bg-gray-800" />
-              <p className="text-xs text-gray-500 mb-1">Template B</p>
-              <p className="text-sm text-gray-300 whitespace-pre-wrap">{campaign.message_template_b}</p>
-            </>
-          )}
+              <p className="text-xs text-gray-500 mb-1">{label}</p>
+              <p className="text-sm text-gray-300 whitespace-pre-wrap">{testo}</p>
+            </div>
+          ) : null)}
           {campaign.ai_prompt_context && (
             <>
               <Separator className="my-3 bg-gray-800" />
@@ -1545,28 +1565,31 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         </CardContent>
       </Card>
 
-      {/* M10: A/B stats — shown when template_b is active and messages exist */}
-      {abStats && (abStats.variant_a || abStats.variant_b) && (() => {
-        const aRate = abStats.variant_a?.reply_rate ?? 0
-        const bRate = abStats.variant_b?.reply_rate ?? 0
-        const aSent = abStats.variant_a?.sent ?? 0
-        const bSent = abStats.variant_b?.sent ?? 0
-        // Highlight a winner only when both variants have at least 5 sent messages
-        const winner = aSent >= 5 && bSent >= 5
-          ? (aRate > bRate ? 'a' : bRate > aRate ? 'b' : null)
+      {/* M10: risultati per variante — quattro caselle fisse (A/B/C/D) */}
+      {abStats && (abStats.variant_a || abStats.variant_b || abStats.variant_c || abStats.variant_d) && (() => {
+        const variants = [
+          { key: 'a' as const, label: 'Template A', data: abStats.variant_a },
+          { key: 'b' as const, label: 'Template B', data: abStats.variant_b },
+          { key: 'c' as const, label: 'Template C', data: abStats.variant_c },
+          { key: 'd' as const, label: 'Template D', data: abStats.variant_d },
+        ]
+        // Vincitore solo tra le varianti realmente in gara (>= 5 inviati) e solo
+        // se il primo posto e' unico: con 2 varianti a pari merito nessun vincitore.
+        const inGara = variants.filter(v => (v.data?.sent ?? 0) >= 5)
+        const bestRate = Math.max(...inGara.map(v => v.data?.reply_rate ?? 0), 0)
+        const primi = inGara.filter(v => (v.data?.reply_rate ?? 0) === bestRate)
+        const winner = inGara.length >= 2 && primi.length === 1 && bestRate > 0
+          ? primi[0].key
           : null
 
         return (
           <Card className="bg-gray-900 border-gray-800">
             <CardHeader className="pb-2">
-              <CardTitle className="text-base text-gray-300">Risultati A/B test</CardTitle>
+              <CardTitle className="text-base text-gray-300">Risultati test template</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-2 gap-4">
-                {[
-                  { key: 'a' as const, label: 'Template A', data: abStats.variant_a },
-                  { key: 'b' as const, label: 'Template B', data: abStats.variant_b },
-                ].map(({ key, label, data }) => {
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                {variants.map(({ key, label, data }) => {
                   const isWinner = winner === key
                   return (
                     <div

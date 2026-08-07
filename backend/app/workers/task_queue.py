@@ -304,7 +304,19 @@ async def on_startup(ctx: dict) -> None:
     the authenticated control plane.
     """
     from loguru import logger
+    from app.config import settings
     from app.services.work_enqueue import pause_active_work_on_startup
+
+    # Timing effettivo in chiaro all'avvio: i valori del `.env` VINCONO sui default
+    # di `config.py`, quindi modificare il codice senza toccare il `.env` non cambia
+    # nulla e il worker continua a mandare i vecchi batch senza dirlo (caso reale:
+    # default portati a 10-20 ma `.env` fermo a 8-12).
+    logger.info(
+        f"[Startup] Timing effettivo — batch sessione "
+        f"{settings.session_min_messages}-{settings.session_max_messages} DM, "
+        f"pausa {settings.session_break_min_minutes}-{settings.session_break_max_minutes} min, "
+        f"delay {settings.min_delay_seconds}-{settings.max_delay_seconds}s"
+    )
 
     try:
         counts = await pause_active_work_on_startup()

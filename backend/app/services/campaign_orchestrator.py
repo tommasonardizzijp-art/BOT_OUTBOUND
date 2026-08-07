@@ -1296,6 +1296,45 @@ async def _maybe_complete_campaign(campaign_id: str, db: AsyncSession) -> None:
     )
 
     if remaining == 0:
+        # Lead ancora senza bio: la campagna NON e' finita, e' solo senza niente da
+        # mandare adesso. Marcarla 'completed' qui (come faceva prima) li buttava via
+        # in silenzio — su FLASH LASER erano 102 su 241. La Fase Bio non e' in corso
+        # (status running, non scraping_and_running): serve una decisione dell'operatore,
+        # quindi pausa esplicita invece di una campagna "attiva" che non fa nulla.
+        waiting_bio = await db.scalar(
+            select(func.count(Follower.id))
+            .where(
+                Follower.campaign_id == campaign_id,
+                Follower.status == FollowerStatus.pending,
+            )
+        ) or 0
+        if waiting_bio:
+            now = datetime.utcnow()
+            paused = await db.execute(
+                update(Campaign)
+                .where(
+                    Campaign.id == campaign_id,
+                    Campaign.status == CampaignStatus.running,
+                )
+                .values(status=CampaignStatus.paused, updated_at=now)
+            )
+            await db.commit()
+            msg = (
+                f"Nessun lead pronto per il DM: {waiting_bio} in attesa di Fase Bio. "
+                "Campagna in pausa — lancia la Fase Bio per sbloccarli."
+            )
+            logger.warning(f"[Orchestrator] {msg} (campaign={campaign_id})")
+            if (paused.rowcount or 0) == 1:
+                db.add(ActivityLog(
+                    campaign_id=campaign_id,
+                    action="campaign_paused",
+                    details=json.dumps({"by": "worker", "reason": "lead_in_attesa_di_bio",
+                                        "waiting_bio": int(waiting_bio)}),
+                ))
+                await db.commit()
+                emit_event(campaign_id, "campaign_auto_paused", msg, level="warn")
+            return
+
         now = datetime.utcnow()
         result = await db.execute(
             update(Campaign)

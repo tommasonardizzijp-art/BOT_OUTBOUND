@@ -1205,6 +1205,24 @@ Avviato il design di un **secondo canale WhatsApp** (il progetto evolve in **pia
 
 ---
 
+## [2026-08-06] IG — riavvio campagna durante la pausa, batch dal `.env`, statistiche A/B/C/D
+
+Tre problemi segnalati da Tommaso sulla sezione Instagram, tutti sullo stesso ramo `fix/dm-worker-lease-parcheggiato`.
+
+**1. Campagna ripresa durante la pausa di sessione = worker che esce subito.** A fine batch `_defer_next_batch` prolunga il lease dell'account per tutta la pausa (`hold_for_seconds`) e non lo rilascia all'uscita, poi parcheggia il job con `Retry(defer)`. Riprendere/riavviare la campagna prima della scadenza cancellava la retry parcheggiata e accodava un job nuovo con un `lease_owner` nuovo → `acquire` trovava il lease del job morto → `Account ... already leased by another job, exiting`, e nessun worker restava in coda: solo il riavvio del bot sbloccava (la guardia di cold-start azzera i lease). Evidenza: campagna FLASH LASER, `lease_expires_at=10:23:50` con job parcheggiato alle 09:53. Fix in `_enqueue_dm_workers_with_redis`: il lease appartiene allo **slot** `worker:{campaign}:{account}`, quindi se ARQ non ha quel job in esecuzione (`arq:in-progress:` assente) il lease dello slot viene rilasciato prima di accodare (`account_lease.release_slot`, match per prefisso: il lease di un'altra campagna sullo stesso account non si tocca). In più l'enqueue non cancella piu' `arq:in-progress:` — era il lock che impedisce due worker sullo stesso profilo — e accoda comunque quando il job gira (ARQ lo ripesca appena il lock cade, senza eseguirne due).
+
+**2. `SESSION_MAX_MESSAGES` alzato nel codice ma senza effetto.** I default di `config.py` erano gia' 10-20 ma il `.env` di root, che vince sui default, era fermo a 8-12: il worker continuava a mandare max 12 DM per sessione senza dirlo. `.env` allineato a 10-20 (richiede restart del worker) e aggiunta una riga di log all'avvio del worker con il timing **effettivo** (batch, pausa, delay), cosi' la divergenza codice/`.env` si vede subito.
+
+**3. Statistiche solo su A/B con quattro template attivi.** `GET /campaigns/{id}/ab-stats` mappava solo `variant_a`/`variant_b`: i messaggi generati con C e D sparivano dalle statistiche. Ora l'endpoint torna sempre le quattro chiavi (`variant_a..d`, `null` = variante mai usata) piu' `template_{b,c,d}_present`, e somma i messaggi storici con `template_variant` NULL alla variante A invece di sovrascriverla. UI: il pannello ha quattro caselle fisse A/B/C/D (`grid-cols-2 lg:grid-cols-4`), le varianti non usate restano vuote invece di far cambiare layout; vincitore evidenziato solo se almeno due varianti hanno >= 5 inviati e il primo posto e' unico; il badge sulla card template mostra le lettere attive (`A/B`, `A/B/C/D`) e i testi di C e D sono finalmente visibili.
+
+**4. (trovato durante la diagnosi) Campagne chiuse buttando via i lead senza bio.** `_maybe_complete_campaign` contava come rimanenti solo `bio_scraped/message_generated/pending_approval/locked`: con la Fase Bio non finita i lead `pending` non comparivano e la campagna passava a `completed` perdendoli (FLASH LASER: 102 su 241, sarebbe successo lo stesso giorno). Ora, se restano lead in attesa di bio, la campagna non viene completata ma messa in **pausa** con motivo esplicito (`campaign_paused` / `reason=lead_in_attesa_di_bio` + evento UI); il completamento resta invariato quando non c'e' davvero piu' nulla.
+
+**File toccati:** `backend/app/services/work_enqueue.py`, `backend/app/services/account_lease.py`, `backend/app/services/campaign_orchestrator.py`, `backend/app/workers/task_queue.py`, `backend/app/api/campaigns.py`, `frontend/app/campaigns/[id]/page.tsx`, `frontend/lib/types.ts`, `.env` (non versionato), `docs/architecture/SCALA_E_PARALLELISMO.md`. Test nuovi: `test_dm_worker_lease_handoff.py` (3), `test_ab_stats_quattro_varianti.py` (2), `test_completamento_lead_senza_bio.py` (3). Suite backend: 1077 passed, `tsc --noEmit` frontend pulito.
+
+**Restart necessario:** backend (uvicorn `--reload`) e frontend (dev) prendono le modifiche da soli; il **worker ARQ no** — finche' non viene riavviato gira col codice vecchio e con il vecchio batch 8-12.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |

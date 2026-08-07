@@ -152,8 +152,14 @@ export interface ABVariantStats {
 
 export interface ABStats {
   template_b_present: boolean
+  template_c_present: boolean
+  template_d_present: boolean
+  // Le quattro chiavi ci sono sempre: null = variante mai usata (casella vuota
+  // in UI, non casella che sparisce).
   variant_a: ABVariantStats | null
   variant_b: ABVariantStats | null
+  variant_c: ABVariantStats | null
+  variant_d: ABVariantStats | null
 }
 
 // Campaign ↔ Account assignment types.
