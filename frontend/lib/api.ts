@@ -182,6 +182,8 @@ export const api = {
       return res.json()
     },
     importStatus: (id: string) => request<ImportStatusResponse>(`/campaigns/${id}/import-status`),
+    importRetryFailed: (id: string) =>
+      request<Campaign>(`/campaigns/${id}/import-retry-failed`, { method: 'POST' }),
   },
 
   campaignAccounts: {

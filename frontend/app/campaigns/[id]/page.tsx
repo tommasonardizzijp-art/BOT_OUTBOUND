@@ -24,7 +24,7 @@ import {
   Settings, FileText
 } from 'lucide-react'
 import type { Campaign, Follower, FollowerStatus, CampaignAccount, Account, AccountStatus, ABStats, ApprovalQueueItem, ApprovalQueue, WorkerEvent, AccountRole, ImportStatusResponse } from '@/lib/types'
-import { canDm } from '@/lib/roles'
+import { canDm, isScrapeOnly, isDmOnly } from '@/lib/roles'
 
 const FOLLOWER_STATUS_LABEL: Record<FollowerStatus, string> = {
   pending: 'In attesa',
@@ -920,14 +920,23 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Square className="w-4 h-4 mr-1" />Ferma scraping</>}
             </Button>
           )}
-          {/* Avvia DM in parallelo mentre scraping gira (non per import: fase singola) */}
-          {campaign.messaging_enabled && campaign.source_type !== 'import' && campaign.status === 'scraping' && !campaign.scrape_completed_at && (campaignAccounts?.some(ca => ca.is_active && canDm(ca.role)) ?? false) && (
-            <Button size="sm" className="bg-green-700 hover:bg-green-600 text-white"
-              onClick={() => action(() => api.campaigns.startDmAuto(id))} disabled={loadingAction}
-              title="Avvia invio DM mentre lo scraping continua in background (auto-gen)">
-              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Zap className="w-4 h-4 mr-1" />Avvia DM ora</>}
-            </Button>
-          )}
+          {/* Avvia DM in parallelo mentre scraping/risoluzione gira. Richiede 2 profili
+              dedicati distinti (uno scraping-only, uno dm-only) — lo stesso profilo 'both'
+              non basta, farebbe scraping e DM insieme sull'account, causa checkpoint IG. */}
+          {campaign.messaging_enabled && campaign.status === 'scraping' && !campaign.scrape_completed_at && (() => {
+            const hasScrapeOnly = campaignAccounts?.some(ca => ca.is_active && isScrapeOnly(ca.role)) ?? false
+            const hasDmOnly = campaignAccounts?.some(ca => ca.is_active && isDmOnly(ca.role)) ?? false
+            const dualReady = hasScrapeOnly && hasDmOnly
+            return (
+              <Button size="sm" className="bg-green-700 hover:bg-green-600 text-white disabled:opacity-40"
+                onClick={() => action(() => api.campaigns.startDmAuto(id))} disabled={loadingAction || !dualReady}
+                title={dualReady
+                  ? 'Avvia invio DM mentre lo scraping continua in background (auto-gen)'
+                  : 'Servono 2 profili distinti: uno dedicato SOLO allo scraping e uno dedicato SOLO ai DM (ruolo "entrambi" da solo non basta)'}>
+                {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Zap className="w-4 h-4 mr-1" />Avvia DM ora</>}
+              </Button>
+            )
+          })()}
           {/* Pausa sessione scraping */}
           {campaign.status === 'scraping_break' && (
             <Button size="sm" className="bg-amber-600 hover:bg-amber-500 text-white"
@@ -1022,6 +1031,13 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
             <div><span className="text-gray-400">Privati:</span> <span className="text-gray-300">{importStatus.private}</span></div>
             <div><span className="text-gray-400">Errori:</span> <span className="text-red-400">{importStatus.error}</span></div>
           </div>
+          {(importStatus.not_found + importStatus.error) > 0 && (
+            <Button size="sm" variant="outline" className="border-orange-700 text-orange-400 hover:bg-orange-900/20"
+              onClick={() => action(() => api.campaigns.importRetryFailed(id))} disabled={loadingAction}
+              title="Rimette in coda i profili non trovati/in errore per un nuovo tentativo di risoluzione">
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><RotateCcw className="w-4 h-4 mr-1" />Ritenta falliti ({importStatus.not_found + importStatus.error})</>}
+            </Button>
+          )}
         </div>
       )}
 

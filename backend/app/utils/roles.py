@@ -36,6 +36,12 @@ DM_ROLES: tuple[str, ...] = ("dm", "both", "inbox_dm", "inbox_both")
 # Carries the inbox capability (DM-thread listing). Capped at 1 per campaign.
 INBOX_ROLES: tuple[str, ...] = ("inbox", "inbox_scraping", "inbox_dm", "inbox_both")
 
+# Puo' fare SOLO bio scraping, mai DM (capability singola, esclude 'both'/'inbox_both').
+SCRAPE_ONLY_ROLES: tuple[str, ...] = ("scraping", "inbox_scraping")
+
+# Puo' fare SOLO DM, mai bio scraping (capability singola, esclude 'both'/'inbox_both').
+DM_ONLY_ROLES: tuple[str, ...] = ("dm", "inbox_dm")
+
 # Every valid role value (schema validation + UI dropdown).
 ALL_ROLES: tuple[str, ...] = (
     "scraping",

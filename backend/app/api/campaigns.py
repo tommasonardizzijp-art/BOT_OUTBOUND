@@ -22,6 +22,7 @@ from app.services.campaign_control import (
     ensure_campaign_can_send_messages,
     ensure_bot_accepts_work,
     has_active_role_account,
+    has_dedicated_scrape_and_dm_accounts,
     pause_campaign_control,
     resume_campaign_control,
 )
@@ -464,6 +465,55 @@ async def import_status(campaign_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.post("/{campaign_id}/import-retry-failed", response_model=CampaignResponse)
+async def import_retry_failed(campaign_id: str, db: AsyncSession = Depends(get_db)):
+    """Rimette in coda TUTTE le righe imported_profiles in stato not_found/error
+    (requeue bulk, non per-riga — 'private' resta escluso: e' un esito definitivo,
+    non un fallimento tecnico da ritentare)."""
+    campaign = await _get_or_404(campaign_id, db)
+    if campaign.source_type != "import":
+        raise HTTPException(status_code=400, detail="La campagna non è di tipo 'import'")
+
+    failed_count = await db.scalar(
+        select(func.count(ImportedProfile.id)).where(
+            ImportedProfile.campaign_id == campaign_id,
+            ImportedProfile.status.in_(("not_found", "error")),
+        )
+    ) or 0
+    if failed_count == 0:
+        raise HTTPException(status_code=400, detail="Nessun profilo fallito da ritentare")
+
+    await db.execute(
+        update(ImportedProfile)
+        .where(
+            ImportedProfile.campaign_id == campaign_id,
+            ImportedProfile.status.in_(("not_found", "error")),
+        )
+        .values(status="pending", ig_user_id=None, error=None)
+    )
+
+    # Se la campagna era ferma su ready/completed/paused, sblocca il riavvio:
+    # ora ci sono righe pending, start-scrape le riprende (richiede draft/error).
+    # Whitelist esplicita (non blacklist!): se un worker e' gia' attivo
+    # (scraping/scraping_and_running/scraping_break/listing/listing_break/running)
+    # o lo stato e' gia' draft/error, NON toccare lo stato macchina — altrimenti
+    # start-scrape accoderebbe un secondo job concorrente sulle stesse righe.
+    if campaign.status in (CampaignStatus.ready, CampaignStatus.completed, CampaignStatus.paused):
+        campaign.status = CampaignStatus.error
+    campaign.updated_at = datetime.utcnow()
+
+    db.add(
+        ActivityLog(
+            campaign_id=campaign.id,
+            action="import_retry_failed",
+            details=json.dumps({"requeued": failed_count}),
+        )
+    )
+    await db.commit()
+    await db.refresh(campaign)
+    return await _enrich_campaign(campaign, db, include_today=True)
+
+
 @router.post("/{campaign_id}/start-scrape", response_model=CampaignResponse)
 async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
     campaign = await _get_or_404(campaign_id, db)
@@ -843,14 +893,29 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
         select(sa_func.count(Follower.id)).where(Follower.campaign_id == campaign_id)
     ) or 0
 
+    is_import = campaign.source_type == "import"
+    unresolved_count = 0
+    if is_import:
+        unresolved_count = await db.scalar(
+            select(sa_func.count(ImportedProfile.id)).where(
+                ImportedProfile.campaign_id == campaign_id,
+                ImportedProfile.status.in_(("pending", "resolving")),
+            )
+        ) or 0
+
     # Reset landing status:
     # - scrape → draft (si ri-scrappa la pagina target)
-    # - import con lead già risolti → ready: la risoluzione IG è la parte costosa,
-    #   si mantengono i follower e si riparte dall'invio DM (no campagna incastrata
-    #   in draft, dato che start-scrape per import richiede righe import pending)
-    # - import senza lead → draft + righe import rimesse a pending (sotto) per rilanciare
-    is_import = campaign.source_type == "import"
-    if is_import and actual_count > 0:
+    # - import CON righe ancora da risolvere (pending/resolving) → error: start-scrape
+    #   (draft|error) riprende la risoluzione senza perdere i follower gia' risolti.
+    #   Prima di questo fix andava a 'ready' se actual_count>0, bloccando per sempre
+    #   il resto della lista (sintomo A, vedi memoria botoutbound-campagne-import-macchina-stati).
+    # - import SENZA righe pending e CON follower risolti → ready: si riparte dai DM.
+    # - import SENZA righe pending e SENZA follower → draft + righe not_found/error
+    #   rimesse a pending (sotto) per rilanciare da zero.
+    if is_import and unresolved_count > 0:
+        campaign.status = CampaignStatus.error
+        campaign.scrape_completed_at = None
+    elif is_import and actual_count > 0:
         campaign.status = CampaignStatus.ready
         campaign.scrape_completed_at = datetime.utcnow()
     else:
@@ -878,9 +943,10 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
         .values(status=FollowerStatus.bio_scraped, locked_by_account_id=None, locked_at=None)
     )
 
-    # Import senza lead risolti: rimetti le righe staging a pending così la
-    # risoluzione può ripartire (start-scrape per import richiede righe pending).
-    if is_import and actual_count == 0:
+    # Import senza lead risolti e senza righe pending: rimetti le righe staging
+    # (not_found/error) a pending così la risoluzione può ripartire da zero
+    # (start-scrape per import richiede righe pending).
+    if is_import and actual_count == 0 and unresolved_count == 0:
         await db.execute(
             update(ImportedProfile)
             .where(ImportedProfile.campaign_id == campaign_id)
@@ -905,16 +971,6 @@ async def start_dm_auto(campaign_id: str, db: AsyncSession = Depends(get_db)):
         ensure_campaign_can_send_messages(campaign)
     except CampaignControlError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if campaign.source_type == "import":
-        # Import è a fase singola: prima si risolvono tutti i profili, poi (ready) si
-        # avviano i DM con /start. Il DM parallelo non è supportato qui — un worker DM
-        # partito durante la risoluzione uscirebbe senza follower pronti e lascerebbe
-        # la campagna "running" senza worker.
-        raise HTTPException(
-            status_code=400,
-            detail="DM in parallelo non disponibile per campagne import: attendi la fine della risoluzione, poi avvia i DM."
-        )
 
     if campaign.status not in (CampaignStatus.scraping, CampaignStatus.scraping_break):
         raise HTTPException(
@@ -943,6 +999,15 @@ async def start_dm_auto(campaign_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(
             status_code=400,
             detail="Assegna almeno un account attivo con ruolo 'dm' o 'entrambi' prima di avviare i DM"
+        )
+
+    if not await has_dedicated_scrape_and_dm_accounts(db, campaign_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Servono almeno 2 profili distinti: uno dedicato SOLO allo scraping "
+            "(ruolo 'scraping') e uno dedicato SOLO ai DM (ruolo 'dm'). Un profilo 'entrambi' "
+            "da solo non basta: farebbe scraping e DM in parallelo sullo stesso account, "
+            "generando checkpoint Instagram."
         )
 
     if not await _check_redis_reachable():
