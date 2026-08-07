@@ -245,3 +245,67 @@ async def test_t3_recover_non_riavvia_da_solo(client, db_session, monkeypatch):
                       json={"motivo": "verificato"})
 
     assert accodate == [], "il recupero non deve far ripartire nulla da solo"
+
+
+# ---------------------------------------------------------------------------
+# T4 — l'health-check non annulla il cooldown
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_t4_cooldown_non_diventa_active_per_una_lettura_del_dom(db_session):
+    """FM2 mette il numero in cooldown per 4 ore. L'health-check gira ogni 30
+    minuti, vedeva la sessione viva e lo rimetteva active: lo stop durava
+    mezz'ora invece di quattro ore. E' la porta gemella di quella gia' chiusa
+    dentro _ferma_numero_per_guasto."""
+    from app.models.wa import WaNumberStatus
+    from app.services import wa_session
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant, status=WaNumberStatus.cooldown)
+    await db_session.commit()
+
+    await wa_session._persist_status(numero.id, WaNumberStatus.active)
+    await db_session.refresh(numero)
+
+    assert numero.status == WaNumberStatus.cooldown
+
+
+@pytest.mark.asyncio
+async def test_t4_cooldown_puo_peggiorare(db_session):
+    """Un numero in cooldown la cui sessione e' caduta davvero DEVE poter
+    diventare disconnected: e' informazione vera, e serve al cron per mettere
+    in pausa le campagne. Si blocca solo la PROMOZIONE."""
+    from app.models.wa import WaNumberStatus
+    from app.services import wa_session
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant, status=WaNumberStatus.cooldown)
+    await db_session.commit()
+
+    await wa_session._persist_status(numero.id, WaNumberStatus.disconnected)
+    await db_session.refresh(numero)
+
+    assert numero.status == WaNumberStatus.disconnected
+
+
+@pytest.mark.asyncio
+async def test_t4_la_scadenza_del_timer_toglie_ancora_il_cooldown(db_session, monkeypatch):
+    """Il rimedio legittimo resta: release_expired_wa_cooldowns scrive con una
+    UPDATE diretta e non passa da _persist_status, quindi la guardia sopra non
+    lo tocca. Se lo toccasse, un numero resterebbe in cooldown per sempre."""
+    from app.models.wa import WaNumberStatus
+    from app.services import wa_number_manager
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant, status=WaNumberStatus.cooldown)
+    await db_session.commit()
+
+    async def _timer_scaduto(number_id: str) -> bool:
+        return False
+    monkeypatch.setattr(wa_number_manager, "is_wa_cooldown_active", _timer_scaduto)
+
+    rilasciati = await wa_number_manager.release_expired_wa_cooldowns()
+    await db_session.refresh(numero)
+
+    assert numero.id in rilasciati
+    assert numero.status == WaNumberStatus.active

@@ -264,6 +264,8 @@ async def _persist_status(number_id: str, stato: WaNumberStatus) -> None:
 
     async with AsyncSessionLocal() as db:
         numero = await _wa_number_or_raise(db, number_id)
+        promozione_da_cooldown = (numero.status == WaNumberStatus.cooldown
+                                  and stato == WaNumberStatus.active)
         if numero.status in _STATI_PROTETTI_DA_RESURREZIONE and stato != numero.status:
             # Diagnostica comunque valida (un check_session su un numero
             # ritirato resta legittimo per capire se la sessione e' ancora
@@ -273,6 +275,24 @@ async def _persist_status(number_id: str, stato: WaNumberStatus) -> None:
                 f"wa_session({number_id}): segnale={stato.value} letto ma stato "
                 f"resta {numero.status.value} (protetto da resurrezione automatica)"
             )
+        elif promozione_da_cooldown:
+            # Un cooldown lo toglie la SCADENZA del suo timer
+            # (wa_number_manager.release_expired_wa_cooldowns, che scrive con
+            # una UPDATE diretta e non passa di qui), non una lettura del DOM.
+            # Senza questo ramo l'health-check -- che gira ogni 30 minuti e
+            # include i numeri in cooldown -- vedeva la sessione viva e
+            # rimetteva il numero 'active': lo stop di 4 ore imposto da FM2
+            # durava mezz'ora (review 07/08, difetto G1). E' la porta gemella
+            # di quella gia' chiusa dentro wa_worker._ferma_numero_per_guasto,
+            # dove il commento spiega perche' la chiave Redis va scritta.
+            #
+            # Si blocca SOLO la promozione. Un numero in cooldown che nel
+            # frattempo ha perso la sessione deve poter diventare
+            # disconnected/qr_required: quella e' informazione vera, e senza di
+            # essa il cron non metterebbe in pausa le sue campagne.
+            logger.info(
+                f"wa_session({number_id}): sessione viva, ma il numero resta in "
+                "cooldown -- lo toglie la scadenza del timer, non un health-check")
         else:
             numero.status = stato
         numero.session_checked_at = datetime.utcnow()
