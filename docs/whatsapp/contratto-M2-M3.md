@@ -150,6 +150,14 @@ La distinzione che conta: **colpa del contatto** (→ terminale, il contatto esc
 
 Il contatore FM2 è per-numero e per-sessione: **3 fallimenti consecutivi "nostri" su chat diverse** ⇒ stop invii del numero, campagna → `error`, screenshot diagnostico, alert Telegram. Nessun contatto marcato `failed` in quel giro.
 
+> **Emendamento M5.1 (07/08) — "nostri" è una proprietà dell'esito, non del motivo.**
+>
+> `EsitoApertura` porta già il campo `colpa_nostra`, documentato *"True → conta verso l'escalation FM2 del numero"*, ma quel giudizio si perdeva nella traduzione a `EsitoInvio` e il worker lo ricostruiva confrontando il motivo con una lista. Conseguenza: `ricerca_senza_risultati` — che è `colpa_nostra=False`, cioè *"questo numero probabilmente non è su WhatsApp"* — contava verso FM2. Tre contatti non raggiungibili di fila in una lista fermavano il numero per quattro ore con un alert che diceva "probabile DOM cambiato", mentre il contatto era già gestito correttamente da `_incrementa_fallimento` (rinvio a 6h, DNC a soglia): veniva contato due volte, e la seconda con la causa sbagliata.
+>
+> `EsitoInvio` ha ora un campo `arma_fm2`, **default `True`** (fail-closed: un esito che nessuno ha classificato deve fermare il numero, non passare inosservato). Lo imposta chi costruisce l'esito, che è l'unico che sa cosa significa. Il worker non ricostruisce più quel giudizio.
+>
+> Oggi è `False` in due soli punti: `ricerca_senza_risultati` (fatto sul contatto) e `quarantena_risync` (limite nostro dichiarato, §3.4.2). Tutto il resto arma FM2 come prima.
+
 ### 3.3 `nessun-risultato-di-ricerca`: come si scioglie l'ambiguità
 
 Non si scioglie in un colpo solo, si scioglie **statisticamente dentro la sessione**:

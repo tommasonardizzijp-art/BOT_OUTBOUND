@@ -206,10 +206,36 @@ def prepara_testo(step, contact, campaign) -> tuple[str, str]:
     return testo, variante
 
 
+# Motivi di guardia negativa che NON sono un guasto del DOM. Vivono qui e non
+# nel worker perche' qui c'e' la conoscenza di cosa significano: il worker deve
+# solo sapere se contare o no, non ricostruire il giudizio.
+_MOTIVI_GUARDIA_SENZA_COLPA = frozenset({
+    # Limite NOSTRO dichiarato (contratto §3.4.2): la sessione WhatsApp Web si
+    # sta risincronizzando. Non e' una pagina che non riconosciamo piu'.
+    "quarantena_risync",
+})
+
+
 @dataclass
 class EsitoInvio:
     stato: str      # 'sent' | 'queued' | 'skipped' | 'failed' | 'opted_out' | 'replied'
     motivo: str
+    # Se questo esito 'queued' debba contare verso l'escalation FM2 del numero
+    # (3 guasti consecutivi -> cooldown 4h, campagna in error, alert Telegram).
+    #
+    # Default True perche' fail-closed: un esito nuovo che nessuno ha
+    # classificato deve fermare il numero, non passare inosservato.
+    #
+    # Esiste perche' il worker non aveva modo di distinguere. `EsitoApertura`
+    # porta gia' un campo `colpa_nostra` documentato "True -> conta verso
+    # l'escalation FM2", ma quel giudizio andava perso nella traduzione a
+    # EsitoInvio e il worker si arrangiava con una lista di motivi. Risultato
+    # (review 07/08 su M5.1): tre numeri di fila non presenti su WhatsApp --
+    # 'ricerca_senza_risultati', esplicitamente colpa_nostra=False -- facevano
+    # scattare FM2 con un Telegram che diceva "probabile DOM cambiato". Il
+    # contatto era gia' gestito da _incrementa_fallimento (rinvio a 6h, DNC a
+    # soglia): veniva contato due volte, e la seconda con la causa sbagliata.
+    arma_fm2: bool = True
 
 
 async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
@@ -245,9 +271,14 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
             return EsitoInvio("skipped", apertura.motivo)
         if apertura.colpa_nostra:
             return EsitoInvio("queued", apertura.motivo)
-        # ambiguo (ricerca senza risultati): conta il fallimento, non brucia
+        # Ambiguo (ricerca senza risultati): conta il fallimento sul CONTATTO,
+        # non brucia la lista -- e non arma FM2. `apertura.colpa_nostra` e'
+        # False qui: il numero potrebbe semplicemente non essere su WhatsApp,
+        # ed e' un fatto sul contatto, non sul nostro DOM. Contarlo anche verso
+        # l'escalation del numero significherebbe fermare tutto per quattro ore
+        # per tre contatti sbagliati in una lista.
         await _incrementa_fallimento(db, cc, apertura.motivo)
-        return EsitoInvio("queued", apertura.motivo)
+        return EsitoInvio("queued", apertura.motivo, arma_fm2=False)
 
     # --- guardia pre-invio -------------------------------------------------
     gia_scritto = bool(await db.scalar(
@@ -505,4 +536,5 @@ async def _esito_guardia_negativa(db, cc, contact, campaign, guardia, masked: st
 
     logger.warning(f"[WA] {masked}: guardia negativa ({guardia.motivo}) -- "
                    "il contatto resta queued, non e' colpa sua")
-    return EsitoInvio("queued", guardia.motivo)
+    return EsitoInvio("queued", guardia.motivo,
+                      arma_fm2=guardia.motivo not in _MOTIVI_GUARDIA_SENZA_COLPA)

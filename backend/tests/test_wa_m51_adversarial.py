@@ -156,6 +156,123 @@ async def test_a5_una_config_rotta_non_rischedula_all_infinito(db_session, monke
         pytest.fail("una configurazione incoerente non deve essere rischedulata")
 
 
+@pytest.mark.asyncio
+async def test_a6_il_cap_di_sessione_sta_sotto_al_timeout_di_arq(monkeypatch):
+    """Il cap wall-clock deve stare sotto ANCHE al job_timeout di ARQ, non solo
+    sotto il TTL del lucchetto. Se ARQ uccide la coroutine a meta', il contatto
+    claimato resta lockato per venti minuti e il browser muore male."""
+    from app.config import settings
+    from app.workers import wa_worker
+    from app.workers.task_queue import WorkerSettings
+
+    assert wa_worker.ARQ_JOB_TIMEOUT_S == WorkerSettings.job_timeout, (
+        "la costante e' una copia: se job_timeout cambia in task_queue, va "
+        "cambiata anche in wa_worker (l'import diretto creerebbe un ciclo)")
+
+    monkeypatch.setattr(settings, "wa_profile_lock_ttl_min", 90)
+    assert wa_worker._limite_sessione_s() < WorkerSettings.job_timeout
+
+    # E con un TTL corto continua a comandare il lucchetto, che e' il vincolo
+    # piu' stretto in quel caso.
+    monkeypatch.setattr(settings, "wa_profile_lock_ttl_min", 30)
+    assert wa_worker._limite_sessione_s() == (30 - 5) * 60
+
+
+@pytest.mark.asyncio
+async def test_a7_lucchetto_perso_durante_l_attesa_annulla_la_sessione(monkeypatch):
+    """Quindici minuti di attesa sono la finestra in cui e' piu' probabile
+    perdere il lucchetto e meno probabile che qualcuno guardi. Proseguire
+    significherebbe un secondo Chromium sullo stesso profilo."""
+    from app.workers import wa_worker
+
+    orologio_virtuale(wa_worker, monkeypatch)
+
+    async def _mai_fermo():
+        return False
+    monkeypatch.setattr(wa_worker.bot_state_service, "is_wa_halted", _mai_fermo)
+
+    async def _renew_perso(number_id, token, **kw):
+        return False
+    monkeypatch.setattr(wa_worker.wa_profile_lock, "renew", _renew_perso)
+
+    motivo = await wa_worker._attendi_quarantena_risync("n", "tok", 0.0)
+    assert motivo == "profilo_occupato"
+
+
+# ===========================================================================
+# A-bis — il pre-check che evita di aprire il browser per niente
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_a8_niente_da_fare_non_apre_il_browser(db_session, monkeypatch):
+    """Il difetto piu' costoso introdotto dall'attesa: senza un pre-check, un
+    numero col cap esaurito apriva WhatsApp Web, teneva il lucchetto per un
+    quarto d'ora senza mandare niente, chiudeva, e ricominciava dopo il break --
+    tutta la notte."""
+    from app.config import settings
+    from app.models.wa import WaCampaignStatus
+    from app.services import wa_number_manager
+    from app.workers import wa_worker
+
+    monkeypatch.setattr(settings, "wa_send_enabled", True)
+
+    ctx = await _scenario(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    await db_session.commit()
+
+    async def _senza_budget(db, number, campaign):
+        return False
+    monkeypatch.setattr(wa_number_manager, "has_wa_send_budget", _senza_budget)
+    monkeypatch.setattr(wa_worker, "_ora_locale_corrente", lambda: 11)
+
+    def _boom(*a, **kw):
+        raise AssertionError("il browser non doveva nemmeno aprirsi")
+    monkeypatch.setattr(wa_worker, "_open_wa_browser", _boom)
+
+    esito = await wa_worker.esegui_mini_sessione(ctx["number"].id)
+    assert esito["motivo"] == "cap_esaurito"
+
+
+@pytest.mark.asyncio
+async def test_a9_fuori_finestra_non_apre_il_browser(db_session, monkeypatch):
+    from app.config import settings
+    from app.models.wa import WaCampaignStatus
+    from app.workers import wa_worker
+
+    monkeypatch.setattr(settings, "wa_send_enabled", True)
+
+    ctx = await _scenario(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    await db_session.commit()
+
+    monkeypatch.setattr(wa_worker, "_ora_locale_corrente", lambda: 3)   # notte
+
+    def _boom(*a, **kw):
+        raise AssertionError("il browser non doveva nemmeno aprirsi")
+    monkeypatch.setattr(wa_worker, "_open_wa_browser", _boom)
+
+    esito = await wa_worker.esegui_mini_sessione(ctx["number"].id)
+    assert esito["motivo"] == "fuori_finestra"
+
+
+@pytest.mark.asyncio
+async def test_a10_il_precheck_non_locka_niente(db_session, monkeypatch):
+    """Un pre-check che claimasse una riga la terrebbe ferma per tutta la
+    quarantena. Deve essere in sola lettura."""
+    from app.models.wa import WaCampaignStatus
+    from app.workers import wa_worker
+
+    ctx = await _scenario(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    await db_session.commit()
+
+    monkeypatch.setattr(wa_worker, "_ora_locale_corrente", lambda: 11)
+    assert await wa_worker._niente_da_fare_prima_del_browser(ctx["number"].id) is None
+
+    await db_session.refresh(ctx["cc"])
+    assert ctx["cc"].locked_by is None and ctx["cc"].locked_at is None
+
+
 # ===========================================================================
 # B — Supervisore delle campagne running
 # ===========================================================================
@@ -521,6 +638,150 @@ async def test_e1_una_seconda_campagna_rifiutata_non_accoda(db_session, enqueue_
     assert running == 1, "max una campagna running per numero (SDD Q2)"
     assert enqueue_spia == [ctx["campaign"].id], (
         "solo la campagna partita davvero deve avere un worker in coda")
+
+
+@pytest.mark.asyncio
+async def test_f1_tre_numeri_non_su_whatsapp_non_fermano_il_numero(db_session, monkeypatch):
+    """Il difetto che la review ha trovato nel fix stesso: 'ricerca senza
+    risultati' e' un fatto sul CONTATTO (probabilmente non e' su WhatsApp), non
+    sul nostro DOM -- `EsitoApertura.colpa_nostra` e' False. Tre di fila in una
+    lista non devono fermare il numero per quattro ore con un Telegram che dice
+    'probabile DOM cambiato'."""
+    from app.config import settings
+    from app.models.wa import WaCampaignStatus, WaNumberStatus
+    from app.services.wa_sender import EsitoInvio
+    from app.workers import wa_worker
+    from tests.helpers_wa_tempo import orologio_virtuale
+
+    monkeypatch.setattr(settings, "wa_send_enabled", True)
+    orologio_virtuale(wa_worker, monkeypatch)
+
+    ctx = await _scenario(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    for _ in range(3):
+        altro = await make_contact(db_session, ctx["tenant"])
+        await make_campaign_contact(db_session, ctx["campaign"], altro)
+    await db_session.commit()
+
+    async def _sempre_ricerca_vuota(*a, **kw):
+        return EsitoInvio("queued", "ricerca_senza_risultati", arma_fm2=False)
+    monkeypatch.setattr(wa_worker.wa_sender, "invia_a_contatto", _sempre_ricerca_vuota)
+    monkeypatch.setattr(wa_worker, "_ora_locale_corrente", lambda: 11)
+
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def _ctx(*a, **kw):
+        class _C:
+            async def new_page(self):
+                class _P:
+                    async def goto(self, *a, **kw): return None
+                return _P()
+        yield _C()
+    monkeypatch.setattr(wa_worker, "_open_wa_browser", _ctx)
+    monkeypatch.setattr(wa_worker, "WhatsAppWebPage", lambda page: object())
+
+    @contextlib.asynccontextmanager
+    async def _lock(number_id, **kw):
+        yield "tok"
+    monkeypatch.setattr(wa_worker.wa_profile_lock, "held", _lock)
+
+    async def _renew(number_id, token, **kw):
+        return True
+    monkeypatch.setattr(wa_worker.wa_profile_lock, "renew", _renew)
+
+    esito = await wa_worker.esegui_mini_sessione(ctx["number"].id)
+
+    assert esito["motivo"] != "guasti_consecutivi", (
+        "tre contatti non su WhatsApp non sono un DOM rotto")
+    await db_session.refresh(ctx["number"])
+    assert ctx["number"].status == WaNumberStatus.active
+    await db_session.refresh(ctx["campaign"])
+    assert ctx["campaign"].status == WaCampaignStatus.running
+
+
+@pytest.mark.asyncio
+async def test_f2_un_re_qr_esplicito_toglie_il_cooldown(db_session, monkeypatch):
+    """La guardia sul cooldown deve fermare solo le LETTURE automatiche.
+    Un operatore che riscansiona il QR di persona sta facendo l'azione
+    esplicita di cui parla il commento su _STATI_PROTETTI_DA_RESURREZIONE, e
+    deve poter rimettere il numero in gioco -- altrimenti l'unica uscita
+    resterebbe cancellare a mano una chiave Redis."""
+    from app.models.wa import WaNumberStatus
+    from app.services import wa_session
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant, status=WaNumberStatus.cooldown)
+    await db_session.commit()
+
+    # Lettura automatica (health-check): non promuove.
+    await wa_session._persist_status(numero.id, WaNumberStatus.active)
+    await db_session.refresh(numero)
+    assert numero.status == WaNumberStatus.cooldown
+
+    # Atto esplicito dell'operatore (assisted_login): promuove.
+    await wa_session._persist_status(numero.id, WaNumberStatus.active,
+                                     da_lettura_automatica=False)
+    await db_session.refresh(numero)
+    assert numero.status == WaNumberStatus.active
+
+
+@pytest.mark.asyncio
+async def test_f3_avvia_su_numero_in_cooldown_non_parla_di_qr(db_session):
+    """Dopo un FM2 la campagna e' in error E il numero in cooldown: il messaggio
+    d'errore del resume non deve mandare l'operatore a rifare un QR che non
+    serve, mentre la sessione e' viva."""
+    from app.models.wa import WaCampaignStatus, WaNumberStatus
+    from app.services import wa_campaign_service as svc
+
+    ctx = await _scenario(db_session)
+    ctx["campaign"].status = WaCampaignStatus.paused
+    ctx["number"].status = WaNumberStatus.cooldown
+    await db_session.commit()
+
+    with pytest.raises(ValueError) as exc:
+        await svc.avvia(db_session, ctx["campaign"].id)
+
+    testo = str(exc.value).lower()
+    assert "cooldown" in testo
+    assert "qr" not in testo or "non serve rifare il qr" in testo
+
+
+@pytest.mark.asyncio
+async def test_f4_recover_dice_che_il_numero_e_in_cooldown(client, db_session):
+    from app.models.wa import WaCampaignStatus, WaNumberStatus
+
+    ctx = await _scenario(db_session)
+    ctx["campaign"].status = WaCampaignStatus.error
+    ctx["number"].status = WaNumberStatus.cooldown
+    await db_session.commit()
+
+    r = await client.post(f"/api/wa/campaigns/{ctx['campaign'].id}/recover",
+                          json={"motivo": "verificato"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["stato_numero"] == "cooldown"
+    assert "cooldown" in body["prossimo_passo"]
+
+
+@pytest.mark.asyncio
+async def test_f5_il_motivo_non_viene_troncato_in_silenzio(client, db_session, caplog):
+    """max_length=500 accettati, poi 200 scritti: la traccia che il campo esiste
+    per lasciare risultava mutilata senza dirlo."""
+    from app.models.wa import WaCampaignStatus
+
+    ctx = await _scenario(db_session)
+    ctx["campaign"].status = WaCampaignStatus.error
+    await db_session.commit()
+
+    motivo = "M" * 400
+    r = await client.post(f"/api/wa/campaigns/{ctx['campaign'].id}/recover",
+                          json={"motivo": motivo})
+    assert r.status_code == 200
+
+    r2 = await client.post(f"/api/wa/campaigns/{ctx['campaign'].id}/recover",
+                           json={"motivo": "N" * 501})
+    assert r2.status_code == 422, "oltre il limite dichiarato: errore, non taglio"
 
 
 @pytest.mark.asyncio

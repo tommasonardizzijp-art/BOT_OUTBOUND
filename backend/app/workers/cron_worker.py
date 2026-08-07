@@ -256,7 +256,18 @@ class CronWorkerSettings:
         # Sfasato rispetto a health-check (0/30) e reply-scan (15/45): i tre
         # cron WA competono per lo stesso lucchetto profilo, e farli partire
         # insieme significherebbe che due su tre trovano occupato e saltano.
-        cron(wa_campaign_supervisor, minute={10, 25, 40, 55}, hour=set(range(9, 20))),
+        #
+        # A TUTTE le ore, a differenza degli altri due: questo cron non apre
+        # nessun browser (accoda e basta, e il worker ha i suoi cancelli di
+        # finestra oraria), mentre l'invariante che protegge -- "nessuna
+        # campagna running senza worker" -- non e' limitata alle ore attive.
+        # Con la finestra 9-19, una campagna avviata alle 20:15 il cui enqueue
+        # fallisce per un blip di Redis restava senza worker fino alle 9:10 del
+        # giorno dopo, in silenzio, perche' _accoda_worker ingoia l'errore
+        # proprio contando su questo cron. E `active_hours` e' anche un campo
+        # per-campagna: un tenant con orari diversi sarebbe rimasto del tutto
+        # fuori dalla rete.
+        cron(wa_campaign_supervisor, minute={10, 25, 40, 55}),
     ]
     queue_name = ARQ_CRON_QUEUE
     redis_settings = arq_redis_settings()

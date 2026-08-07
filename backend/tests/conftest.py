@@ -21,6 +21,7 @@
    Un test che esercita il notifier senza mock spammerebbe l'operatore.
 """
 import os
+import zlib
 
 # DEVE stare PRIMA di ogni import `app.*`: app.config.settings viene istanziato
 # al primo import e legge questa env (le env var vincono sul .env in pydantic).
@@ -37,10 +38,21 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///./data/test_bot_{_SLOT}.db"
 
 # Stessa guardia, stessa ragione, altro servizio: da M5.1 avviare una campagna
 # WA accoda un job ARQ vero, e senza questa riga un test lo metterebbe nella
-# coda che il worker di produzione consuma. Database 15 (l'ultimo dei 16
-# predefiniti di Redis): non e' usato da nessuna configurazione del bot.
+# coda che il worker di produzione consuma.
+#
+# Derivato dallo SLOT come il DATABASE_URL sopra, e per lo stesso motivo: due
+# run su slot diversi devono poter convivere. Con un database Redis fisso si
+# sarebbero divisi una sola coda ARQ, lo stesso contatore di eventi e lo stesso
+# keyspace wa:lock:* / wa:cooldown:*, cioe' la classe di rossi fantasma che lo
+# slot esiste per evitare. Slot 'default' -> db 15 (l'ultimo dei 16 predefiniti
+# di Redis, non usato da nessuna configurazione del bot); slot diversi
+# scendono da li' restando lontani da 0.
+# crc32 e non hash(): hash() delle stringhe e' randomizzato per processo
+# (PYTHONHASHSEED), quindi due run dello STESSO slot finirebbero su database
+# diversi -- il contrario di cio' che serve.
+_REDIS_DB_TEST = 15 - (zlib.crc32(_SLOT.encode()) % 5 if _SLOT != "default" else 0)
 os.environ["REDIS_URL"] = os.environ.get(
-    "WA_TEST_REDIS_URL", "redis://localhost:6379/15")
+    "WA_TEST_REDIS_URL", f"redis://localhost:6379/{_REDIS_DB_TEST}")
 
 # La cartella e' gitignorata: in locale esiste perche' ci gira il bot, su un
 # runner pulito no, e sqlite non la crea da solo ("unable to open database

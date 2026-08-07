@@ -14,7 +14,8 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
-                           WaCampaignType, WaContact, WaSequenceStep)
+                           WaCampaignType, WaContact, WaNumber, WaNumberStatus,
+                           WaSequenceStep)
 from app.services import wa_campaign_service as svc
 from app.utils import events
 
@@ -286,12 +287,32 @@ async def recover(campaign_id: str, body: RecoverRequest, db=Depends(get_db)) ->
 
     campagna.status = WaCampaignStatus.paused
     await db.commit()
-    motivo = body.motivo.strip()[:200]
+    # Nessun troncamento qui: il limite e' gia' `max_length=500` sul campo, e
+    # tagliare a 200 dopo averne accettati 500 mutilerebbe in silenzio proprio
+    # la traccia che questo campo esiste per lasciare -- che e' l'argomento con
+    # cui quel max_length e' stato messo.
+    motivo = body.motivo.strip()
     logger.warning(f"[WA] campagna {campaign_id} recuperata da error -> paused: {motivo}")
     events.emit(campaign_id, "wa.campaign.recovered",
                 f"recuperata da error: {motivo}", level="warning")
+
+    # Lo stato del numero nella risposta: dopo un FM2 la campagna e' in 'error'
+    # E il numero e' in 'cooldown' per quattro ore. Senza questa riga
+    # l'operatore fa il passo 2 (resume) e riceve un errore che parla di QR,
+    # cioe' la diagnosi sbagliata nel momento peggiore.
+    numero = await db.scalar(select(WaNumber).where(WaNumber.id == campagna.wa_number_id))
+    if numero is not None and numero.status == WaNumberStatus.cooldown:
+        prossimo = ("il numero e' ancora in cooldown: la sessione WhatsApp e' "
+                    "viva, non serve rifare il QR. Il resume funzionera' quando "
+                    "il cooldown sara' scaduto.")
+    elif numero is not None and numero.status != WaNumberStatus.active:
+        prossimo = (f"il numero e' in stato {numero.status.value}: sistemalo "
+                    "prima di riprendere la campagna.")
+    else:
+        prossimo = "verifica la causa del guasto, poi riprendi la campagna."
     return {"recovered": True, "status": campagna.status.value,
-            "prossimo_passo": "verifica la causa del guasto, poi riprendi la campagna"}
+            "stato_numero": numero.status.value if numero else None,
+            "prossimo_passo": prossimo}
 
 
 # KPI (Task 8). I contatori sono TUTTI denormalizzati e scritti altrove

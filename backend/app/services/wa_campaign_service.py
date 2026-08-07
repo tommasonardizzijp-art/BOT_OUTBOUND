@@ -122,6 +122,20 @@ async def avvia(db, campaign_id: str) -> WaCampaign:
 
     numero = await db.scalar(select(WaNumber).where(WaNumber.id == campagna.wa_number_id))
     if numero is None or numero.status != WaNumberStatus.active:
+        # Il messaggio distingue il cooldown dagli altri stati non-attivi.
+        # Non e' pignoleria: il caso in cui questo errore si legge piu' spesso
+        # e' subito dopo un FM2, che mette insieme la campagna in 'error' E il
+        # numero in 'cooldown' per quattro ore. Un messaggio generico che dice
+        # "serve un nuovo QR" manda l'operatore a riscansionare un QR che non
+        # serve, mentre la sessione e' perfettamente viva e basta aspettare
+        # (review 07/08 su M5.1).
+        if numero is not None and numero.status == WaNumberStatus.cooldown:
+            raise ValueError(
+                "Il numero e' in cooldown dopo un guasto: la sessione WhatsApp "
+                "e' viva, non serve rifare il QR. Aspetta che scada il timer "
+                "(4 ore da un blocco per guasti consecutivi) oppure togli a "
+                "mano la chiave Redis wa:cooldown:<id> se hai gia' verificato "
+                "e risolto la causa.")
         raise ValueError(
             "Il numero non e' attivo: serve una sessione WhatsApp valida (QR) "
             "prima di far partire la campagna.")

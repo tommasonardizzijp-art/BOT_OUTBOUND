@@ -257,14 +257,22 @@ async def _wa_number_or_raise(db, number_id: str):
 _STATI_PROTETTI_DA_RESURREZIONE = frozenset({WaNumberStatus.retired, WaNumberStatus.suspended})
 
 
-async def _persist_status(number_id: str, stato: WaNumberStatus) -> None:
+async def _persist_status(number_id: str, stato: WaNumberStatus, *,
+                          da_lettura_automatica: bool = True) -> None:
     from datetime import datetime
 
     from app.database import AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
         numero = await _wa_number_or_raise(db, number_id)
-        promozione_da_cooldown = (numero.status == WaNumberStatus.cooldown
+        # Solo una LETTURA automatica non puo' togliere un cooldown. Un
+        # operatore che riscansiona il QR di persona (assisted_login) sta
+        # facendo l'azione esplicita di cui parla il commento su
+        # _STATI_PROTETTI_DA_RESURREZIONE qui sopra, e deve poterlo rimettere
+        # in gioco: bloccarlo anche a lui lascerebbe come unica uscita la
+        # cancellazione a mano di una chiave Redis (review 07/08 su M5.1).
+        promozione_da_cooldown = (da_lettura_automatica
+                                  and numero.status == WaNumberStatus.cooldown
                                   and stato == WaNumberStatus.active)
         if numero.status in _STATI_PROTETTI_DA_RESURREZIONE and stato != numero.status:
             # Diagnostica comunque valida (un check_session su un numero
@@ -354,6 +362,9 @@ async def assisted_login(number_id: str, timeout_s: int = 180) -> WaNumberStatus
             await asyncio.sleep(ASSISTED_LOGIN_POLL_INTERVAL_S)
 
     stato = stato_da_segnale(segnale)
-    await _persist_status(number_id, stato)
+    # da_lettura_automatica=False: questo e' un umano davanti allo schermo che
+    # ha appena inquadrato un QR, non un cron che legge un DOM. E' l'atto
+    # esplicito che puo' togliere un numero dal cooldown.
+    await _persist_status(number_id, stato, da_lettura_automatica=False)
     logger.info(f"assisted_login({number_id}): segnale finale={segnale} stato={stato.value}")
     return stato

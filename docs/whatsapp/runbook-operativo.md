@@ -72,6 +72,8 @@ Se invece il primo messaggio parte **subito**, qualcosa non va: `WA_RESYNC_QUARA
 
 L'attesa vale per ogni mini-sessione, non solo per la prima: fra una sessione e l'altra c'e' un break di 20-40 minuti e il browser viene chiuso, quindi al giro dopo la sincronizzazione ricomincia. In pratica un numero manda a raffiche: ~15 minuti fermo, poi 8-15 messaggi con una novantina di secondi l'uno dall'altro, poi il break.
 
+**Il browser si apre solo se c'e' davvero qualcosa da mandare.** Prima di aprirlo il worker controlla, con due query, che ci sia una campagna running, che l'ora sia dentro la finestra, che il cap non sia esaurito e che esista almeno un contatto pronto. Senza quel controllo un numero col cap gia' finito avrebbe aperto WhatsApp Web, tenuto il lucchetto del profilo per un quarto d'ora senza mandare niente, chiuso, e ricominciato dopo il break — tutta la notte, occupando il profilo che servirebbe all'health-check e allo scan delle risposte.
+
 ## Cosa deve/non deve fare il cliente durante una campagna attiva
 
 **Deve:**
@@ -130,7 +132,15 @@ L'attesa vale per ogni mini-sessione, non solo per la prima: fra una sessione e 
 
 Il timer di cooldown **non e' a DB**: non esiste una colonna `cooldown_until`, il timer vive in Redis con un TTL (`wa_number_manager`). Conseguenza operativa: **se Redis e' giu' o e' stato svuotato, un numero puo' restare `cooldown` senza che niente lo segnali e senza che nessun cron lo liberi.** Se un numero e' fermo in `cooldown` piu' a lungo del previsto, controllare prima che Redis sia raggiungibile.
 
-⚠️ **Da M5.1, `POST /wa/numbers/<id>/check` NON toglie piu' il cooldown** — e prima non doveva toglierlo comunque. L'health-check girava ogni 30 minuti, vedeva la sessione viva e rimetteva il numero `active`: il cooldown di 4 ore imposto dopo tre guasti consecutivi durava mezz'ora, e nessuno se ne accorgeva. Ora `check` aggiorna la diagnosi (un cooldown che ha anche perso la sessione diventa `disconnected`) ma non promuove: quello lo fa solo la scadenza del timer. Per togliere un cooldown prima del tempo, sapendo cosa si sta facendo, si cancella la chiave Redis `wa:cooldown:<number_id>` e si aspetta il prossimo health-check.
+⚠️ **Da M5.1, `POST /wa/numbers/<id>/check` NON toglie piu' il cooldown** — e prima non doveva toglierlo comunque. L'health-check girava ogni 30 minuti, vedeva la sessione viva e rimetteva il numero `active`: il cooldown di 4 ore imposto dopo tre guasti consecutivi durava mezz'ora, e nessuno se ne accorgeva. Ora `check` aggiorna la diagnosi (un cooldown che ha anche perso la sessione diventa `disconnected`) ma non promuove: quello lo fa solo la scadenza del timer.
+
+La regola esatta è **"nessuna lettura automatica toglie un cooldown"**, non "niente lo toglie". Le due uscite volute restano:
+
+| Come | Effetto |
+|---|---|
+| Scadenza del timer Redis | `release_expired_wa_cooldowns`, dentro l'health-check, rimette `active` |
+| `POST /wa/numbers/<id>/login` (riscansione del QR) | Toglie il cooldown: è un atto esplicito di un operatore davanti allo schermo, non la lettura di un DOM |
+| `redis-cli DEL wa:cooldown:<id>` + `POST .../check` | Scorciatoia manuale, quando si è già verificata e risolta la causa |
 
 ## Incidente: una campagna e' finita in `error`
 
@@ -149,6 +159,15 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" $API/wa/campaigns/<id>/resume
 ```
 
 Il primo passo non fa ripartire niente da solo: `resume` rivalida che il numero sia `active`, che non ci sia un'altra campagna in corso sullo stesso numero, ristampa `next_action_at` e accoda il worker. Prima di M5.1 il passo 1 non esisteva e da `error` si poteva solo `stop`.
+
+⏳ **Il passo 2 non funziona nelle prime 4 ore.** FM2 mette insieme la campagna in `error` **e** il numero in `cooldown` per quattro ore: finché quel timer non scade, `resume` risponde 422 dicendo che il numero non è attivo. Non è un secondo guasto ed è per questo che il passo 1 ora risponde con `stato_numero` e un `prossimo_passo` che lo dice esplicitamente. Se hai già verificato e risolto la causa e non vuoi aspettare, si toglie la chiave Redis del cooldown e si forza il ricontrollo:
+
+```bash
+redis-cli DEL wa:cooldown:<number_id>          # oppure memurai-cli
+curl -s -X POST -H "Authorization: Bearer $TOKEN" $API/wa/numbers/<number_id>/check
+```
+
+In alternativa, e senza toccare Redis: **riscansionare il QR** (`POST /wa/numbers/<id>/login`) toglie il cooldown, perché è un atto esplicito di un operatore e non una lettura automatica. Rifare il QR solo per questo è però sproporzionato — la sessione è viva.
 
 ## Kill-switch — fermare TUTTO il canale WhatsApp
 

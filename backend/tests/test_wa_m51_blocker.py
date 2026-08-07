@@ -119,15 +119,40 @@ async def test_t1_quarantena_interrotta_dal_kill_switch(monkeypatch):
     assert motivo == "wa_halted"
 
 
-def test_t1_quarantena_non_arma_fm2():
+@pytest.mark.asyncio
+async def test_t1_quarantena_non_arma_fm2():
     """`quarantena_risync` e' un limite nostro dichiarato, non un DOM rotto:
     non deve contare verso l'escalation che ferma il numero e manda un alert
     che dice 'probabile DOM cambiato'."""
-    from app.workers import wa_worker
+    from app.services.wa_sender import EsitoGuardia, _esito_guardia_negativa
 
-    assert "quarantena_risync" in wa_worker.MOTIVI_NON_FM2
-    # I guasti veri restano guasti.
-    assert "casella-ricerca-non-trovata" not in wa_worker.MOTIVI_NON_FM2
+    esito = await _esito_guardia_negativa(
+        None, None, None, None,
+        EsitoGuardia(False, "quarantena_risync"), "+39•••••77")
+
+    assert esito.stato == "queued"
+    assert esito.arma_fm2 is False
+
+
+@pytest.mark.asyncio
+async def test_t1_una_guardia_rotta_arma_ancora_fm2():
+    """Controprova: le guardie che segnalano un DOM che non capiamo devono
+    continuare a fermare il numero. Il flag non e' un modo per silenziare FM2."""
+    from app.services.wa_sender import EsitoGuardia, _esito_guardia_negativa
+
+    for motivo in ("storico_non_caricato", "coda_non_agganciata",
+                   "coda_malformata", "incoerenza_db_dom"):
+        esito = await _esito_guardia_negativa(
+            None, None, None, None, EsitoGuardia(False, motivo), "+39•••••77")
+        assert esito.arma_fm2 is True, f"{motivo} deve armare FM2"
+
+
+def test_t1_default_di_arma_fm2_e_fail_closed():
+    """Un esito nuovo che nessuno ha classificato deve fermare il numero, non
+    passare inosservato."""
+    from app.services.wa_sender import EsitoInvio
+
+    assert EsitoInvio("queued", "motivo_mai_visto").arma_fm2 is True
 
 
 # ---------------------------------------------------------------------------
