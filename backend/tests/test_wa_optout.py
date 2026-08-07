@@ -39,6 +39,43 @@ def test_looks_like_stop_su_none_non_solleva():
     assert wa_optout.looks_like_stop(None) is False
 
 
+@pytest.mark.parametrize("testo", [
+    "mi basta sapere se siete aperti",
+    "basta poco per convincermi",
+    "basta che mi confermiate l'orario",
+])
+def test_looks_like_stop_basta_ambigua_in_frase_lunga_non_e_optout(testo):
+    """Review G6 (07/08): 'basta' e' comunissima in frasi che non sono un
+    opt-out. Un falso opt-out e' permanente e irreversibile -- il costo di
+    sbagliare qui e' molto peggio del costo di chiedere una revisione umana."""
+    assert wa_optout.looks_like_stop(testo) is False
+
+
+@pytest.mark.parametrize("testo", [
+    "mi basta sapere se siete aperti",
+    "basta poco per convincermi",
+])
+def test_looks_like_ambiguous_stop_needs_review_su_frase_lunga(testo):
+    assert wa_optout.looks_like_ambiguous_stop_needs_review(testo) is True
+
+
+@pytest.mark.parametrize("testo", [
+    "basta",
+    "  basta  ",
+    "ok grazie",
+    "STOP",
+    "",
+])
+def test_looks_like_ambiguous_stop_needs_review_non_scatta(testo):
+    """Ne' su un 'basta' gia' gestito da looks_like_stop (corto, opt-out
+    diretto), ne' su testi senza la parola ambigua."""
+    assert wa_optout.looks_like_ambiguous_stop_needs_review(testo) is False
+
+
+def test_looks_like_ambiguous_stop_needs_review_su_none_non_solleva():
+    assert wa_optout.looks_like_ambiguous_stop_needs_review(None) is False
+
+
 @pytest.mark.asyncio
 async def test_persist_wa_optout_ferma_tutte_le_campagne_del_tenant(db_session):
     from app.models.tenant import Tenant
@@ -82,6 +119,81 @@ async def test_persist_wa_optout_ferma_tutte_le_campagne_del_tenant(db_session):
     for cc in righe:
         await db_session.refresh(cc)
         assert cc.status == WaContactStatus.opted_out
+
+
+async def _campagna_con_conteggi(db_session, *, sent: int, opted_out: int):
+    from app.models.tenant import Tenant
+    from app.models.wa import (WaCampaign, WaCampaignType, WaCampaignStatus,
+                               WaNumber)
+
+    tenant = Tenant(id=str(uuid.uuid4()), name="T-breaker", status="active")
+    db_session.add(tenant)
+    await db_session.flush()
+    number = WaNumber(id=str(uuid.uuid4()), tenant_id=tenant.id, label="n",
+                      phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e")
+    db_session.add(number)
+    await db_session.flush()
+    campagna = WaCampaign(id=str(uuid.uuid4()), tenant_id=tenant.id,
+                          wa_number_id=number.id, name="camp-breaker",
+                          campaign_type=WaCampaignType.marketing,
+                          status=WaCampaignStatus.running,
+                          sent=sent, opted_out=opted_out)
+    db_session.add(campagna)
+    await db_session.commit()
+    return campagna
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_muto_sotto_il_minimo_di_invii(db_session):
+    """1 opt-out su 2 invii e' il 50%, ma il campione e' troppo piccolo per
+    significare qualcosa: il breaker non deve scattare su rumore statistico."""
+    from app.services import bot_state_service
+
+    campagna = await _campagna_con_conteggi(db_session, sent=2, opted_out=1)
+    scattato = await wa_optout.check_optout_circuit_breaker(db_session, campagna.id)
+    assert scattato is False
+    assert await bot_state_service.is_wa_halted(db_session) is False
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_muto_sotto_la_soglia_percentuale(db_session):
+    from app.services import bot_state_service
+
+    campagna = await _campagna_con_conteggi(db_session, sent=20, opted_out=2)  # 10%
+    scattato = await wa_optout.check_optout_circuit_breaker(db_session, campagna.id)
+    assert scattato is False
+    assert await bot_state_service.is_wa_halted(db_session) is False
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_ferma_il_canale_sopra_soglia(db_session):
+    """Il numero che rischia il ban e' del cliente: sopra soglia il breaker
+    ferma l'INTERO canale (stesso kill-switch di POST /wa/ops/halt), non
+    solo la campagna."""
+    from app.services import bot_state_service
+
+    campagna = await _campagna_con_conteggi(db_session, sent=20, opted_out=6)  # 30%
+    scattato = await wa_optout.check_optout_circuit_breaker(db_session, campagna.id)
+    assert scattato is True
+    assert await bot_state_service.is_wa_halted(db_session) is True
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_non_riallerta_se_gia_fermo(db_session):
+    """Idempotente: una volta fermo il canale, opt-out successivi non
+    devono rifermare/riallertare da capo (spam Telegram a ogni opt-out)."""
+    from app.services import bot_state_service
+
+    campagna = await _campagna_con_conteggi(db_session, sent=20, opted_out=6)
+    primo = await wa_optout.check_optout_circuit_breaker(db_session, campagna.id)
+    secondo = await wa_optout.check_optout_circuit_breaker(db_session, campagna.id)
+    assert primo is True
+    assert secondo is False
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_su_campaign_id_none_non_solleva(db_session):
+    assert await wa_optout.check_optout_circuit_breaker(db_session, None) is False
 
 
 @pytest.mark.asyncio

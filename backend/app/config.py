@@ -364,8 +364,33 @@ class Settings(BaseSettings):
     # Stesso valore di campaign_orchestrator.LOCK_TIMEOUT_MINUTES.
     wa_lock_timeout_min: int = 20
     wa_max_failures_per_contact: int = 3        # SDD 8.2
-    wa_stop_words: str = "stop,basta,cancellami,non scrivermi,unsubscribe,rimuovimi"
+    # Parole DURE: opt-out immediato, nessun caso ambiguo in italiano comune
+    # (review G6, 07/08). "basta" spostata sotto: e' comunissima in frasi che
+    # non sono un opt-out ("mi basta sapere se siete aperti").
+    wa_stop_words: str = "stop,cancellami,non scrivermi,unsubscribe,rimuovimi"
+    # Parole AMBIGUE: opt-out immediato SOLO se il messaggio e' sostanzialmente
+    # quella parola sola (wa_optout.looks_like_stop, testo normalizzato <= 3
+    # parole); altrimenti nessun opt-out automatico -- vedi
+    # looks_like_ambiguous_stop_needs_review per la segnalazione umana.
+    wa_stop_words_ambigue: str = "basta"
     wa_global_daily_cap: int = 200              # SDD Q70, safety valve macchina
+    # Circuit breaker sul tasso di opt-out (review P4, 07/08): il numero che
+    # rischia il ban e' del CLIENTE, non nostro. Sotto wa_optout_breaker_min_invii
+    # il campione e' troppo piccolo per significare qualcosa (1 opt-out su 2
+    # invii e' 50%, rumore puro) -- il breaker resta muto finche' non c'e'
+    # abbastanza segnale. Soglia (25%) volutamente piu' alta del solo
+    # "allarme" mostrato in UI (SOGLIA_ALLARME_OPTOUT_PCT=5%, wa_campaigns.py):
+    # quello e' un warning da leggere con calma, questo ferma il canale.
+    wa_optout_breaker_min_invii: int = 10
+    wa_optout_breaker_pct: float = 25.0
+    # Dead-man's switch esterno (review P6, 07/08): il backend gira sul PC
+    # di casa -- se il PC si spegne, l'health-check che dovrebbe avvisare e'
+    # dentro il processo morto, non avvisa nessuno. Un ping periodico verso
+    # un servizio esterno (healthchecks.io o simile, URL con token univoco
+    # generato LORO) e' l'unico allarme che sopravvive al processo che
+    # dovrebbe generarlo. Vuoto = disabilitato, fail-safe: nessun URL
+    # configurato non deve rompere il boot ne' i cron esistenti.
+    wa_deadman_ping_url: str = ""
 
     # --- Canale WhatsApp: reply-watcher + opt-out (M4) --------------------
     # Lucchetto profilo Chromium. Il conto vero di una mini-sessione nel caso
