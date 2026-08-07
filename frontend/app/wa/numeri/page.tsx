@@ -17,6 +17,7 @@ import { useState } from 'react'
 import useSWR from 'swr'
 import { toast } from 'sonner'
 import { waApi, type WaNumber, type WaNumberStatus } from '@/lib/waApi'
+import { AggiungiNumeroButton } from './AggiungiNumeroDialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -61,11 +62,14 @@ export default function WaNumeriPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold text-white">Numeri WhatsApp</h1>
-        <p className="mt-1 text-sm" style={{ color: 'var(--wa-muted)' }}>
-          Numeri collegati al canale WhatsApp, un profilo browser per numero.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-white">Numeri WhatsApp</h1>
+          <p className="mt-1 text-sm" style={{ color: 'var(--wa-muted)' }}>
+            Numeri collegati al canale WhatsApp, un profilo browser per numero.
+          </p>
+        </div>
+        <AggiungiNumeroButton onChanged={mutate} />
       </div>
 
       {error && (
@@ -85,6 +89,11 @@ export default function WaNumeriPage() {
           style={{ borderColor: 'var(--wa-border)', backgroundColor: 'var(--wa-surface)' }}
         >
           <p className="text-lg font-medium text-white">Nessun numero configurato</p>
+          <p className="mt-2 text-sm" style={{ color: 'var(--wa-muted)' }}>
+            Usa &quot;Aggiungi numero&quot; qui sopra. Dopo averlo creato il numero nasce in
+            &quot;QR in attesa&quot;: va collegato con &quot;Avvia login QR&quot; davanti allo schermo
+            della macchina che ospita il backend.
+          </p>
         </div>
       )}
 
