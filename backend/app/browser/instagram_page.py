@@ -34,6 +34,11 @@ class InstagramPage:
         # Memorizzato da ensure_logged_in: serve a costruire AccountChallengeError
         # quando un interstiziale di blocco compare DURANTE il lavoro.
         self._account_id: str | None = None
+        # Payload `data.user` colto PASSIVAMENTE durante l'ultima send_dm: la
+        # richiesta la fa il JavaScript di Instagram da solo, noi leggiamo la
+        # risposta che passa. Zero richieste attribuibili al bot. Il chiamante
+        # decide se e quando persisterlo (vedi campaign_orchestrator).
+        self.last_profile_capture: dict | None = None
 
     async def _get_page(self):
         if not self._page or self._page.is_closed():
@@ -362,7 +367,37 @@ class InstagramPage:
         # Navigate to target's profile
         profile_url = f"{self.BASE_URL}/{username}/"
         logger.debug(f"Navigating to profile: {profile_url}")
-        await page.goto(profile_url, wait_until="domcontentloaded")
+
+        # Harvest passivo: la visita al profilo avviene comunque per mandare il DM.
+        # Ci mettiamo in ascolto PRIMA del goto e leggiamo la risposta GraphQL che
+        # la pagina di Instagram richiede da se'. Nessuna attesa, nessuna fetch:
+        # se non arriva, il DM parte lo stesso.
+        self.last_profile_capture = None
+
+        async def _on_response(resp):
+            try:
+                if "/api/graphql" not in resp.url or resp.status != 200:
+                    return
+                if self.last_profile_capture is not None:
+                    return
+                body = await resp.json()
+                u = (((body or {}).get("data") or {}).get("user"))
+                # Solo il profilo che stiamo visitando: la pagina emette query
+                # anche per altri utenti (suggeriti, storie).
+                if (isinstance(u, dict) and u.get("username")
+                        and str(u["username"]).lower() == username.lower()):
+                    self.last_profile_capture = u
+            except Exception as e:
+                logger.debug(f"@{username}: harvest passivo fallito ({e}) — DM prosegue")
+
+        page.on("response", _on_response)
+        try:
+            await page.goto(profile_url, wait_until="domcontentloaded")
+        finally:
+            try:
+                page.remove_listener("response", _on_response)
+            except Exception:
+                pass
         await asyncio.sleep(random.uniform(1.5, 3.0))
 
         # Blocco IG (scraping_warning / challenge / checkpoint / suspended): fermarsi

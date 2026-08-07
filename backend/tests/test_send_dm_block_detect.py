@@ -25,6 +25,12 @@ class _FakePage:
         self._url_dopo_goto = url_dopo_goto
         self.goto_calls: list[str] = []
 
+    def on(self, event, handler):
+        pass
+
+    def remove_listener(self, event, handler):
+        pass
+
     async def goto(self, url, **kwargs):
         self.goto_calls.append(url)
         self.url = self._url_dopo_goto
