@@ -258,6 +258,8 @@ async def login(number_id: str, db=Depends(get_db)) -> dict:
             stato = await wa_session.assisted_login(number_id)
     except wa_profile_lock.WaProfileBusy:
         raise HTTPException(409, _PROFILO_OCCUPATO)
+    except wa_session.WaBrowserLoopUnsupported as exc:
+        raise HTTPException(503, str(exc))
     return {"status": stato.value}
 
 
@@ -272,6 +274,12 @@ async def check(number_id: str, db=Depends(get_db)) -> dict:
             stato = await wa_session.check_session(number_id)
     except wa_profile_lock.WaProfileBusy:
         raise HTTPException(409, _PROFILO_OCCUPATO)
+    # 503 e non 500: la richiesta e' legittima, e' il processo che non puo'
+    # servirla finche' gira con l'event loop sbagliato. Il messaggio dice
+    # cosa fare -- il 500 generico del middleware non diceva nemmeno cosa
+    # fosse andato storto (vedi WaBrowserLoopUnsupported).
+    except wa_session.WaBrowserLoopUnsupported as exc:
+        raise HTTPException(503, str(exc))
     return {"status": stato.value}
 
 
