@@ -31,6 +31,7 @@ class FakePage:
         self.evaluate_result = evaluate_result
         self._on_response = None
         self.evaluate_calls = []
+        self.url = "https://www.instagram.com/"
 
     def on(self, event, cb):
         if event == "response":
@@ -41,6 +42,9 @@ class FakePage:
             self._on_response = None
 
     async def goto(self, url, **kw):
+        # Come il vero Playwright: dopo il goto raw_page.url riflette la pagina
+        # navigata (letto da _capture_web_profile_info per il check di blocco).
+        self.url = url
         for r in self.responses:
             if self._on_response is not None:
                 await self._on_response(r)
