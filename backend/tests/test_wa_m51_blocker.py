@@ -98,3 +98,47 @@ def test_t1_quarantena_non_arma_fm2():
     assert "quarantena_risync" in wa_worker.MOTIVI_NON_FM2
     # I guasti veri restano guasti.
     assert "casella-ricerca-non-trovata" not in wa_worker.MOTIVI_NON_FM2
+
+
+# ---------------------------------------------------------------------------
+# T2 — avviare una campagna accoda il worker
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_t2_avviare_una_campagna_accoda_il_worker(db_session, monkeypatch):
+    """Il difetto piu' silenzioso della review: start scriveva running e non
+    accodava niente. La campagna restava 'In corso' senza nessun worker."""
+    from app.services import wa_campaign_service as svc
+
+    accodate = []
+
+    async def _finta_enqueue(campaign_id: str) -> int:
+        accodate.append(campaign_id)
+        return 1
+
+    monkeypatch.setattr("app.workers.wa_worker.enqueue_wa_workers", _finta_enqueue)
+
+    ctx = await scenario_pronto(db_session)
+    await svc.avvia(db_session, ctx["campaign"].id)
+
+    assert accodate == [ctx["campaign"].id], (
+        "avvia() deve accodare il worker: senza, la campagna e' running e "
+        "nessuno invia")
+
+
+@pytest.mark.asyncio
+async def test_t2_redis_giu_non_annulla_l_avvio(db_session, monkeypatch):
+    """Se l'accodamento fallisce, la campagna resta avviata: lo stato e' gia'
+    committato e il supervisore riaccodera'. Perdere l'avvio sarebbe peggio."""
+    from app.models.wa import WaCampaignStatus
+    from app.services import wa_campaign_service as svc
+
+    async def _enqueue_rotta(campaign_id: str) -> int:
+        raise ConnectionError("redis irraggiungibile")
+
+    monkeypatch.setattr("app.workers.wa_worker.enqueue_wa_workers", _enqueue_rotta)
+
+    ctx = await scenario_pronto(db_session)
+    campagna = await svc.avvia(db_session, ctx["campaign"].id)
+
+    assert campagna.status == WaCampaignStatus.running

@@ -1,4 +1,4 @@
-"""Guardie globali di test. DUE cose, entrambe per non toccare la produzione:
+"""Guardie globali di test. TRE cose, tutte per non toccare la produzione:
 
 1) DB → SQLite locale, MAI Supabase prod.
    Bug (07/07/2026): molti test usano `AsyncSessionLocal` (agganciato a
@@ -9,7 +9,15 @@
    così engine/AsyncSessionLocal nascono già puntati al DB di test. Le tabelle
    vengono create una volta per sessione.
 
-2) Telegram → spento.
+2) Redis → database dedicato, MAI quello del bot vivo.
+   Stesso rischio del punto 1, scoperto in M5.1: da quando `avvia()` accoda il
+   worker di invio (prima non lo faceva -- ed era il bug), un test che chiama
+   quel servizio senza mock mette un job VERO nella coda ARQ. Con il .env di
+   produzione quella coda e' quella del canale vivo. Si forza un database Redis
+   separato prima di ogni import `app.*`, per la stessa ragione e con lo stesso
+   metodo del DB.
+
+3) Telegram → spento.
    Un test che esercita il notifier senza mock spammerebbe l'operatore.
 """
 import os
@@ -26,6 +34,13 @@ import os
 # invece di lasciarlo sbagliare in silenzio (contratto M2/M3 §8.1).
 _SLOT = os.environ.get("WA_TEST_DB_SLOT", "default")
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///./data/test_bot_{_SLOT}.db"
+
+# Stessa guardia, stessa ragione, altro servizio: da M5.1 avviare una campagna
+# WA accoda un job ARQ vero, e senza questa riga un test lo metterebbe nella
+# coda che il worker di produzione consuma. Database 15 (l'ultimo dei 16
+# predefiniti di Redis): non e' usato da nessuna configurazione del bot.
+os.environ["REDIS_URL"] = os.environ.get(
+    "WA_TEST_REDIS_URL", "redis://localhost:6379/15")
 
 # La cartella e' gitignorata: in locale esiste perche' ci gira il bot, su un
 # runner pulito no, e sqlite non la crea da solo ("unable to open database
