@@ -86,6 +86,7 @@ async def resolve_and_store_bio_browser(row, campaign, db, browser_session) -> t
       'soft_block' -> 429/401/403 (web_profile_info o /info/): row NON marcata (il chiamante
                       rilascia il claim -> torna 'pending' per il retry)
       'network'    -> pagina/rete giu': row NON marcata (il chiamante rilascia il claim)
+      'blocked'    -> row NON marcata (il chiamante isola l'account e mette in pausa la campagna)
     """
     username = row.username
     try:
