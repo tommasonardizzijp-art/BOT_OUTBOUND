@@ -354,7 +354,10 @@ class Settings(BaseSettings):
     wa_session_max_msg: int = 15                # SDD 10.3
     wa_break_min_min: int = 20                  # SDD 10.3
     wa_break_max_min: int = 40                  # SDD 10.3
-    wa_active_hours: str = "09:30-19:30"        # SDD 10.3, Europe/Rome
+    # Deciso con Tommaso 07/08 sera per l'uso quotidiano reale (Primero): il
+    # default originale (09:30-19:30, SDD 10.3) era troppo stretto, osservato
+    # piu' volte nei collaudi A2/A3. Europe/Rome.
+    wa_active_hours: str = "09:00-20:00"
     # STIMATO, non misurato: finestra in cui la sincronizzazione post
     # riconnessione rende cieca la guardia (A9/FM16). Da rimisurare quando
     # SYNC_INDICATOR sara' catalogato.
@@ -364,8 +367,33 @@ class Settings(BaseSettings):
     # Stesso valore di campaign_orchestrator.LOCK_TIMEOUT_MINUTES.
     wa_lock_timeout_min: int = 20
     wa_max_failures_per_contact: int = 3        # SDD 8.2
-    wa_stop_words: str = "stop,basta,cancellami,non scrivermi,unsubscribe,rimuovimi"
+    # Parole DURE: opt-out immediato, nessun caso ambiguo in italiano comune
+    # (review G6, 07/08). "basta" spostata sotto: e' comunissima in frasi che
+    # non sono un opt-out ("mi basta sapere se siete aperti").
+    wa_stop_words: str = "stop,cancellami,non scrivermi,unsubscribe,rimuovimi"
+    # Parole AMBIGUE: opt-out immediato SOLO se il messaggio e' sostanzialmente
+    # quella parola sola (wa_optout.looks_like_stop, testo normalizzato <= 3
+    # parole); altrimenti nessun opt-out automatico -- vedi
+    # looks_like_ambiguous_stop_needs_review per la segnalazione umana.
+    wa_stop_words_ambigue: str = "basta"
     wa_global_daily_cap: int = 200              # SDD Q70, safety valve macchina
+    # Circuit breaker sul tasso di opt-out (review P4, 07/08): il numero che
+    # rischia il ban e' del CLIENTE, non nostro. Sotto wa_optout_breaker_min_invii
+    # il campione e' troppo piccolo per significare qualcosa (1 opt-out su 2
+    # invii e' 50%, rumore puro) -- il breaker resta muto finche' non c'e'
+    # abbastanza segnale. Soglia (25%) volutamente piu' alta del solo
+    # "allarme" mostrato in UI (SOGLIA_ALLARME_OPTOUT_PCT=5%, wa_campaigns.py):
+    # quello e' un warning da leggere con calma, questo ferma il canale.
+    wa_optout_breaker_min_invii: int = 10
+    wa_optout_breaker_pct: float = 25.0
+    # Dead-man's switch esterno (review P6, 07/08): il backend gira sul PC
+    # di casa -- se il PC si spegne, l'health-check che dovrebbe avvisare e'
+    # dentro il processo morto, non avvisa nessuno. Un ping periodico verso
+    # un servizio esterno (healthchecks.io o simile, URL con token univoco
+    # generato LORO) e' l'unico allarme che sopravvive al processo che
+    # dovrebbe generarlo. Vuoto = disabilitato, fail-safe: nessun URL
+    # configurato non deve rompere il boot ne' i cron esistenti.
+    wa_deadman_ping_url: str = ""
 
     # --- Canale WhatsApp: reply-watcher + opt-out (M4) --------------------
     # Lucchetto profilo Chromium. Il conto vero di una mini-sessione nel caso
@@ -380,6 +408,12 @@ class Settings(BaseSettings):
     # l'heartbeat (wa_profile_lock.renew dopo ogni messaggio) e il cap
     # wall-clock del loop di invio, non questo numero.
     wa_profile_lock_ttl_min: int = 90
+    # Pulizia proattiva del lock (wa_profile_lock.release_stale), separata
+    # dal TTL sopra apposta: quello e' anche il cap wall-clock della
+    # mini-sessione, questo e' solo "da quanto manca un heartbeat prima di
+    # considerare il possessore morto". Vedi rationale nel docstring di
+    # release_stale.
+    wa_profile_lock_stale_min: int = 25
     # Retry breve quando un job di invio trova il profilo occupato (health-
     # check o reply-scan in corso): non e' la fine-sessione (break_s, minuti-
     # decine), e' "riprova fra un attimo".

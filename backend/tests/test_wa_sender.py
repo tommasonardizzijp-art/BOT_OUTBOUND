@@ -195,6 +195,64 @@ async def test_sync_state_synced_non_e_richiesto_ma_syncing_blocca(monkeypatch):
     assert esito.motivo == "sincronizzazione_in_corso"
 
 
+# ---------------------------------------------------------------------------
+# "Ha risposto" e' una RELAZIONE, non una proprieta' della chat.
+#
+# Serve un nostro messaggio e qualcosa arrivato dopo. Prima del collaudo
+# dell'08/08 la guardia guardava solo il secondo termine: qualunque inbound,
+# di qualunque epoca, valeva "ha risposto". Combinato con la regola V2 (si
+# scrive SOLO a chi ha gia' una chat aperta) restava scrivibile solo chi ha
+# una chat in cui non ha MAI scritto nulla -- praticamente nessuno.
+#
+# Il ramo non aveva copertura diretta: tutti i test della guardia passavano
+# gia_scritto_prima=False, e nessuno verificava la transizione
+# "coda non vuota -> ha_risposto". Per questo e' arrivato al primo invio vero.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_inbound_preesistente_non_e_una_risposta_se_non_abbiamo_mai_scritto(monkeypatch):
+    """Il caso trovato dal vivo: chat con una conversazione dentro, ma noi a
+    questo contatto non abbiamo mai scritto. Quei messaggi non sono una
+    risposta a noi -- sono una conversazione che esisteva prima."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    pom = _PomFinto(["ciao come stai", "ci vediamo domani"])
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is True
+    assert esito.motivo == "silenzio"
+
+
+@pytest.mark.asyncio
+async def test_inbound_dopo_un_nostro_messaggio_e_una_risposta_e_ferma_tutto(monkeypatch):
+    """L'altra meta': se avevamo scritto noi, un inbound E' una risposta e la
+    sequenza si ferma. Senza questo test il fix sopra potrebbe disattivare la
+    guardia del tutto e i test resterebbero verdi."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    pom = _PomFinto(["ciao, mi interessa"])
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=True, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "ha_risposto"
+    assert "mi interessa" in esito.prova
+
+
+@pytest.mark.asyncio
+async def test_lo_stop_blocca_anche_se_non_abbiamo_mai_scritto(monkeypatch):
+    """L'invariante che il fix NON deve intaccare (SDD 7.2): uno STOP non e'
+    mai scavalcabile, nemmeno quando arriva da una conversazione che
+    precede qualunque nostro invio. Un opt-out vale da qualunque canale
+    arrivi e a qualunque epoca -- e' un obbligo, non una preferenza."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    pom = _PomFinto(["non scrivetemi piu", "STOP"])
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "optout"
+
+
 @pytest.mark.asyncio
 async def test_scroll_mai_tentato_blocca(monkeypatch):
     """HistoryInfo.ok=False vuol dire che il box del pannello non e' stato

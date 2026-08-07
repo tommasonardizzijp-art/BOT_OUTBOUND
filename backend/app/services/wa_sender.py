@@ -168,7 +168,41 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
 
     # Una risposta qualsiasi ferma la sequenza (SDD 7.4, decisione 24/07),
     # ma NON e' questa funzione a marcarlo: qui si dice solo che c'e'.
-    if coda:
+    #
+    # SUBORDINATO a gia_scritto_prima (collaudo dal vivo 08/08). "Ha risposto"
+    # e' una relazione fra due cose: un nostro messaggio e cio' che e'
+    # arrivato dopo. Se noi non abbiamo mai scritto a questo contatto, quello
+    # che c'e' nella chat NON e' una risposta a noi -- e' una conversazione
+    # che esisteva prima, di cui il sistema non ha e non puo' avere memoria.
+    #
+    # Perche' contava, e non era un caso limite. La regola V2 fa scrivere
+    # SOLO a chi ha gia' una chat aperta (valuta_apertura -> no_existing_chat
+    # per tutti gli altri). Messa insieme alla condizione precedente
+    # -- qualunque inbound, di qualunque epoca, blocca -- restava scrivibile
+    # solo chi ha una chat in cui non ha MAI scritto nulla. Un insieme
+    # praticamente vuoto, e per un numero di servizio proprio vuoto: i
+    # clienti che scrivono all'azienda sono esattamente quelli che si
+    # vogliono ricontattare.
+    #
+    # Trovato al primo invio reale del canale: il contatto e' stato marcato
+    # `replied` -- terminale e irreversibile -- senza aver ricevuto niente, e
+    # la campagna si e' chiusa "conclusa" con falliti=0. Nessuna suite poteva
+    # vederlo: nei test le chat sono finte e nascono vuote.
+    #
+    # Quello che NON cambia, ed e' la ragione per cui il fix e' sicuro: lo
+    # STOP viene controllato PRIMA (punto 5, sopra), su tutta la coda e a
+    # qualunque epoca, senza guardare gia_scritto_prima. Un opt-out scritto
+    # anni fa resta non scavalcabile: e' l'invariante SDD 7.2 e non e'
+    # toccata. Qui si distingue solo "risposta a noi" da "conversazione
+    # preesistente".
+    #
+    # Resta scoperto -- e va detto -- il caso di chi ci ha risposto FUORI dal
+    # sistema (un PoC, un altro strumento, il telefono in mano a una
+    # persona): il DB non ne sa nulla e questo contatto verra' contattato. La
+    # difesa giusta per quel caso e' il frequency cap fra campagne, che oggi
+    # non esiste (last_contacted_at viene scritto e non letto da nessuno,
+    # review 07/08) e che va chiuso prima della FASE B.
+    if coda and gia_scritto_prima:
         return EsitoGuardia(False, "ha_risposto", prova=coda[-1][:300])
 
     return EsitoGuardia(True, "silenzio")
@@ -334,6 +368,7 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
             await wa_optout.persist_wa_optout(db, contact.id, prova=testo_in,
                                               campaign_id=campaign.id)
             await _incrementa_contatore_campagna(db, campaign.id, "opted_out")
+            await wa_optout.check_optout_circuit_breaker(db, campaign.id)
             logger.warning(f"[WA] {masked}: STOP arrivato nella finestra TOCTOU, "
                            "invio annullato")
             return EsitoInvio("opted_out", "stop_toctou")
@@ -516,6 +551,7 @@ async def _esito_guardia_negativa(db, cc, contact, campaign, guardia, masked: st
         await wa_optout.persist_wa_optout(db, contact.id, prova=guardia.prova or "",
                                           campaign_id=campaign.id)
         await _incrementa_contatore_campagna(db, campaign.id, "opted_out")
+        await wa_optout.check_optout_circuit_breaker(db, campaign.id)
         logger.warning(f"[WA] {masked}: STOP in coda, invio annullato")
         return EsitoInvio("opted_out", "stop")
 

@@ -745,6 +745,18 @@ async def enqueue_wa_workers(campaign_id: str) -> int:
                                           _job_id=wa_send_job_id(number_id))
             if job is not None:
                 n += 1
+            else:
+                # ARQ scarta in silenzio un enqueue con _job_id gia' presente
+                # (job differito da un Retry precedente, es. dopo
+                # cap_esaurito/fuori_finestra) -- corretto per il flusso
+                # automatico (evita duplicati), ma un umano che chiama
+                # avvia()/riprendi()/kick e vede "accodati:0" non ha modo di
+                # distinguerlo da un guasto vero senza questo log (lezione
+                # collaudo A3, 07/08). Per forzarlo subito senza duplicarlo:
+                # ZADD arq:queue <now_ms> wa:send:<number_id>.
+                logger.info(f"[WA] enqueue {number_id}: job "
+                            f"{wa_send_job_id(number_id)} gia' schedulato, "
+                            "non e' un errore -- lo raccoglie da solo al suo turno")
         return n
     finally:
         await redis.aclose()

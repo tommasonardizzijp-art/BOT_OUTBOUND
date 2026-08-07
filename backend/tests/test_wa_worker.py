@@ -734,19 +734,29 @@ async def _redis_o_skip():
 
 
 @pytest.mark.asyncio
-async def test_d20_due_enqueue_job_stesso_job_id_arq_scarta_il_duplicato(db_session, _redis_o_skip):
+async def test_d20_due_enqueue_job_stesso_job_id_arq_scarta_il_duplicato(db_session, _redis_o_skip, monkeypatch):
     """Adversarial #20: un solo job attivo per numero -- niente doppia
-    mini-sessione parallela sullo stesso numero (romperebbe il pacing)."""
+    mini-sessione parallela sullo stesso numero (romperebbe il pacing).
+
+    Il secondo enqueue scartato deve anche loggarsi: prima di questo fix
+    tornava 'accodati:0' in silenzio, indistinguibile da un guasto vero
+    (collaudo A3, 07/08 -- vedi docstring in enqueue_wa_workers). Spy
+    diretto sul logger, non caplog: loguru non e' agganciato allo stdlib
+    logging in questo repo, caplog non vedrebbe nulla."""
     import arq
     from app.services.work_enqueue import arq_redis_settings
 
     ctx = await _scenario_claim(db_session)
     await db_session.commit()
 
+    messaggi = []
+    monkeypatch.setattr(wa_worker.logger, "info", lambda msg, *a, **k: messaggi.append(msg))
+
     n1 = await wa_worker.enqueue_wa_workers(ctx["campaign"].id)
     n2 = await wa_worker.enqueue_wa_workers(ctx["campaign"].id)
     assert n1 == 1
     assert n2 == 0
+    assert any("gia' schedulato" in m for m in messaggi)
 
     redis = await arq.create_pool(arq_redis_settings())
     try:
@@ -868,6 +878,15 @@ async def test_mini_sessione_salta_se_profilo_occupato(db_session, monkeypatch):
     from app.services import wa_profile_lock
 
     monkeypatch.setattr(settings, "wa_send_enabled", True)
+    # Congelata dentro la finestra attiva (default 09:30-19:30): senza
+    # questo il precheck "Cancello 2" (_niente_da_fare_prima_del_browser,
+    # righe 208-211 di wa_worker.py) legge l'ora REALE di sistema e, fuori
+    # dall'orario di lavoro, esce con "fuori_finestra" PRIMA di arrivare al
+    # lucchetto del profilo che questo test vuole esercitare -- il test
+    # falliva in CI/locale la sera (assert 'fuori_finestra' == 'profilo_
+    # occupato'). Stesso valore/meccanismo del default ora_corrente=12 di
+    # _mini_sessione_con_doppi piu' sotto in questo file.
+    monkeypatch.setattr(wa_worker, "_ora_locale_corrente", lambda: 12)
     ctx = await _scenario_claim(db_session)
 
     class _CtxOccupato:

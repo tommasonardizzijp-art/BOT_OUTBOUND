@@ -14,7 +14,7 @@ from app.config import settings
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                            WaContact, WaContactStatus, WaInboundEvent,
                            WaMatchedBy, WaNumber, WaNumberStatus)
-from app.services import bot_state_service, wa_optout, wa_profile_lock
+from app.services import bot_state_service, notifier, wa_optout, wa_profile_lock
 from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
 from app.utils import events
 from app.utils.phone_pseudonym import PhoneNormalizationError, hmac_phone, normalize_e164
@@ -170,11 +170,27 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
             campaign_id=cc_attiva.campaign_id if cc_attiva else None)
         if cc_attiva is not None and not gia_optato:
             await _incrementa_contatore_campagna(db, cc_attiva.campaign_id, "opted_out")
+            await wa_optout.check_optout_circuit_breaker(db, cc_attiva.campaign_id)
         db.add(WaInboundEvent(tenant_id=tenant_id, wa_number_id=wa_number_id,
                               contact_id=contatto.id, preview_text=row.preview,
                               matched_by=matched_by, processed=True))
         await db.commit()
         return {"esito": "optout", "contact_id": contatto.id}
+
+    if wa_optout.looks_like_ambiguous_stop_needs_review(row.preview):
+        # Parola ambigua (es. 'basta') in un messaggio troppo lungo per
+        # l'opt-out automatico (review G6, 07/08): la sequenza si ferma
+        # comunque sotto -- 'una risposta qualsiasi' -- ma qui serve un
+        # umano che legga e decida se era davvero un opt-out. Best-effort:
+        # un blip Telegram non deve impedire di fermare la sequenza sotto.
+        try:
+            await notifier.send_telegram(
+                f"WhatsApp: contatto {contatto.id[:8]} ha scritto qualcosa con "
+                f"'basta' ma non abbastanza corto per un opt-out automatico -- "
+                f"verifica a mano se serve fermarlo: {row.preview[:200]!r}",
+                level="warning")
+        except Exception as exc:
+            logger.error(f"[WA] alert 'basta' ambiguo non inviato: {type(exc).__name__}")
 
     cc_attiva = await _campagna_attiva_del_contatto(db, contatto.id)
     if cc_attiva is not None:

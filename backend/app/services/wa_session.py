@@ -24,6 +24,7 @@ DUE COSE MISURATE IN M0 CHE QUESTO MODULO DEVE RISPETTARE:
 """
 import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -58,6 +59,80 @@ WHATSAPP_WEB_URL = "https://web.whatsapp.com/"
 # leva resta quella sopra -- una lettura DOM piu' snella di session_state()
 # -- non abbassare questa costante.
 ASSISTED_LOGIN_POLL_INTERVAL_S = 2.0
+
+
+class WaBrowserLoopUnsupported(RuntimeError):
+    """L'event loop che ospita la chiamata non sa avviare subprocess, quindi
+    nessun browser puo' partire da qui.
+
+    Non e' un guasto del canale WhatsApp: e' come e' stato avviato il
+    processo. Su Windows `asyncio.SelectorEventLoop` non implementa
+    `_make_subprocess_transport`, e Patchright avvia il driver Node proprio
+    come subprocess -- quindi `async_playwright()` muore con un
+    `NotImplementedError` nudo, senza una riga che dica da dove viene.
+
+    Chi sceglie il loop e' uvicorn, non noi (uvicorn/loops/asyncio.py):
+
+        if sys.platform == "win32" and not use_subprocess:
+            return asyncio.ProactorEventLoop
+        return asyncio.SelectorEventLoop
+
+    e `use_subprocess` e' `reload or workers > 1` (uvicorn/config.py). Quindi
+    **`uvicorn --reload` su Windows disattiva il login QR e la verifica
+    sessione**, le due sole azioni che aprono un browser dentro il processo
+    web. Gli invii non sono toccati: girano negli ARQ worker, processi a
+    parte con il loop di default (Proactor).
+
+    Costato una sessione di collaudo il 08/08: dal terminale funzionava
+    tutto, dall'interfaccia usciva solo "Errore interno temporaneo del
+    server" -- il 500 generico di _CatchUnhandledMiddleware. Questa
+    eccezione esiste per dire il perche' al primo colpo, invece di lasciare
+    ripetere quella diagnosi.
+    """
+
+
+# Su piattaforme non-Windows la classe non esiste: qui interessa solo per la
+# isinstance sotto, e l'assenza vale "nessun vincolo da controllare".
+_ProactorEventLoop = getattr(asyncio, "ProactorEventLoop", None)
+
+
+def _loop_puo_avviare_subprocess(loop, piattaforma: str | None = None) -> bool:
+    """True se `loop` puo' lanciare un subprocess (quindi un browser).
+
+    Criterio POSITIVO -- deve essere un ProactorEventLoop -- non "non e' un
+    SelectorEventLoop": su Windows l'unico loop capace di subprocess e' il
+    Proactor, e un loop di terze parti che non lo sia fallirebbe uguale.
+    Meglio un falso allarme (diagnosticabile) di un NotImplementedError.
+
+    `piattaforma` e' iniettabile per i test: la logica va verificata anche
+    dalla CI Linux, dove `asyncio.ProactorEventLoop` non esiste proprio.
+
+    E quando la classe non c'e' ma la piattaforma dichiarata e' win32, la
+    risposta e' False, non True. Su un Windows vero quella classe c'e'
+    sempre: la combinazione si produce solo iniettando `piattaforma` da
+    un'altra macchina, cioe' in un test. Rispondere True li' rendeva il caso
+    win32 non verificabile dalla CI Linux -- il guard usciva prima di
+    guardare il loop, e il test "un loop qualunque su win32 non va bene"
+    passava per la ragione sbagliata (falliva in CI, che e' come e' emerso).
+    False e' anche la risposta coerente col resto del modulo: non poter
+    verificare non e' un permesso.
+    """
+    piattaforma = sys.platform if piattaforma is None else piattaforma
+    if piattaforma != "win32":
+        return True
+    return _ProactorEventLoop is not None and isinstance(loop, _ProactorEventLoop)
+
+
+def _verifica_loop_o_solleva() -> None:
+    if _loop_puo_avviare_subprocess(asyncio.get_running_loop()):
+        return
+    raise WaBrowserLoopUnsupported(
+        "Impossibile aprire il browser WhatsApp: il processo gira su un "
+        "event loop che su Windows non sa avviare subprocess "
+        "(asyncio.SelectorEventLoop). E' cosi' quando uvicorn parte con "
+        "--reload o --workers>1. Riavviare il backend SENZA --reload: "
+        "uvicorn app.main:app --port 8000"
+    )
 
 
 def stato_da_segnale(segnale: str) -> WaNumberStatus:
@@ -142,6 +217,12 @@ async def _open_wa_browser(number_id: str, *, headless: bool, proxy_url: str | N
     Qui il proxy arriva gia' risolto dal chiamante (letto da WaNumber) e il
     profilo e' wa_<id> (profile_dir_for).
     """
+    # PRIMA di tutto il resto, e per lo stesso motivo per cui la validazione
+    # del proxy sta fuori dal lock (commento sotto): se il browser non puo'
+    # partire in questo processo, va detto senza aver toccato il profilo --
+    # ne' mkdir, ne' rimozione dei SingletonLock.
+    _verifica_loop_o_solleva()
+
     try:
         from patchright.async_api import async_playwright
     except ImportError:

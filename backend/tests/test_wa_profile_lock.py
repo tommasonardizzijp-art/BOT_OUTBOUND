@@ -44,7 +44,7 @@ async def test_held_non_rilascia_lock_altrui_scaduto(fake_redis):
     async with wa_profile_lock.held("num-1") as token_nuovo:
         assert token_nuovo != "token-vecchio"
         current = await fake_redis.get("wa:profile-lock:num-1")
-        assert current.decode() == token_nuovo
+        assert wa_profile_lock._token_di(current) == token_nuovo
     assert not await fake_redis.exists("wa:profile-lock:num-1")
 
 
@@ -80,6 +80,39 @@ async def test_renew_non_solleva_se_redis_non_risponde(monkeypatch):
     monkeypatch.setattr(wa_profile_lock.arq, "create_pool", _pool_rotto)
 
     assert await wa_profile_lock.renew("num-1", "token") is False
+
+
+@pytest.mark.asyncio
+async def test_release_stale_rilascia_lock_senza_heartbeat_recente(fake_redis):
+    """Simula un worker morto a meta' sessione: heartbeat vecchio, nessun
+    renew arrivato. Il cron deve liberarlo senza aspettare i 90 min del TTL."""
+    vecchio = f"token-morto:{int((__import__('time').time() - 30 * 60) * 1000)}"
+    await fake_redis.set("wa:profile-lock:num-1", vecchio, ex=90 * 60)
+    rilasciati = await wa_profile_lock.release_stale(stale_after_min=25)
+    assert rilasciati == 1
+    assert not await fake_redis.exists("wa:profile-lock:num-1")
+
+
+@pytest.mark.asyncio
+async def test_release_stale_non_tocca_lock_vivo(fake_redis):
+    """Un lock con heartbeat fresco (sessione in corso, renew regolari) non
+    va toccato: cancellarlo aprirebbe un secondo Chromium sullo stesso
+    profilo, il danno esatto che il lock previene."""
+    async with wa_profile_lock.held("num-1"):
+        rilasciati = await wa_profile_lock.release_stale(stale_after_min=25)
+        assert rilasciati == 0
+        assert await fake_redis.exists("wa:profile-lock:num-1")
+
+
+@pytest.mark.asyncio
+async def test_release_stale_ignora_valore_senza_heartbeat(fake_redis):
+    """Un valore nel vecchio formato (solo token, da prima di questa
+    modifica) non ha heartbeat da leggere: fail-safe verso il lock, non
+    lo cancella per non rischiare di liberare una sessione viva."""
+    await fake_redis.set("wa:profile-lock:num-1", "solo-token-senza-heartbeat", ex=90 * 60)
+    rilasciati = await wa_profile_lock.release_stale(stale_after_min=25)
+    assert rilasciati == 0
+    assert await fake_redis.exists("wa:profile-lock:num-1")
 
 
 @pytest_asyncio.fixture
