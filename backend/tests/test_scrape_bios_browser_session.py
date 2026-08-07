@@ -514,3 +514,51 @@ async def test_session_expired_isolates_account_and_pauses(monkeypatch):
         a = await db.get(IA, acc_id)
         assert c.status == CampaignStatus.paused
         assert a.status == AS.challenge_required
+
+
+@pytest.mark.asyncio
+async def test_blocked_outcome_isolates_account_and_pauses_without_marking(monkeypatch):
+    """Task 3: outcome 'blocked' (interstiziale IG dietro al goto) NON deve
+    marcare il follower 'skipped' come not_found/private/error -- resta pending
+    e sbloccato, cosi' il worker DM lo pesca ancora quando l'account e' pulito.
+    L'account va isolato e la campagna in pausa, mirror di AccountSessionExpiredError."""
+    import uuid
+    from app.models.account import InstagramAccount, AccountStatus
+    base = 972000000000 + int(datetime.utcnow().timestamp()) % 100000
+    acc_id = str(uuid.uuid4())
+    async with AsyncSessionLocal() as db:
+        db.add(InstagramAccount(id=acc_id, username=f"acc_blocked_{base}",
+                                encrypted_password="x", status=AccountStatus.active,
+                                daily_message_limit=20))
+        camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
+        db.add(camp); await db.flush()
+        db.add(Follower(campaign_id=camp.id, ig_user_id=base,
+                        username=f"u{base}", status=FollowerStatus.pending))
+        await db.commit()
+        cid = camp.id
+
+    monkeypatch.setattr(browser_bio, "BrowserSession", _FakeSession)
+    monkeypatch.setattr(browser_bio, "pick_session_cap", lambda *a, **k: 5)
+    monkeypatch.setattr(browser_bio, "human_profile_pause", lambda: _anoop())
+    monkeypatch.setattr(browser_bio, "maybe_micro_scroll", lambda *a, **k: _anoop_false())
+
+    async def fake_fetch(follower, campaign, db, session):
+        return "blocked", Exception("interstiziale IG: scraping_warning")
+    monkeypatch.setattr(browser_bio, "fetch_and_store_bio_browser", fake_fetch)
+
+    defer = await browser_bio.scrape_bios_browser_session(cid, acc_id)
+    assert defer is None  # isolato, non retry
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select
+        from app.models.account import InstagramAccount as IA, AccountStatus as AS
+        f = (await db.execute(
+            select(Follower).where(Follower.campaign_id == cid)
+        )).scalar_one()
+        assert f.status == FollowerStatus.pending    # NON marcato skipped
+        assert f.locked_by_account_id is None         # lock rilasciato
+
+        c = await db.get(Campaign, cid)
+        a = await db.get(IA, acc_id)
+        assert c.status == CampaignStatus.paused
+        assert a.status == AS.challenge_required
