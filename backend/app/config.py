@@ -380,6 +380,12 @@ class Settings(BaseSettings):
     # l'heartbeat (wa_profile_lock.renew dopo ogni messaggio) e il cap
     # wall-clock del loop di invio, non questo numero.
     wa_profile_lock_ttl_min: int = 90
+    # Pulizia proattiva del lock (wa_profile_lock.release_stale), separata
+    # dal TTL sopra apposta: quello e' anche il cap wall-clock della
+    # mini-sessione, questo e' solo "da quanto manca un heartbeat prima di
+    # considerare il possessore morto". Vedi rationale nel docstring di
+    # release_stale.
+    wa_profile_lock_stale_min: int = 25
     # Retry breve quando un job di invio trova il profilo occupato (health-
     # check o reply-scan in corso): non e' la fine-sessione (break_s, minuti-
     # decine), e' "riprova fra un attimo".
