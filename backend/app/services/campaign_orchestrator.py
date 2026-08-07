@@ -658,8 +658,8 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                     catturato = getattr(browser_session.page, "last_profile_capture", None)
                     if await harvest_profile_into_follower(db, follower, catturato):
                         logger.debug(f"[Harvest] dati passivi salvati per @{follower.username}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[Harvest] chiamata saltata per @{follower.username}: {e}")
 
                 # Success bookkeeping (any failure here does NOT cause resend — DM is committed)
                 try:
