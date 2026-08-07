@@ -650,6 +650,17 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 message.account_id = account_id
                 await db.commit()
 
+                # Harvest: la visita al profilo l'abbiamo gia' pagata per mandare il DM.
+                # DOPO la marcatura 'sent' e best-effort: un guasto qui non tocca
+                # la contabilita' dell'invio.
+                try:
+                    from app.services.dm_harvest import harvest_profile_into_follower
+                    catturato = getattr(browser_session.page, "last_profile_capture", None)
+                    if await harvest_profile_into_follower(db, follower, catturato):
+                        logger.debug(f"[Harvest] dati passivi salvati per @{follower.username}")
+                except Exception:
+                    pass
+
                 # Success bookkeeping (any failure here does NOT cause resend — DM is committed)
                 try:
                     await account_manager.record_success(account_id, db)
