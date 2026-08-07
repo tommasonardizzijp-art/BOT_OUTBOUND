@@ -935,9 +935,14 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                 pass
 
 
-async def _scrape_batch(campaign, db, browser_session, count: int) -> int:
+async def _scrape_batch(campaign, db, browser_session, count: int, account_id: str) -> int:
     """Scrapa fino a `count` follower pending via la sessione browser gia' aperta,
-    a ritmo umano. Ritorna quante bio estratte. Difensivo: non solleva."""
+    a ritmo umano. Ritorna quante bio estratte. Difensivo: non solleva.
+
+    `account_id` serve SOLO al ramo 'blocked': se il batch gira durante la pausa
+    tra sessioni e l'account e' dietro un interstiziale IG, isola l'account cosi'
+    il ciclo successivo non lo ripesca (altrimenti continuerebbe a generare
+    traffico da dietro il blocco — mirror di scrape_bios_browser_session)."""
     from sqlalchemy import select
     from app.models.follower import Follower
 
@@ -961,8 +966,13 @@ async def _scrape_batch(campaign, db, browser_session, count: int) -> int:
         if outcome == "done":
             done += 1
         elif outcome == "blocked":
-            # Come sopra: nessuna marcatura, il batch si ferma qui.
+            # Come sopra: nessuna marcatura. In piu' (a differenza del vecchio
+            # solo-break): isola l'account e pausa la campagna, stesso mirror di
+            # scrape_bios_browser_session. Senza isolamento il ciclo di pausa
+            # successivo ripesca lo stesso account e continua a generare traffico
+            # da dietro l'interstiziale — esattamente il fail-mode da chiudere.
             logger.error(f"[BioBrowser] batch fermo: interstiziale IG su @{follower.username}")
+            await _isolate_account_and_pause(campaign.id, account_id, err)
             break
         elif outcome in ("not_found", "private", "error"):
             # Skip benigno: marca skipped cosi' non ri-seleziona lo stesso pending
@@ -1111,7 +1121,7 @@ async def run_pause_browser_activity(campaign_id: str, account_id: str, username
                     select(Campaign).where(Campaign.id == campaign_id)
                 )).scalar_one_or_none()
                 if campaign is not None:
-                    await _scrape_batch(campaign, db, session, n)
+                    await _scrape_batch(campaign, db, session, n, account_id)
 
         return int(time.monotonic() - start)
     except Exception as e:
