@@ -354,7 +354,10 @@ class Settings(BaseSettings):
     wa_session_max_msg: int = 15                # SDD 10.3
     wa_break_min_min: int = 20                  # SDD 10.3
     wa_break_max_min: int = 40                  # SDD 10.3
-    wa_active_hours: str = "09:30-19:30"        # SDD 10.3, Europe/Rome
+    # Deciso con Tommaso 07/08 sera per l'uso quotidiano reale (Primero): il
+    # default originale (09:30-19:30, SDD 10.3) era troppo stretto, osservato
+    # piu' volte nei collaudi A2/A3. Europe/Rome.
+    wa_active_hours: str = "09:00-20:00"
     # STIMATO, non misurato: finestra in cui la sincronizzazione post
     # riconnessione rende cieca la guardia (A9/FM16). Da rimisurare quando
     # SYNC_INDICATOR sara' catalogato.
