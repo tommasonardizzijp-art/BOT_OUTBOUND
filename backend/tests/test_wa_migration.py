@@ -14,9 +14,12 @@ Lo stato "prod gia' a 024" viene fabbricato con i modelli SQLAlchemy REALI
 (create_all filtrato, escludendo le tabelle che la 025 introduce): e' piu'
 fedele di DDL scritto a mano, e non serve rigiocare la catena di migrazioni.
 Le colonne che una migrazione SUCCESSIVA alla 025 aggiunge a una tabella
-GIA' esistente (027 -> bot_state.wa_halted*) vanno tolte a parte: il modello
-corrente le ha gia', ma a "stamp 024" non devono esistere, altrimenti la 027
-duplica la colonna.
+GIA' esistente (027 -> bot_state.wa_halted*, 029 -> campaigns.enrichment_level,
+...) vanno tolte a parte: il modello corrente le ha gia', ma a "stamp 024"
+non devono esistere, altrimenti la migrazione che le introduce duplica la
+colonna. Il drop e' condizionale (PRAGMA table_info) perche' questo fixture
+gira anche su alberi dove quella colonna non e' ancora nel modello (es.
+l'albero WhatsApp, dove campaigns.enrichment_level non esiste affatto).
 """
 import os
 import sqlite3
@@ -40,6 +43,20 @@ WA_NEW_TABLES = {
     "wa_campaign_contacts",
     "wa_messages",
     "wa_inbound_events",
+}
+
+# Colonne che una migrazione SUCCESSIVA alla 025 aggiunge a una tabella GIA'
+# esistente. create_all (coi modelli correnti) le crea gia' insieme al resto
+# della tabella, ma a "stamp 024" (dove il fixture si posiziona) non devono
+# esserci, altrimenti la migrazione che le introduce fa un ADD COLUMN su una
+# colonna duplicata. Chiave = tabella, valore = colonne da droppare SE
+# presenti (mai droppate a secco: vedi _seed_pre_025_schema). Le chiavi sono
+# anche le tabelle Instagram che test_025_non_tocca_instagram si aspetta
+# vedere alterate (non sparite) dall'upgrade: stessa fonte di verita', un
+# solo posto da aggiornare quando una nuova migrazione aggiunge una colonna.
+POST_024_COLUMNS = {
+    "bot_state": ["wa_halted", "wa_halted_reason", "wa_halted_at", "wa_halted_by"],  # 027
+    "campaigns": ["enrichment_level"],  # 029
 }
 
 
@@ -75,15 +92,21 @@ def _seed_pre_025_schema(db_path: Path) -> None:
     finally:
         engine.dispose()
 
-    # bot_state esiste gia' pre-025 (migrazione 007): la 027 (successiva)
-    # le aggiunge le colonne wa_halted*, che pero' il modello SQLAlchemy
-    # corrente ha gia' -- create_all le avrebbe create qui sopra insieme al
-    # resto della tabella. Le togliamo per fabbricare fedelmente lo stato
-    # "prima della 027".
+    # Le tabelle in POST_024_COLUMNS nascono sopra con TUTTE le colonne del
+    # modello corrente, incluse quelle aggiunte da migration successive alla
+    # 025 (027, 029, ...). Le togliamo qui per fabbricare fedelmente lo stato
+    # "prima di quelle migration" -- ma SOLO se la colonna e' realmente
+    # presente (PRAGMA table_info), mai con un ALTER secco: questo fixture
+    # gira anche su alberi (es. WhatsApp/main) dove una data colonna non e'
+    # ancora nel modello SQLAlchemy, quindi create_all non l'ha creata affatto
+    # e un DROP COLUMN incondizionato fallirebbe con "no such column".
     conn = sqlite3.connect(str(db_path))
     try:
-        for col in ("wa_halted", "wa_halted_reason", "wa_halted_at", "wa_halted_by"):
-            conn.execute(f"ALTER TABLE bot_state DROP COLUMN {col}")
+        for table, columns in POST_024_COLUMNS.items():
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for col in columns:
+                if col in existing:
+                    conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
         conn.commit()
     finally:
         conn.close()
@@ -198,11 +221,15 @@ def test_025_non_tocca_instagram(migration_db):
     """Confronto sqlite_master pre/post upgrade: ogni oggetto IG pre-esistente
     resta presente con lo STESSO DDL testuale (un ALTER su SQLite riscrive la
     tabella, quindi cambierebbe/sparirebbe la entry); le uniche differenze
-    sono le 9 tabelle nuove (+ i loro indici), alembic_version, e bot_state
-    (027 ci aggiunge il kill-switch wa_halted: ALTER additivo intenzionale su
-    una tabella IG pre-esistente, non una regressione — la sua entry DDL
-    cambia testo per via delle colonne nuove, ma non sparisce ne' cambia
-    struttura di quelle vecchie)."""
+    sono le 9 tabelle nuove (+ i loro indici), alembic_version, e le tabelle
+    in POST_024_COLUMNS (027 -> bot_state.wa_halted*, 029 ->
+    campaigns.enrichment_level: ALTER additivi intenzionali su tabelle IG
+    pre-esistenti, non regressioni -- la loro entry DDL cambia testo per via
+    delle colonne nuove, ma non sparisce ne' cambia struttura delle altre
+    tabelle vecchie). Le tabelle attese alterate sono le stesse chiavi usate
+    da _seed_pre_025_schema per fabbricare lo schema "pre": se domani una
+    migrazione altera una tabella IG NON registrata li', questo assert deve
+    restare capace di accorgersene e fallire."""
     pre = _sqlite_master(migration_db)
     pre_set = set(pre)
     pre_tables = {tbl for (_typ, _name, tbl, _sql) in pre}
@@ -214,9 +241,11 @@ def test_025_non_tocca_instagram(migration_db):
     post_set = set(post)
     post_tables = {tbl for (_typ, _name, tbl, _sql) in post}
 
-    pre_excluding_bot_state = {row for row in pre_set if row[2] != "bot_state"}
-    assert pre_excluding_bot_state <= post_set, "un oggetto IG preesistente e' sparito o e' cambiato (ALTER?)"
-    assert any(row[2] == "bot_state" for row in post_set), "bot_state e' sparita del tutto (non solo alterata)"
+    altered_tables = set(POST_024_COLUMNS.keys())
+    pre_excluding_altered = {row for row in pre_set if row[2] not in altered_tables}
+    assert pre_excluding_altered <= post_set, "un oggetto IG preesistente e' sparito o e' cambiato (ALTER?)"
+    for table in altered_tables:
+        assert any(row[2] == table for row in post_set), f"{table} e' sparita del tutto (non solo alterata)"
 
     new_tables = post_tables - pre_tables
     assert new_tables == WA_NEW_TABLES | {"alembic_version"}
