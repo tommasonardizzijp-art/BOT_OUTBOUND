@@ -5,11 +5,41 @@ esistenti facevano il contrario (config azzerata con
 `wa_resync_quarantine_min=0`, tempo finto a `browser_avviato_da_s=9999`) ed e'
 esattamente per questo che il blocco della quarantena non e' mai emerso.
 """
-import pytest
+from datetime import datetime
 
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from app.database import get_db
+from app.main import app
+from app.models.user import User
+from app.utils.auth_deps import get_current_user
 from tests.factories_wa import (make_campaign, make_campaign_contact,
                                 make_contact, make_number, make_tenant)
 from tests.helpers_wa_tempo import orologio_virtuale
+
+
+def _admin_utente() -> User:
+    return User(id="00000000-0000-0000-0000-00000000005a",
+                email="admin-wa-m51@test.local", password_hash="x",
+                role="admin", is_active=True, created_at=datetime.utcnow())
+
+
+@pytest_asyncio.fixture
+async def client(db_session):
+    """Stesso pattern di test_wa_api_campaign_lifecycle.py: override REALI di
+    get_db e get_current_user. Senza, ogni richiesta risolve in 401 e il test
+    passerebbe per costruzione senza esercitare la logica vera."""
+    async def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_current_user] = _admin_utente
+    async with AsyncClient(transport=ASGITransport(app=app),
+                           base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
 
 
 async def scenario_pronto(db) -> dict:
@@ -142,3 +172,76 @@ async def test_t2_redis_giu_non_annulla_l_avvio(db_session, monkeypatch):
     campagna = await svc.avvia(db_session, ctx["campaign"].id)
 
     assert campagna.status == WaCampaignStatus.running
+
+
+# ---------------------------------------------------------------------------
+# T3 — da 'error' si esce
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_t3_recover_porta_da_error_a_paused(client, db_session):
+    """Dopo FM2 la campagna finiva in error e non c'era piu' modo di
+    riprenderla: l'unico verbo rimasto era 'stop'. Ora si recupera, ma con un
+    atto esplicito e un motivo, e si passa da paused -- il resume rivalida."""
+    from app.models.wa import WaCampaignStatus
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.error
+    await db_session.commit()
+
+    r = await client.post(f"/api/wa/campaigns/{ctx['campaign'].id}/recover",
+                          json={"motivo": "selettore risistemato, DOM verificato"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "paused"
+
+    await db_session.refresh(ctx["campaign"])
+    assert ctx["campaign"].status == WaCampaignStatus.paused
+
+
+@pytest.mark.asyncio
+async def test_t3_recover_rifiuta_una_campagna_non_in_error(client, db_session):
+    ctx = await scenario_pronto(db_session)      # draft
+    r = await client.post(f"/api/wa/campaigns/{ctx['campaign'].id}/recover",
+                          json={"motivo": "x"})
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_t3_recover_senza_motivo_e_rifiutato(client, db_session):
+    """Uno stato lasciato da un incidente si toglie a mano, lasciando traccia."""
+    from app.models.wa import WaCampaignStatus
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.error
+    await db_session.commit()
+
+    r = await client.post(f"/api/wa/campaigns/{ctx['campaign'].id}/recover",
+                          json={"motivo": "   "})
+    assert r.status_code == 422
+
+    await db_session.refresh(ctx["campaign"])
+    assert ctx["campaign"].status == WaCampaignStatus.error
+
+
+@pytest.mark.asyncio
+async def test_t3_recover_non_riavvia_da_solo(client, db_session, monkeypatch):
+    """Il recupero NON fa ripartire gli invii: porta a paused e basta. Se
+    riportasse a running salterebbe le validazioni di avvio (numero attivo,
+    nessun'altra campagna sullo stesso numero) che vivono in `avvia`."""
+    from app.models.wa import WaCampaignStatus
+
+    accodate = []
+
+    async def _finta_enqueue(campaign_id: str) -> int:
+        accodate.append(campaign_id)
+        return 1
+    monkeypatch.setattr("app.workers.wa_worker.enqueue_wa_workers", _finta_enqueue)
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.error
+    await db_session.commit()
+
+    await client.post(f"/api/wa/campaigns/{ctx['campaign'].id}/recover",
+                      json={"motivo": "verificato"})
+
+    assert accodate == [], "il recupero non deve far ripartire nulla da solo"

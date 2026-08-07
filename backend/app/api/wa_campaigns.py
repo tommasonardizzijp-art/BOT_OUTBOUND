@@ -8,12 +8,15 @@ del ValueError del servizio in 422, guardie di stato macchina (draft-only)
 e serializzazione.
 """
 from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 
 from app.database import get_db
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                            WaCampaignType, WaContact, WaSequenceStep)
 from app.services import wa_campaign_service as svc
+from app.utils import events
 
 router = APIRouter(prefix="/wa/campaigns", tags=["wa-campaigns"])
 
@@ -236,6 +239,55 @@ async def stop(campaign_id: str, db=Depends(get_db)) -> dict:
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     return _serializza(campagna)
+
+
+class RecoverRequest(BaseModel):
+    motivo: str
+
+    @field_validator("motivo")
+    @classmethod
+    def _motivo_non_vuoto(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("il motivo e' obbligatorio: una campagna fermata da "
+                             "un incidente si riprende a mano, lasciando traccia")
+        return v
+
+
+@router.post("/{campaign_id}/recover")
+async def recover(campaign_id: str, body: RecoverRequest, db=Depends(get_db)) -> dict:
+    """error -> paused (review 07/08, blocco B3).
+
+    Prima di M5.1 una campagna che FM2 aveva messo in `error` era
+    irrecuperabile: `avvia` accetta solo draft/paused, `wa_ops.resume_campaign`
+    solo paused, e l'unico verbo rimasto era `stop`. Siccome FM2 scatta per un
+    guasto NOSTRO (DOM cambiato, selettore rotto), il rimedio normale e'
+    "sistemo e riparto": doverlo fare con una UPDATE a mano sul DB non e' un
+    rimedio, e' un buco nella macchina a stati.
+
+    Mai -> running direttamente, per la stessa ragione per cui
+    POST /wa/numbers/{id}/riattiva porta a `pending_qr` e mai ad `active`: le
+    condizioni di avvio (numero attivo, nessun'altra campagna running sullo
+    stesso numero, ri-stampa di next_action_at, accodamento del worker) le
+    verifica `avvia`, e saltarle qui vorrebbe dire ricostruirle in un secondo
+    posto -- cioe' avere due verita' su quando si puo' inviare.
+
+    Il motivo non ha una colonna dove finire (wa_campaigns non ha `notes`, a
+    differenza di wa_numbers): resta nel log e nell'evento di campagna.
+    """
+    campagna = await _campagna_o_404(db, campaign_id)
+    if campagna.status != WaCampaignStatus.error:
+        raise HTTPException(
+            409, f"la campagna e' in stato {campagna.status.value}: il recupero "
+                 "esiste solo per 'error'")
+
+    campagna.status = WaCampaignStatus.paused
+    await db.commit()
+    motivo = body.motivo.strip()[:200]
+    logger.warning(f"[WA] campagna {campaign_id} recuperata da error -> paused: {motivo}")
+    events.emit(campaign_id, "wa.campaign.recovered",
+                f"recuperata da error: {motivo}", level="warning")
+    return {"recovered": True, "status": campagna.status.value,
+            "prossimo_passo": "verifica la causa del guasto, poi riprendi la campagna"}
 
 
 # KPI (Task 8). I contatori sono TUTTI denormalizzati e scritti altrove
