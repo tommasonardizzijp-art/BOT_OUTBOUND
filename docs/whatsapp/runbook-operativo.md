@@ -58,6 +58,20 @@ Li si legge in `GET $API/wa/numbers` (colonna "Stato" della pagina Numeri).
 
 Solo `active` invia (`wa_worker.py`). `suspended` e `retired` li mette e li toglie **una persona**, mai il sistema.
 
+## Il primo messaggio arriva ~15 minuti dopo l'avvio. E' giusto cosi'
+
+La prima cosa che sorprende guardando una campagna partire: **non parte niente per un quarto d'ora.** Non e' un guasto ed e' l'unico comportamento accettabile.
+
+Ogni mini-sessione di invio apre un browser nuovo, e WhatsApp Web dopo ogni connessione **risincronizza** la cronologia delle chat. Dentro quella finestra la guardia opt-out non leggerebbe un silenzio, leggerebbe il vuoto: una chat non ancora sincronizzata sembra non avere messaggi, quindi uno STOP scritto la settimana scorsa non esisterebbe. Il canale aspetta `WA_RESYNC_QUARANTINE_MIN` minuti (15 di default) prima del primo invio di ogni sessione, e nel log compare:
+
+```
+[WA] <id>: quarantena di risincronizzazione, attendo 15 min prima del primo invio
+```
+
+Se invece il primo messaggio parte **subito**, qualcosa non va: `WA_RESYNC_QUARANTINE_MIN` e' stata azzerata. Da controllare prima di lasciar continuare.
+
+L'attesa vale per ogni mini-sessione, non solo per la prima: fra una sessione e l'altra c'e' un break di 20-40 minuti e il browser viene chiuso, quindi al giro dopo la sincronizzazione ricomincia. In pratica un numero manda a raffiche: ~15 minuti fermo, poi 8-15 messaggi con una novantina di secondi l'uno dall'altro, poi il break.
+
 ## Cosa deve/non deve fare il cliente durante una campagna attiva
 
 **Deve:**
@@ -102,13 +116,39 @@ Solo `active` invia (`wa_worker.py`). `suspended` e `retired` li mette e li togl
    ```bash
    curl -s -X POST -H "Authorization: Bearer $TOKEN" $API/wa/ops/campaigns/<id>/kick
    ```
-   Riaccoda il worker: serve quando un job e' andato perso, non e' il caso normale.
+   Riaccoda il worker. Da M5.1 e' davvero il caso raro che questa riga
+   dichiarava: avviare o riprendere una campagna accoda il job da solo, e il
+   cron `wa_campaign_supervisor` (minuti 10/25/40/55, ore attive) riaccoda
+   entro un quarto d'ora qualunque campagna `running` sia rimasta senza worker.
+   **Prima di M5.1 non era vero**: `POST /wa/campaigns/{id}/start` scriveva
+   `running` e non accodava niente, quindi `kick` era l'unico modo di far
+   partire davvero una campagna e nessuno lo sapeva.
 
 **Nota**: `resume_campaign` (M3, eccezione dichiarata al contratto M2-M3 §4.1, vedi commento nel codice) non ristampa `next_action_at` sulle righe contatto come farebbe un resume "vero" — le righe con appuntamento futuro restano ferme fino al loro turno, quelle gia' in coda ripartono. Non serve altro per questo scenario.
 
 ## Incidente: un numero resta bloccato in `cooldown`
 
-Il timer di cooldown **non e' a DB**: non esiste una colonna `cooldown_until`, il timer vive in Redis con un TTL (`wa_number_manager`). Conseguenza operativa: **se Redis e' giu' o e' stato svuotato, un numero puo' restare `cooldown` senza che niente lo segnali e senza che nessun cron lo liberi.** Se un numero e' fermo in `cooldown` piu' a lungo del previsto, controllare prima che Redis sia raggiungibile, poi forzare il ricontrollo con `POST $API/wa/numbers/<id>/check`.
+Il timer di cooldown **non e' a DB**: non esiste una colonna `cooldown_until`, il timer vive in Redis con un TTL (`wa_number_manager`). Conseguenza operativa: **se Redis e' giu' o e' stato svuotato, un numero puo' restare `cooldown` senza che niente lo segnali e senza che nessun cron lo liberi.** Se un numero e' fermo in `cooldown` piu' a lungo del previsto, controllare prima che Redis sia raggiungibile.
+
+⚠️ **Da M5.1, `POST /wa/numbers/<id>/check` NON toglie piu' il cooldown** — e prima non doveva toglierlo comunque. L'health-check girava ogni 30 minuti, vedeva la sessione viva e rimetteva il numero `active`: il cooldown di 4 ore imposto dopo tre guasti consecutivi durava mezz'ora, e nessuno se ne accorgeva. Ora `check` aggiorna la diagnosi (un cooldown che ha anche perso la sessione diventa `disconnected`) ma non promuove: quello lo fa solo la scadenza del timer. Per togliere un cooldown prima del tempo, sapendo cosa si sta facendo, si cancella la chiave Redis `wa:cooldown:<number_id>` e si aspetta il prossimo health-check.
+
+## Incidente: una campagna e' finita in `error`
+
+Ci finisce solo per FM2: tre guasti NOSTRI consecutivi su chat diverse (DOM cambiato, selettore rotto, pagina in stato inatteso). I contatti **non** sono bruciati — restano `queued`, e' il punto di quel meccanismo.
+
+Prima si guarda perche' (log `[WA]`, alert Telegram), poi si recupera. Il recupero e' in due passi apposta:
+
+```bash
+# 1. error -> paused, con il motivo (obbligatorio, resta nei log e negli eventi)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"motivo":"selettore ROW aggiornato, verificato su chat di prova"}' \
+  $API/wa/campaigns/<id>/recover
+
+# 2. paused -> running, con tutte le validazioni di avvio
+curl -s -X POST -H "Authorization: Bearer $TOKEN" $API/wa/campaigns/<id>/resume
+```
+
+Il primo passo non fa ripartire niente da solo: `resume` rivalida che il numero sia `active`, che non ci sia un'altra campagna in corso sullo stesso numero, ristampa `next_action_at` e accoda il worker. Prima di M5.1 il passo 1 non esisteva e da `error` si poteva solo `stop`.
 
 ## Kill-switch — fermare TUTTO il canale WhatsApp
 
@@ -124,6 +164,8 @@ Per far ripartire (nessun body), e verificare che `wa_halted` sia tornato `false
 curl -s -X POST -H "Authorization: Bearer $TOKEN" $API/wa/ops/resume
 curl -s -H "Authorization: Bearer $TOKEN" $API/wa/ops/status
 ```
+
+**Dopo il resume gli invii non ripartono all'istante.** Il kill-switch fa uscire il job di invio senza rischedularlo (`wa_halted` e' un motivo terminale per `wa_send_task`): la campagna resta `running` ma il suo worker e' morto. Da M5.1 lo rimette in piedi il cron `wa_campaign_supervisor`, quindi l'attesa e' al massimo un quarto d'ora. Per non aspettare: `POST $API/wa/ops/campaigns/<id>/kick`.
 
 **Quando usarlo**: sospetto di ban/warning WhatsApp su piu' numeri contemporaneamente, comportamento anomalo del bot non spiegabile con un solo numero, richiesta esplicita di fermare tutto mentre si indaga. Non serve per un singolo numero con sessione caduta (basta aspettare il cron o gestirlo come sopra).
 

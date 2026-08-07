@@ -85,10 +85,10 @@ async def test_t1_quarantena_si_aspetta_non_fallisce(monkeypatch):
         return True
     monkeypatch.setattr(wa_worker.wa_profile_lock, "renew", _renew_ok)
 
-    completata = await wa_worker._attendi_quarantena_risync(
+    motivo = await wa_worker._attendi_quarantena_risync(
         "num-1", "tok-1", browser_t0=0.0)
 
-    assert completata is True
+    assert motivo is None
     assert orologio["t"] >= settings.wa_resync_quarantine_min * 60, (
         "l'attesa deve coprire l'intera quarantena")
 
@@ -113,10 +113,10 @@ async def test_t1_quarantena_interrotta_dal_kill_switch(monkeypatch):
         return True
     monkeypatch.setattr(wa_worker.wa_profile_lock, "renew", _renew_ok)
 
-    completata = await wa_worker._attendi_quarantena_risync(
+    motivo = await wa_worker._attendi_quarantena_risync(
         "num-1", "tok-1", browser_t0=0.0)
 
-    assert completata is False
+    assert motivo == "wa_halted"
 
 
 def test_t1_quarantena_non_arma_fm2():

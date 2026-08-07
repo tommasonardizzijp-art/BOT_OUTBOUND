@@ -9,7 +9,7 @@ e serializzazione.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from app.database import get_db
@@ -242,7 +242,11 @@ async def stop(campaign_id: str, db=Depends(get_db)) -> dict:
 
 
 class RecoverRequest(BaseModel):
-    motivo: str
+    # max_length esplicito: senza, un motivo da 10.000 caratteri passava la
+    # validazione e veniva troncato in silenzio nel log e nell'evento -- cioe'
+    # la traccia che questo campo esiste per lasciare risultava mutilata senza
+    # che nessuno lo dicesse. Meglio un 422 leggibile.
+    motivo: str = Field(max_length=500)
 
     @field_validator("motivo")
     @classmethod

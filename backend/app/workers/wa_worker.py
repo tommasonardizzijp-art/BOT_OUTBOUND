@@ -167,9 +167,10 @@ def _limite_sessione_s() -> float:
 
 
 async def _attendi_quarantena_risync(number_id: str, lock_token: str,
-                                     browser_t0: float) -> bool:
+                                     browser_t0: float) -> str | None:
     """Aspetta che scada la quarantena post-riconnessione prima del primo
-    invio della sessione. Ritorna False se il kill-switch l'ha interrotta.
+    invio della sessione. Ritorna None se e' andata a buon fine, altrimenti il
+    motivo per cui la mini-sessione deve chiudersi subito.
 
     Perche' un'ATTESA e non un rifiuto (review 07/08, blocco B1). La guardia
     di wa_sender rifiuta l'invio finche' il browser e' vivo da meno di
@@ -191,11 +192,26 @@ async def _attendi_quarantena_risync(number_id: str, lock_token: str,
     """
     quarantena_s = float(settings.wa_resync_quarantine_min) * 60
     if quarantena_s <= 0:
-        return True
+        return None
+
+    # Una quarantena piu' lunga del cap wall-clock della sessione terrebbe il
+    # profilo aperto oltre il TTL del lucchetto senza mandare un solo
+    # messaggio: aspetteremmo con un browser vivo un tempo che, per
+    # costruzione, non lascia spazio all'invio. Non e' uno scenario ipotetico
+    # -- basta scrivere 120 in WA_RESYNC_QUARANTINE_MIN con il TTL a 90. Si
+    # esce subito e in modo rumoroso, invece di occupare il profilo per ore.
+    if quarantena_s >= _limite_sessione_s():
+        logger.error(
+            f"[WA] {number_id}: WA_RESYNC_QUARANTINE_MIN="
+            f"{settings.wa_resync_quarantine_min} min e' >= del cap di sessione "
+            f"({round(_limite_sessione_s() / 60)} min, derivato da "
+            f"WA_PROFILE_LOCK_TTL_MIN): cosi' configurato il numero non potrebbe "
+            "inviare nulla. Sessione annullata, correggi la configurazione.")
+        return "quarantena_oltre_cap_sessione"
 
     residuo = quarantena_s - (time.perf_counter() - browser_t0)
     if residuo <= 0:
-        return True
+        return None
 
     logger.info(f"[WA] {number_id}: quarantena di risincronizzazione, attendo "
                 f"{round(residuo / 60)} min prima del primo invio. Non e' un "
@@ -206,12 +222,12 @@ async def _attendi_quarantena_risync(number_id: str, lock_token: str,
     while residuo > 0:
         if await bot_state_service.is_wa_halted():
             logger.info(f"[WA] {number_id}: quarantena interrotta dal kill-switch")
-            return False
+            return "wa_halted"
         await asyncio.sleep(min(FETTA_ATTESA_QUARANTENA_S, residuo))
         await wa_profile_lock.renew(number_id, lock_token)
         residuo = quarantena_s - (time.perf_counter() - browser_t0)
 
-    return True
+    return None
 
 
 async def esegui_mini_sessione(number_id: str) -> dict:
@@ -280,9 +296,10 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                 # scoperta contatto per contatto dalla guardia -- che li
                 # rifiuterebbe tutti e armerebbe FM2 dopo tre (blocco B1 della
                 # review 07/08). La guardia resta comunque attiva a valle.
-                if not await _attendi_quarantena_risync(number_id, lock_token,
-                                                        browser_t0):
-                    esito["motivo"] = "wa_halted"
+                motivo_quarantena = await _attendi_quarantena_risync(
+                    number_id, lock_token, browser_t0)
+                if motivo_quarantena is not None:
+                    esito["motivo"] = motivo_quarantena
                     return esito
 
                 while quanti is None or processati < quanti:
@@ -517,10 +534,29 @@ async def _chiudi_campagna_se_finita(number_id: str) -> str | None:
         if rimaste:
             return None
 
-        campagna.status = WaCampaignStatus.completed
-        campagna.completed_at = datetime.utcnow()
         campaign_id, nome, inviati = campagna.id, campagna.name, campagna.sent
+        # UPDATE condizionale, non `campagna.status = ...`: due mini-sessioni
+        # dello stesso numero che finiscono insieme farebbero entrambe la
+        # SELECT sopra vedendo 'running', ed entrambe scriverebbero -- due
+        # eventi, due Telegram, due completed_at diversi per la stessa
+        # campagna. Ripetendo la condizione dentro la scrittura, la seconda
+        # trova rowcount 0 e si ferma. Stesso schema dell'UPDATE atomico che
+        # protegge "una sola campagna running per numero" in
+        # wa_campaign_service.avvia.
+        #
+        # Copre anche il caso piu' probabile in pratica: una campagna messa in
+        # pausa da un umano fra la SELECT e la scrittura non deve diventare
+        # 'completed'.
+        chiusura = await db.execute(
+            update(WaCampaign)
+            .where(WaCampaign.id == campaign_id,
+                   WaCampaign.status == WaCampaignStatus.running)
+            .values(status=WaCampaignStatus.completed,
+                    completed_at=datetime.utcnow())
+        )
         await db.commit()
+        if (chiusura.rowcount or 0) == 0:
+            return None
 
     events.emit(campaign_id, "wa.campaign.completed",
                 f"campagna conclusa: {inviati} messaggi inviati")
@@ -555,8 +591,13 @@ async def wa_send_task(ctx: dict, number_id: str) -> None:
 
     esito = await esegui_mini_sessione(number_id)
 
+    # 'quarantena_oltre_cap_sessione' e' terminale come gli altri: e' una
+    # configurazione incoerente, e rischedularla ogni venti minuti produrrebbe
+    # solo un browser aperto a vuoto piu' volte all'ora finche' un umano non
+    # legge il log. Meglio fermarsi e farsi notare.
     if esito["motivo"] in ("send_disabled", "wa_halted", "numero_non_attivo",
-                           "guasti_consecutivi", "niente_da_fare"):
+                           "guasti_consecutivi", "niente_da_fare",
+                           "quarantena_oltre_cap_sessione"):
         if esito["motivo"] == "niente_da_fare":
             # Unico momento in cui si sa che non e' rimasto lavoro da fare: e'
             # qui che una campagna finita smette di sembrare "In corso" per
