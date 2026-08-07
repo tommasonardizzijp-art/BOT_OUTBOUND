@@ -26,6 +26,7 @@ from app.models.wa import (WaCampaignStatus, WaContactStatus, WaInboundEvent,
                            WaMatchedBy, WaNumber, WaNumberStatus)
 from app.services import bot_state_service, wa_profile_lock, wa_reply_watcher
 from app.workers import cron_worker, wa_worker
+from tests.helpers_wa_tempo import orologio_virtuale
 from tests.factories_wa import (make_campaign, make_campaign_contact,
                                 make_contact, make_number, make_tenant)
 
@@ -147,6 +148,11 @@ async def test_concorrenza_reale_tre_consumatori_stesso_numero(db_session, monke
     monkeypatch.setattr(wa_reply_watcher, "_open_wa_browser", _fake_browser_ctx(contatore))
     monkeypatch.setattr(wa_reply_watcher, "WhatsAppWebPage", _PomVuoto)
     monkeypatch.setattr(wa_worker, "_open_wa_browser", _fake_browser_ctx(contatore))
+    # M5.1: la mini-sessione aspetta la quarantena di risincronizzazione col
+    # browser gia' aperto. E' proprio dentro quella finestra che la garanzia di
+    # esclusivita' del profilo va provata -- ma con il tempo virtuale, non
+    # dormendo un quarto d'ora.
+    orologio_virtuale(wa_worker, monkeypatch)
 
     async def _fake_check_session(number_id):
         # check_session (M1) e' l'operazione 'cara' del consumatore

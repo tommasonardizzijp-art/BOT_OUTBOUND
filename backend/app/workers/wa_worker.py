@@ -16,7 +16,12 @@ from sqlalchemy import or_, select, update
 
 from app.browser.whatsapp_page import WhatsAppWebPage
 from app.config import settings
-from app.services import wa_profile_lock, wa_sender, wa_timing
+# bot_state_service e' importato a livello di modulo (e non dentro le funzioni
+# come gli altri servizi qui sotto) perche' il kill-switch va ricontrollato
+# anche dentro l'attesa della quarantena, dove non c'e' una sessione DB da cui
+# partire -- e perche' un import di modulo e' l'unico punto che un test puo'
+# sostituire per far finta che il canale sia stato fermato a meta' attesa.
+from app.services import bot_state_service, wa_profile_lock, wa_sender, wa_timing
 from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
 from app.services.work_enqueue import arq_redis_settings
 
@@ -42,6 +47,20 @@ FM2_COOLDOWN_MINUTES = 4 * 60
 # ma il lock e' libero. 5 minuti coprono la chiusura del browser piu' il
 # rilascio del lock, che sono secondi.
 MARGINE_CAP_SESSIONE_MIN = 5
+
+# Motivi di esito 'queued' che NON sono un guasto del DOM e quindi non devono
+# armare l'escalation FM2. La distinzione conta: FM2 ferma il numero per 4 ore,
+# mette la campagna in error e manda un Telegram che dice "probabile DOM
+# cambiato" -- una diagnosi falsa dentro un allarme che deve restare credibile.
+# 'quarantena_risync' e' un limite NOSTRO dichiarato (contratto 3.4.2), non una
+# pagina che non riconosciamo piu'.
+MOTIVI_NON_FM2 = frozenset({"quarantena_risync"})
+
+# Fetta di attesa della quarantena. Non si dorme quindici minuti in un colpo:
+# a ogni fetta si ricontrolla il kill-switch e si rinnova il lucchetto, cosi'
+# uno stop premuto durante l'attesa ha effetto entro un minuto e il TTL non
+# scade mai per una sessione che sta soltanto aspettando.
+FETTA_ATTESA_QUARANTENA_S = 60.0
 
 
 async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
@@ -147,6 +166,54 @@ def _limite_sessione_s() -> float:
                       - MARGINE_CAP_SESSIONE_MIN) * 60.0)
 
 
+async def _attendi_quarantena_risync(number_id: str, lock_token: str,
+                                     browser_t0: float) -> bool:
+    """Aspetta che scada la quarantena post-riconnessione prima del primo
+    invio della sessione. Ritorna False se il kill-switch l'ha interrotta.
+
+    Perche' un'ATTESA e non un rifiuto (review 07/08, blocco B1). La guardia
+    di wa_sender rifiuta l'invio finche' il browser e' vivo da meno di
+    WA_RESYNC_QUARANTINE_MIN minuti. Ma ogni mini-sessione apre un browser
+    NUOVO: il contatore riparte da zero ogni volta e la quarantena non scade
+    mai. E ogni rifiuto tornava 'queued', che il worker contava come guasto
+    nostro: dopo tre (2-4 minuti, col delay mediano di 90 s) scattava FM2.
+    Misurato sul codice e sulla config veri: succedeva nel 99,8% delle
+    sessioni -- cioe' il canale non poteva inviare niente a nessuno.
+
+    Il contratto 3.4.2 dice "nei primi N minuti il numero non invia", ed e'
+    esattamente questo: si sta fermi, non si consumano contatti per farseli
+    rifiutare. La guardia in wa_sender resta dov'e' come seconda rete: se un
+    domani questo flusso cambia, la protezione regge comunque.
+
+    Costo: ~15 minuti di browser aperto e fermo per mini-sessione. Sta sotto
+    il cap wall-clock della sessione (85 min) e sotto il TTL del lucchetto
+    (90 min), che qui si rinnova a ogni fetta.
+    """
+    quarantena_s = float(settings.wa_resync_quarantine_min) * 60
+    if quarantena_s <= 0:
+        return True
+
+    residuo = quarantena_s - (time.perf_counter() - browser_t0)
+    if residuo <= 0:
+        return True
+
+    logger.info(f"[WA] {number_id}: quarantena di risincronizzazione, attendo "
+                f"{round(residuo / 60)} min prima del primo invio. Non e' un "
+                "blocco: la sessione WhatsApp Web si sta risincronizzando e "
+                "finche' non ha finito la guardia opt-out leggerebbe il vuoto "
+                "invece del silenzio.")
+
+    while residuo > 0:
+        if await bot_state_service.is_wa_halted():
+            logger.info(f"[WA] {number_id}: quarantena interrotta dal kill-switch")
+            return False
+        await asyncio.sleep(min(FETTA_ATTESA_QUARANTENA_S, residuo))
+        await wa_profile_lock.renew(number_id, lock_token)
+        residuo = quarantena_s - (time.perf_counter() - browser_t0)
+
+    return True
+
+
 async def esegui_mini_sessione(number_id: str) -> dict:
     """Una mini-sessione di invii per UN numero. Short-lived: apre il
     browser, manda al piu' N messaggi (wa_timing), chiude e lascia che sia
@@ -167,7 +234,7 @@ async def esegui_mini_sessione(number_id: str) -> dict:
     """
     from app.database import AsyncSessionLocal
     from app.models.wa import WaNumber, WaNumberStatus
-    from app.services import bot_state_service, wa_number_manager
+    from app.services import wa_number_manager
 
     esito = {"inviati": 0, "falliti": 0, "saltati": 0, "motivo": "completata"}
     worker_id = f"wa-{number_id[:8]}-{uuid.uuid4().hex[:6]}"
@@ -208,6 +275,15 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                 pom = WhatsAppWebPage(page)
                 browser_t0 = time.perf_counter()
                 limite_s = _limite_sessione_s()
+
+                # La quarantena si aspetta QUI, una volta, invece di essere
+                # scoperta contatto per contatto dalla guardia -- che li
+                # rifiuterebbe tutti e armerebbe FM2 dopo tre (blocco B1 della
+                # review 07/08). La guardia resta comunque attiva a valle.
+                if not await _attendi_quarantena_risync(number_id, lock_token,
+                                                        browser_t0):
+                    esito["motivo"] = "wa_halted"
+                    return esito
 
                 while quanti is None or processati < quanti:
                     # Cap wall-clock: la durata di una sessione ha una coda destra
@@ -306,9 +382,14 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                         elif res.stato == "failed":
                             esito["falliti"] += 1
                             guasti_consecutivi = 0
-                        else:  # 'queued' = guasto nostro, il contatto non si tocca
+                        else:  # 'queued' = il contatto non si tocca
                             await _rilascia_lock(db, cc_id)
-                            guasti_consecutivi += 1
+                            # Non tutti i 'queued' sono guasti del DOM: quelli
+                            # in MOTIVI_NON_FM2 sono limiti nostri dichiarati,
+                            # e contarli verso FM2 fermerebbe il numero per
+                            # quattro ore con una diagnosi falsa.
+                            if res.motivo not in MOTIVI_NON_FM2:
+                                guasti_consecutivi += 1
 
                         if guasti_consecutivi >= MAX_GUASTI_CONSECUTIVI:
                             await _ferma_numero_per_guasto(db, number_id, campaign_id,

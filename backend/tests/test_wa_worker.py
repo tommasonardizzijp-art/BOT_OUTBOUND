@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from app.workers import wa_worker
+from tests.helpers_wa_tempo import fette_di_quarantena, orologio_virtuale
 
 
 async def _scenario_claim(db_session, e164: str = "+393331112223", contatti: int = 1):
@@ -212,6 +213,7 @@ async def _mini_sessione_con_doppi(db_session, monkeypatch, *, contatti=1,
                                    budget=True, ora_corrente=12,
                                    fake_invio=None, halted_getter=None,
                                    renew_recorder: list | None = None,
+                                   orologio: dict | None = None,
                                    _ctx_out: dict | None = None):
     """Esercita esegui_mini_sessione con browser/POM/orologio finti.
     Il browser vero e' esercitato SOLO nel Task 15 (prova dal vivo): qui si
@@ -223,6 +225,7 @@ async def _mini_sessione_con_doppi(db_session, monkeypatch, *, contatti=1,
     from app.services.wa_sender import EsitoInvio
 
     monkeypatch.setattr(settings, "wa_send_enabled", True)
+    orologio_virtuale(wa_worker, monkeypatch, orologio)
     _lock_profilo_libero(monkeypatch, renew_recorder)
 
     async def _halted(db=None):
@@ -651,6 +654,10 @@ async def test_22_campagna_paused_dal_inizio_esce_niente_da_fare(db_session, mon
     monkeypatch.setattr(wa_worker, "_open_wa_browser", _ctx_browser)
     monkeypatch.setattr(wa_worker, "WhatsAppWebPage", lambda page: object())
     _lock_profilo_libero(monkeypatch)
+    # Questo test apre il browser senza passare da _mini_sessione_con_doppi,
+    # quindi l'orologio virtuale se lo installa da solo: senza, l'attesa della
+    # quarantena (M5.1) lo farebbe dormire un quarto d'ora davvero.
+    orologio_virtuale(wa_worker, monkeypatch)
 
     esito = await wa_worker.esegui_mini_sessione(ctx["number"].id)
     assert esito["motivo"] == "niente_da_fare"
@@ -891,7 +898,11 @@ async def test_heartbeat_rinnova_il_lock_dopo_ogni_messaggio(db_session, monkeyp
     esito = await _mini_sessione_con_doppi(db_session, monkeypatch, contatti=3,
                                            renew_recorder=rinnovi)
     assert esito["inviati"] == 3
-    assert len(rinnovi) == 3
+    # Un rinnovo per messaggio, PIU' uno per ogni fetta dell'attesa di
+    # quarantena (M5.1): l'attesa dura quanto il TTL non copre da sola, quindi
+    # rinnova anche lei -- se non lo facesse, una sessione lunga si troverebbe
+    # il lucchetto scaduto proprio mentre il browser e' ancora aperto.
+    assert len(rinnovi) == fette_di_quarantena() + 3
     ctx_number_ids = {n for n, _ in rinnovi}
     assert len(ctx_number_ids) == 1
     assert all(token == "token-di-test" for _, token in rinnovi)
@@ -904,9 +915,10 @@ async def test_cap_wall_clock_chiude_la_sessione_prima_del_ttl(db_session, monke
     from app.services.wa_sender import EsitoInvio
 
     # Orologio finto: ogni invio "costa" 100 minuti, quindi al secondo giro il
-    # cap (ttl 90 - margine 5 = 85 min) e' gia' superato.
+    # cap (ttl 90 - margine 5 = 85 min) e' gia' superato. Da M5.1 e' lo STESSO
+    # orologio che l'helper usa per far scorrere l'attesa della quarantena
+    # (15 min), altrimenti i due patch di perf_counter si sovrascriverebbero.
     orologio = {"t": 0.0}
-    monkeypatch.setattr(wa_worker.time, "perf_counter", lambda: orologio["t"])
 
     async def _invio_lentissimo(*a, **kw):
         orologio["t"] += 100 * 60
@@ -916,7 +928,8 @@ async def test_cap_wall_clock_chiude_la_sessione_prima_del_ttl(db_session, monke
     monkeypatch.setattr(settings, "wa_profile_lock_ttl_min", 90)
 
     esito = await _mini_sessione_con_doppi(db_session, monkeypatch, contatti=3,
-                                           fake_invio=_invio_lentissimo)
+                                           fake_invio=_invio_lentissimo,
+                                           orologio=orologio)
     assert esito["motivo"] == "timeout_sessione"
     assert esito["inviati"] == 1
 
