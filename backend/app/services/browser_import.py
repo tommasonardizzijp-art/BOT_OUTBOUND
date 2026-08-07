@@ -108,6 +108,11 @@ async def resolve_and_store_bio_browser(row, campaign, db, browser_session) -> t
         await db.commit()
         return "not_found", None
 
+    if isinstance(user, dict) and user.get("__blocked"):
+        # Nessuna marcatura: il profilo non ha colpe, e' l'account a essere bloccato.
+        # Resta 'resolving' e il recupero degli stale lo rimettera' in coda.
+        return "blocked", Exception(f"interstiziale IG: {user['__blocked']}")
+
     if isinstance(user, dict) and user.get("__status"):
         st = user["__status"]
         if st in (429, 401, 403):
@@ -458,6 +463,13 @@ async def resolve_imports_browser_session(campaign_id: str, account_id: str) -> 
                     if done_count == 1:
                         await _soft_block_reset(campaign_id, account_id)
                     emit_event(campaign_id, "scrape_batch", f"Risolto @{uname} via browser")
+                elif outcome == "blocked":
+                    # NON marcare la riga: resta 'resolving', il recupero degli stale
+                    # la rimettera' in coda. Isola l'account e ferma tutto (mirror del
+                    # path Fase Bio browser).
+                    logger.error(f"[ImportBrowser] interstiziale IG su @{uname} — isolo l'account")
+                    await _isolate_account_and_pause(campaign_id, account_id, err)
+                    return None
                 elif outcome in ("not_found", "error"):
                     emit_event(campaign_id, "scrape_progress", f"@{uname}: {outcome}", level="warn")
                 elif outcome == "soft_block":
