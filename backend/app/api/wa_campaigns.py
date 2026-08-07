@@ -8,12 +8,16 @@ del ValueError del servizio in 422, guardie di stato macchina (draft-only)
 e serializzazione.
 """
 from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from app.database import get_db
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
-                           WaCampaignType, WaContact, WaSequenceStep)
+                           WaCampaignType, WaContact, WaNumber, WaNumberStatus,
+                           WaSequenceStep)
 from app.services import wa_campaign_service as svc
+from app.utils import events
 
 router = APIRouter(prefix="/wa/campaigns", tags=["wa-campaigns"])
 
@@ -236,6 +240,79 @@ async def stop(campaign_id: str, db=Depends(get_db)) -> dict:
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     return _serializza(campagna)
+
+
+class RecoverRequest(BaseModel):
+    # max_length esplicito: senza, un motivo da 10.000 caratteri passava la
+    # validazione e veniva troncato in silenzio nel log e nell'evento -- cioe'
+    # la traccia che questo campo esiste per lasciare risultava mutilata senza
+    # che nessuno lo dicesse. Meglio un 422 leggibile.
+    motivo: str = Field(max_length=500)
+
+    @field_validator("motivo")
+    @classmethod
+    def _motivo_non_vuoto(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("il motivo e' obbligatorio: una campagna fermata da "
+                             "un incidente si riprende a mano, lasciando traccia")
+        return v
+
+
+@router.post("/{campaign_id}/recover")
+async def recover(campaign_id: str, body: RecoverRequest, db=Depends(get_db)) -> dict:
+    """error -> paused (review 07/08, blocco B3).
+
+    Prima di M5.1 una campagna che FM2 aveva messo in `error` era
+    irrecuperabile: `avvia` accetta solo draft/paused, `wa_ops.resume_campaign`
+    solo paused, e l'unico verbo rimasto era `stop`. Siccome FM2 scatta per un
+    guasto NOSTRO (DOM cambiato, selettore rotto), il rimedio normale e'
+    "sistemo e riparto": doverlo fare con una UPDATE a mano sul DB non e' un
+    rimedio, e' un buco nella macchina a stati.
+
+    Mai -> running direttamente, per la stessa ragione per cui
+    POST /wa/numbers/{id}/riattiva porta a `pending_qr` e mai ad `active`: le
+    condizioni di avvio (numero attivo, nessun'altra campagna running sullo
+    stesso numero, ri-stampa di next_action_at, accodamento del worker) le
+    verifica `avvia`, e saltarle qui vorrebbe dire ricostruirle in un secondo
+    posto -- cioe' avere due verita' su quando si puo' inviare.
+
+    Il motivo non ha una colonna dove finire (wa_campaigns non ha `notes`, a
+    differenza di wa_numbers): resta nel log e nell'evento di campagna.
+    """
+    campagna = await _campagna_o_404(db, campaign_id)
+    if campagna.status != WaCampaignStatus.error:
+        raise HTTPException(
+            409, f"la campagna e' in stato {campagna.status.value}: il recupero "
+                 "esiste solo per 'error'")
+
+    campagna.status = WaCampaignStatus.paused
+    await db.commit()
+    # Nessun troncamento qui: il limite e' gia' `max_length=500` sul campo, e
+    # tagliare a 200 dopo averne accettati 500 mutilerebbe in silenzio proprio
+    # la traccia che questo campo esiste per lasciare -- che e' l'argomento con
+    # cui quel max_length e' stato messo.
+    motivo = body.motivo.strip()
+    logger.warning(f"[WA] campagna {campaign_id} recuperata da error -> paused: {motivo}")
+    events.emit(campaign_id, "wa.campaign.recovered",
+                f"recuperata da error: {motivo}", level="warning")
+
+    # Lo stato del numero nella risposta: dopo un FM2 la campagna e' in 'error'
+    # E il numero e' in 'cooldown' per quattro ore. Senza questa riga
+    # l'operatore fa il passo 2 (resume) e riceve un errore che parla di QR,
+    # cioe' la diagnosi sbagliata nel momento peggiore.
+    numero = await db.scalar(select(WaNumber).where(WaNumber.id == campagna.wa_number_id))
+    if numero is not None and numero.status == WaNumberStatus.cooldown:
+        prossimo = ("il numero e' ancora in cooldown: la sessione WhatsApp e' "
+                    "viva, non serve rifare il QR. Il resume funzionera' quando "
+                    "il cooldown sara' scaduto.")
+    elif numero is not None and numero.status != WaNumberStatus.active:
+        prossimo = (f"il numero e' in stato {numero.status.value}: sistemalo "
+                    "prima di riprendere la campagna.")
+    else:
+        prossimo = "verifica la causa del guasto, poi riprendi la campagna."
+    return {"recovered": True, "status": campagna.status.value,
+            "stato_numero": numero.status.value if numero else None,
+            "prossimo_passo": prossimo}
 
 
 # KPI (Task 8). I contatori sono TUTTI denormalizzati e scritti altrove

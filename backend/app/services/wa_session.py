@@ -257,13 +257,23 @@ async def _wa_number_or_raise(db, number_id: str):
 _STATI_PROTETTI_DA_RESURREZIONE = frozenset({WaNumberStatus.retired, WaNumberStatus.suspended})
 
 
-async def _persist_status(number_id: str, stato: WaNumberStatus) -> None:
+async def _persist_status(number_id: str, stato: WaNumberStatus, *,
+                          da_lettura_automatica: bool = True) -> None:
     from datetime import datetime
 
     from app.database import AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
         numero = await _wa_number_or_raise(db, number_id)
+        # Solo una LETTURA automatica non puo' togliere un cooldown. Un
+        # operatore che riscansiona il QR di persona (assisted_login) sta
+        # facendo l'azione esplicita di cui parla il commento su
+        # _STATI_PROTETTI_DA_RESURREZIONE qui sopra, e deve poterlo rimettere
+        # in gioco: bloccarlo anche a lui lascerebbe come unica uscita la
+        # cancellazione a mano di una chiave Redis (review 07/08 su M5.1).
+        promozione_da_cooldown = (da_lettura_automatica
+                                  and numero.status == WaNumberStatus.cooldown
+                                  and stato == WaNumberStatus.active)
         if numero.status in _STATI_PROTETTI_DA_RESURREZIONE and stato != numero.status:
             # Diagnostica comunque valida (un check_session su un numero
             # ritirato resta legittimo per capire se la sessione e' ancora
@@ -273,6 +283,24 @@ async def _persist_status(number_id: str, stato: WaNumberStatus) -> None:
                 f"wa_session({number_id}): segnale={stato.value} letto ma stato "
                 f"resta {numero.status.value} (protetto da resurrezione automatica)"
             )
+        elif promozione_da_cooldown:
+            # Un cooldown lo toglie la SCADENZA del suo timer
+            # (wa_number_manager.release_expired_wa_cooldowns, che scrive con
+            # una UPDATE diretta e non passa di qui), non una lettura del DOM.
+            # Senza questo ramo l'health-check -- che gira ogni 30 minuti e
+            # include i numeri in cooldown -- vedeva la sessione viva e
+            # rimetteva il numero 'active': lo stop di 4 ore imposto da FM2
+            # durava mezz'ora (review 07/08, difetto G1). E' la porta gemella
+            # di quella gia' chiusa dentro wa_worker._ferma_numero_per_guasto,
+            # dove il commento spiega perche' la chiave Redis va scritta.
+            #
+            # Si blocca SOLO la promozione. Un numero in cooldown che nel
+            # frattempo ha perso la sessione deve poter diventare
+            # disconnected/qr_required: quella e' informazione vera, e senza di
+            # essa il cron non metterebbe in pausa le sue campagne.
+            logger.info(
+                f"wa_session({number_id}): sessione viva, ma il numero resta in "
+                "cooldown -- lo toglie la scadenza del timer, non un health-check")
         else:
             numero.status = stato
         numero.session_checked_at = datetime.utcnow()
@@ -334,6 +362,9 @@ async def assisted_login(number_id: str, timeout_s: int = 180) -> WaNumberStatus
             await asyncio.sleep(ASSISTED_LOGIN_POLL_INTERVAL_S)
 
     stato = stato_da_segnale(segnale)
-    await _persist_status(number_id, stato)
+    # da_lettura_automatica=False: questo e' un umano davanti allo schermo che
+    # ha appena inquadrato un QR, non un cron che legge un DOM. E' l'atto
+    # esplicito che puo' togliere un numero dal cooldown.
+    await _persist_status(number_id, stato, da_lettura_automatica=False)
     logger.info(f"assisted_login({number_id}): segnale finale={segnale} stato={stato.value}")
     return stato

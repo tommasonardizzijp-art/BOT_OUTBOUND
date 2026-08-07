@@ -122,6 +122,20 @@ async def avvia(db, campaign_id: str) -> WaCampaign:
 
     numero = await db.scalar(select(WaNumber).where(WaNumber.id == campagna.wa_number_id))
     if numero is None or numero.status != WaNumberStatus.active:
+        # Il messaggio distingue il cooldown dagli altri stati non-attivi.
+        # Non e' pignoleria: il caso in cui questo errore si legge piu' spesso
+        # e' subito dopo un FM2, che mette insieme la campagna in 'error' E il
+        # numero in 'cooldown' per quattro ore. Un messaggio generico che dice
+        # "serve un nuovo QR" manda l'operatore a riscansionare un QR che non
+        # serve, mentre la sessione e' perfettamente viva e basta aspettare
+        # (review 07/08 su M5.1).
+        if numero is not None and numero.status == WaNumberStatus.cooldown:
+            raise ValueError(
+                "Il numero e' in cooldown dopo un guasto: la sessione WhatsApp "
+                "e' viva, non serve rifare il QR. Aspetta che scada il timer "
+                "(4 ore da un blocco per guasti consecutivi) oppure togli a "
+                "mano la chiave Redis wa:cooldown:<id> se hai gia' verificato "
+                "e risolto la causa.")
         raise ValueError(
             "Il numero non e' attivo: serve una sessione WhatsApp valida (QR) "
             "prima di far partire la campagna.")
@@ -174,7 +188,45 @@ async def avvia(db, campaign_id: str) -> WaCampaign:
     await _ristampa_next_action(db, campaign_id, adesso)
     await db.commit()
     await db.refresh(campagna)
+    await _accoda_worker(campaign_id)
     return campagna
+
+
+async def _accoda_worker(campaign_id: str) -> None:
+    """Mette in coda il job di invio del numero della campagna.
+
+    Sta QUI e non nell'endpoint per la stessa ragione delle validazioni sopra
+    (docstring del modulo): una regola che vive dentro un handler HTTP e' una
+    regola che il resto del sistema puo' aggirare. E infatti la aggirava --
+    fino a M5.1 `enqueue_wa_workers` aveva due soli chiamanti, entrambi in
+    wa_ops.py (`kick` e `ops/resume`), e nessuno dei due era il verbo che usa
+    la UI. Una campagna avviata dalla pagina restava 'running' senza nessun
+    worker, in silenzio, per sempre: nessun invio, nessun errore, e lo stato a
+    schermo diceva "In corso" (review 07/08, blocco B2).
+
+    Un errore NON annulla l'avvio: lo stato e' gia' committato, e il cron
+    wa_campaign_supervisor riaccoda le campagne running rimaste senza job.
+    Sollevare qui lascerebbe la campagna avviata a DB e un'eccezione all'utente
+    -- il peggio dei due mondi.
+
+    Import locale: wa_worker apre un pool Redis e questo servizio e' importato
+    anche da script che non hanno ARQ sotto.
+    """
+    from loguru import logger
+
+    from app.utils import events
+    from app.workers.wa_worker import enqueue_wa_workers
+
+    try:
+        n = await enqueue_wa_workers(campaign_id)
+    except Exception as exc:
+        logger.error(f"[WA] campagna {campaign_id}: avviata, ma accodamento del "
+                     f"worker fallito ({type(exc).__name__}) -- il supervisore "
+                     "riprovera'")
+        events.emit(campaign_id, "wa.campaign.enqueue_failed",
+                    f"worker non accodato: {type(exc).__name__}", level="error")
+        return
+    events.emit(campaign_id, "wa.campaign.started", f"worker accodati: {n}")
 
 
 async def pausa(db, campaign_id: str) -> WaCampaign:

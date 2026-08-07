@@ -16,7 +16,12 @@ from sqlalchemy import or_, select, update
 
 from app.browser.whatsapp_page import WhatsAppWebPage
 from app.config import settings
-from app.services import wa_profile_lock, wa_sender, wa_timing
+# bot_state_service e' importato a livello di modulo (e non dentro le funzioni
+# come gli altri servizi qui sotto) perche' il kill-switch va ricontrollato
+# anche dentro l'attesa della quarantena, dove non c'e' una sessione DB da cui
+# partire -- e perche' un import di modulo e' l'unico punto che un test puo'
+# sostituire per far finta che il canale sia stato fermato a meta' attesa.
+from app.services import bot_state_service, wa_profile_lock, wa_sender, wa_timing
 from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
 from app.services.work_enqueue import arq_redis_settings
 
@@ -42,6 +47,12 @@ FM2_COOLDOWN_MINUTES = 4 * 60
 # ma il lock e' libero. 5 minuti coprono la chiusura del browser piu' il
 # rilascio del lock, che sono secondi.
 MARGINE_CAP_SESSIONE_MIN = 5
+
+# Fetta di attesa della quarantena. Non si dorme quindici minuti in un colpo:
+# a ogni fetta si ricontrolla il kill-switch e si rinnova il lucchetto, cosi'
+# uno stop premuto durante l'attesa ha effetto entro un minuto e il TTL non
+# scade mai per una sessione che sta soltanto aspettando.
+FETTA_ATTESA_QUARANTENA_S = 60.0
 
 
 async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
@@ -138,13 +149,168 @@ def _ora_locale_corrente() -> int:
         return datetime.now(timezone(timedelta(hours=1))).hour
 
 
+# Timeout con cui ARQ uccide un job (task_queue.WorkerSettings.job_timeout,
+# 3600 s). Il cap wall-clock della mini-sessione deve stare sotto ANCHE questo,
+# non solo sotto il TTL del lucchetto: se ARQ uccide la coroutine a meta', il
+# contatto claimato resta lockato fino a wa_lock_timeout_min e il browser viene
+# chiuso male. Con TTL 90 il cap era 85 minuti, cioe' oltre il timeout di ARQ:
+# finche' le sessioni duravano 12-22 minuti non si notava, ma l'attesa della
+# quarantena aggiunta in M5.1 le porta a 27-37 minuti mediani con una coda
+# destra che ci arriva (review 07/08).
+#
+# Importato per valore e non da task_queue per non creare un ciclo di import
+# (task_queue importa wa_worker): se cambia li', va cambiato qui, e il test
+# test_a6 di test_wa_m51_adversarial.py fallisce se i due divergono.
+ARQ_JOB_TIMEOUT_S = 3600
+
+
 def _limite_sessione_s() -> float:
-    """Durata massima wall-clock di una mini-sessione, sempre sotto il TTL del
-    lucchetto profilo. Il minimo di 60s evita che una configurazione con TTL
-    piccolo produca un limite nullo o negativo (che chiuderebbe ogni sessione
-    prima del primo messaggio)."""
-    return max(60.0, (int(settings.wa_profile_lock_ttl_min)
-                      - MARGINE_CAP_SESSIONE_MIN) * 60.0)
+    """Durata massima wall-clock di una mini-sessione, sotto il TTL del
+    lucchetto profilo E sotto il timeout con cui ARQ uccide il job. Il minimo
+    di 60s evita che una configurazione con TTL piccolo produca un limite nullo
+    o negativo (che chiuderebbe ogni sessione prima del primo messaggio)."""
+    da_lucchetto = (int(settings.wa_profile_lock_ttl_min)
+                    - MARGINE_CAP_SESSIONE_MIN) * 60.0
+    da_arq = ARQ_JOB_TIMEOUT_S - MARGINE_CAP_SESSIONE_MIN * 60.0
+    return max(60.0, min(da_lucchetto, da_arq))
+
+
+async def _niente_da_fare_prima_del_browser(number_id: str) -> str | None:
+    """Ritorna il motivo per cui NON vale la pena aprire il browser, o None.
+
+    Ricalca i cancelli che la mini-sessione applica comunque a ogni messaggio
+    (finestra oraria, cap del numero, esistenza di lavoro eleggibile), ma li
+    guarda PRIMA, quando costano due query invece di quindici minuti di
+    profilo occupato. Non li sostituisce: dentro il loop restano, con query
+    live, perche' una sessione dura decine di minuti e nel frattempo tutto puo'
+    cambiare (contratto §7.2). Questo e' solo un filtro d'ingresso.
+
+    Deliberatamente NON prende il lucchetto e NON claima niente: un pre-check
+    che lockasse una riga la terrebbe ferma per tutta la quarantena.
+    """
+    from datetime import datetime as _dt
+
+    from sqlalchemy import func
+
+    from app.database import AsyncSessionLocal
+    from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                               WaContact, WaContactStatus, WaNumber)
+    from app.services import wa_number_manager
+
+    async with AsyncSessionLocal() as db:
+        campagna = await db.scalar(
+            select(WaCampaign).where(WaCampaign.wa_number_id == number_id,
+                                     WaCampaign.status == WaCampaignStatus.running)
+        )
+        if campagna is None:
+            return "niente_da_fare"
+
+        ora = _ora_locale_corrente()
+        inizio, fine = wa_timing.effective_wa_active_hours(campagna)
+        if not (inizio <= ora < fine):
+            return "fuori_finestra"
+
+        number = await db.scalar(select(WaNumber).where(WaNumber.id == number_id))
+        if number is None:
+            return "numero_non_attivo"
+        if not await wa_number_manager.has_wa_send_budget(db, number, campagna):
+            return "cap_esaurito"
+
+        now = _dt.utcnow()
+        stale_cutoff = now - timedelta(minutes=int(settings.wa_lock_timeout_min))
+        pronti = await db.scalar(
+            select(func.count(WaCampaignContact.id))
+            .join(WaContact, WaContact.id == WaCampaignContact.contact_id)
+            .where(
+                WaCampaignContact.campaign_id == campagna.id,
+                WaCampaignContact.status.in_([WaContactStatus.queued,
+                                              WaContactStatus.in_sequence]),
+                WaCampaignContact.next_action_at.is_not(None),
+                WaCampaignContact.next_action_at <= now,
+                or_(WaCampaignContact.locked_by.is_(None),
+                    WaCampaignContact.locked_at < stale_cutoff),
+                WaCampaignContact.failure_count < int(settings.wa_max_failures_per_contact),
+                WaContact.opted_out.is_(False),
+                WaContact.do_not_contact.is_(False),
+            )
+        ) or 0
+        if not pronti:
+            return "niente_da_fare"
+
+    return None
+
+
+async def _attendi_quarantena_risync(number_id: str, lock_token: str,
+                                     browser_t0: float) -> str | None:
+    """Aspetta che scada la quarantena post-riconnessione prima del primo
+    invio della sessione. Ritorna None se e' andata a buon fine, altrimenti il
+    motivo per cui la mini-sessione deve chiudersi subito.
+
+    Perche' un'ATTESA e non un rifiuto (review 07/08, blocco B1). La guardia
+    di wa_sender rifiuta l'invio finche' il browser e' vivo da meno di
+    WA_RESYNC_QUARANTINE_MIN minuti. Ma ogni mini-sessione apre un browser
+    NUOVO: il contatore riparte da zero ogni volta e la quarantena non scade
+    mai. E ogni rifiuto tornava 'queued', che il worker contava come guasto
+    nostro: dopo tre (2-4 minuti, col delay mediano di 90 s) scattava FM2.
+    Misurato sul codice e sulla config veri: succedeva nel 99,8% delle
+    sessioni -- cioe' il canale non poteva inviare niente a nessuno.
+
+    Il contratto 3.4.2 dice "nei primi N minuti il numero non invia", ed e'
+    esattamente questo: si sta fermi, non si consumano contatti per farseli
+    rifiutare. La guardia in wa_sender resta dov'e' come seconda rete: se un
+    domani questo flusso cambia, la protezione regge comunque.
+
+    Costo: ~15 minuti di browser aperto e fermo per mini-sessione. Sta sotto
+    il cap wall-clock della sessione (85 min) e sotto il TTL del lucchetto
+    (90 min), che qui si rinnova a ogni fetta.
+    """
+    quarantena_s = float(settings.wa_resync_quarantine_min) * 60
+    if quarantena_s <= 0:
+        return None
+
+    # Una quarantena piu' lunga del cap wall-clock della sessione terrebbe il
+    # profilo aperto oltre il TTL del lucchetto senza mandare un solo
+    # messaggio: aspetteremmo con un browser vivo un tempo che, per
+    # costruzione, non lascia spazio all'invio. Non e' uno scenario ipotetico
+    # -- basta scrivere 120 in WA_RESYNC_QUARANTINE_MIN con il TTL a 90. Si
+    # esce subito e in modo rumoroso, invece di occupare il profilo per ore.
+    if quarantena_s >= _limite_sessione_s():
+        logger.error(
+            f"[WA] {number_id}: WA_RESYNC_QUARANTINE_MIN="
+            f"{settings.wa_resync_quarantine_min} min e' >= del cap di sessione "
+            f"({round(_limite_sessione_s() / 60)} min, derivato da "
+            f"WA_PROFILE_LOCK_TTL_MIN): cosi' configurato il numero non potrebbe "
+            "inviare nulla. Sessione annullata, correggi la configurazione.")
+        return "quarantena_oltre_cap_sessione"
+
+    residuo = quarantena_s - (time.perf_counter() - browser_t0)
+    if residuo <= 0:
+        return None
+
+    logger.info(f"[WA] {number_id}: quarantena di risincronizzazione, attendo "
+                f"{round(residuo / 60)} min prima del primo invio. Non e' un "
+                "blocco: la sessione WhatsApp Web si sta risincronizzando e "
+                "finche' non ha finito la guardia opt-out leggerebbe il vuoto "
+                "invece del silenzio.")
+
+    while residuo > 0:
+        if await bot_state_service.is_wa_halted():
+            logger.info(f"[WA] {number_id}: quarantena interrotta dal kill-switch")
+            return "wa_halted"
+        await asyncio.sleep(min(FETTA_ATTESA_QUARANTENA_S, residuo))
+        if not await wa_profile_lock.renew(number_id, lock_token):
+            # Il lucchetto non e' piu' nostro: qualcun altro ha legittimamente
+            # acquisito il profilo (TTL scaduto per un blip Redis, o un altro
+            # consumatore). Proseguire vorrebbe dire un secondo Chromium sullo
+            # stesso user-data-dir, cioe' la corruzione del profilo che il
+            # lucchetto esiste per impedire -- e qui il rischio e' massimo,
+            # perche' l'attesa dura un quarto d'ora senza nessuno che guardi.
+            logger.warning(f"[WA] {number_id}: lucchetto profilo perso durante "
+                           "la quarantena, sessione annullata")
+            return "profilo_occupato"
+        residuo = quarantena_s - (time.perf_counter() - browser_t0)
+
+    return None
 
 
 async def esegui_mini_sessione(number_id: str) -> dict:
@@ -167,7 +333,7 @@ async def esegui_mini_sessione(number_id: str) -> dict:
     """
     from app.database import AsyncSessionLocal
     from app.models.wa import WaNumber, WaNumberStatus
-    from app.services import bot_state_service, wa_number_manager
+    from app.services import wa_number_manager
 
     esito = {"inviati": 0, "falliti": 0, "saltati": 0, "motivo": "completata"}
     worker_id = f"wa-{number_id[:8]}-{uuid.uuid4().hex[:6]}"
@@ -196,6 +362,22 @@ async def esegui_mini_sessione(number_id: str) -> dict:
             logger.warning(f"[WA] numero {number_id} senza proxy: rischio T3 "
                            "(correlazione multi-numero sullo stesso IP)")
 
+    # Cancello 2: c'e' davvero qualcosa da fare? Costa due query e si fa PRIMA
+    # di aprire il browser, perche' da M5.1 aprire il browser significa anche
+    # restare fermi quindici minuti ad aspettare la quarantena. Senza questo
+    # controllo, un numero col cap giornaliero esaurito (o fuori finestra
+    # oraria) apriva WhatsApp Web, teneva il lucchetto del profilo per un
+    # quarto d'ora senza mandare niente, chiudeva, e ricominciava dopo il break
+    # -- tutta la notte, perche' nessuno gatta wa_send_task per ora. Costo
+    # doppio: l'health-check e il reply-scan trovavano il profilo occupato e
+    # saltavano il giro, e una sessione WhatsApp Web autenticata aperta a vuoto
+    # venti volte per notte e' esattamente il footprint che il pacing esiste
+    # per evitare (review 07/08 su M5.1).
+    motivo_precheck = await _niente_da_fare_prima_del_browser(number_id)
+    if motivo_precheck is not None:
+        esito["motivo"] = motivo_precheck
+        return esito
+
     quanti = None          # calcolato dopo il primo claim, sulla campagna vera
     processati = 0
     guasti_consecutivi = 0
@@ -208,6 +390,16 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                 pom = WhatsAppWebPage(page)
                 browser_t0 = time.perf_counter()
                 limite_s = _limite_sessione_s()
+
+                # La quarantena si aspetta QUI, una volta, invece di essere
+                # scoperta contatto per contatto dalla guardia -- che li
+                # rifiuterebbe tutti e armerebbe FM2 dopo tre (blocco B1 della
+                # review 07/08). La guardia resta comunque attiva a valle.
+                motivo_quarantena = await _attendi_quarantena_risync(
+                    number_id, lock_token, browser_t0)
+                if motivo_quarantena is not None:
+                    esito["motivo"] = motivo_quarantena
+                    return esito
 
                 while quanti is None or processati < quanti:
                     # Cap wall-clock: la durata di una sessione ha una coda destra
@@ -306,9 +498,19 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                         elif res.stato == "failed":
                             esito["falliti"] += 1
                             guasti_consecutivi = 0
-                        else:  # 'queued' = guasto nostro, il contatto non si tocca
+                        else:  # 'queued' = il contatto non si tocca
                             await _rilascia_lock(db, cc_id)
-                            guasti_consecutivi += 1
+                            # Non tutti i 'queued' sono guasti del DOM, e chi
+                            # costruisce l'esito lo sa: lo dichiara in
+                            # `arma_fm2` (default True, fail-closed). Il worker
+                            # non ricostruisce quel giudizio da una lista di
+                            # motivi -- ci ha provato in M5.1 e si e' perso
+                            # 'ricerca_senza_risultati', che e' un fatto sul
+                            # contatto e non sul nostro DOM: tre numeri non su
+                            # WhatsApp di fila fermavano il numero per quattro
+                            # ore dicendo "probabile DOM cambiato".
+                            if res.arma_fm2:
+                                guasti_consecutivi += 1
 
                         if guasti_consecutivi >= MAX_GUASTI_CONSECUTIVI:
                             await _ferma_numero_per_guasto(db, number_id, campaign_id,
@@ -395,6 +597,79 @@ async def _campagna_attiva_del_numero(number_id: str):
         )
 
 
+async def _chiudi_campagna_se_finita(number_id: str) -> str | None:
+    """Porta a 'completed' la campagna running del numero, se non le resta
+    nessuna riga non terminale. Ritorna l'id chiuso, o None.
+
+    Prima di M5.1 nessuno scriveva mai questo stato: il contratto 4.1 lo
+    assegna a M3 e M3 non lo aveva implementato (verificato con grep su tutto
+    app/, review 07/08). Una campagna finita restava "In corso" nella UI per
+    sempre, e il cliente non aveva modo di sapere che era conclusa.
+
+    Una riga con next_action_at nel FUTURO non e' lavoro finito, e' lavoro
+    rimandato: la campagna resta running e sara' il supervisore
+    (cron_worker.wa_campaign_supervisor) a riaccodarla quando l'appuntamento
+    arriva. In MVP lo step e' uno solo e il caso non si presenta, ma scriverlo
+    cosi' costa niente e non lascia una trappola al multi-step.
+    """
+    from sqlalchemy import func
+
+    from app.database import AsyncSessionLocal
+    from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                               WaContactStatus)
+    from app.services import notifier
+    from app.utils import events
+
+    async with AsyncSessionLocal() as db:
+        campagna = await db.scalar(
+            select(WaCampaign).where(WaCampaign.wa_number_id == number_id,
+                                     WaCampaign.status == WaCampaignStatus.running)
+        )
+        if campagna is None:
+            return None
+
+        rimaste = await db.scalar(
+            select(func.count(WaCampaignContact.id)).where(
+                WaCampaignContact.campaign_id == campagna.id,
+                WaCampaignContact.status.in_([WaContactStatus.queued,
+                                              WaContactStatus.in_sequence]),
+            )
+        ) or 0
+        if rimaste:
+            return None
+
+        campaign_id, nome, inviati = campagna.id, campagna.name, campagna.sent
+        # UPDATE condizionale, non `campagna.status = ...`: due mini-sessioni
+        # dello stesso numero che finiscono insieme farebbero entrambe la
+        # SELECT sopra vedendo 'running', ed entrambe scriverebbero -- due
+        # eventi, due Telegram, due completed_at diversi per la stessa
+        # campagna. Ripetendo la condizione dentro la scrittura, la seconda
+        # trova rowcount 0 e si ferma. Stesso schema dell'UPDATE atomico che
+        # protegge "una sola campagna running per numero" in
+        # wa_campaign_service.avvia.
+        #
+        # Copre anche il caso piu' probabile in pratica: una campagna messa in
+        # pausa da un umano fra la SELECT e la scrittura non deve diventare
+        # 'completed'.
+        chiusura = await db.execute(
+            update(WaCampaign)
+            .where(WaCampaign.id == campaign_id,
+                   WaCampaign.status == WaCampaignStatus.running)
+            .values(status=WaCampaignStatus.completed,
+                    completed_at=datetime.utcnow())
+        )
+        await db.commit()
+        if (chiusura.rowcount or 0) == 0:
+            return None
+
+    events.emit(campaign_id, "wa.campaign.completed",
+                f"campagna conclusa: {inviati} messaggi inviati")
+    logger.info(f"[WA] campagna {campaign_id} conclusa ({inviati} inviati)")
+    await notifier.send_telegram(
+        f'WhatsApp: campagna "{nome}" conclusa. {inviati} messaggi inviati.')
+    return campaign_id
+
+
 async def wa_send_task(ctx: dict, number_id: str) -> None:
     """Task ARQ. Esce SEMPRE presto: la pausa fra mini-sessioni non si fa
     dormendo dentro il job (lezione job_timeout della Fase Bio), si fa
@@ -420,8 +695,19 @@ async def wa_send_task(ctx: dict, number_id: str) -> None:
 
     esito = await esegui_mini_sessione(number_id)
 
+    # 'quarantena_oltre_cap_sessione' e' terminale come gli altri: e' una
+    # configurazione incoerente, e rischedularla ogni venti minuti produrrebbe
+    # solo un browser aperto a vuoto piu' volte all'ora finche' un umano non
+    # legge il log. Meglio fermarsi e farsi notare.
     if esito["motivo"] in ("send_disabled", "wa_halted", "numero_non_attivo",
-                           "guasti_consecutivi", "niente_da_fare"):
+                           "guasti_consecutivi", "niente_da_fare",
+                           "quarantena_oltre_cap_sessione"):
+        if esito["motivo"] == "niente_da_fare":
+            # Unico momento in cui si sa che non e' rimasto lavoro da fare: e'
+            # qui che una campagna finita smette di sembrare "In corso" per
+            # sempre (M5.1). Gli altri motivi terminali dicono "non posso
+            # lavorare adesso", non "non c'e' piu' lavoro".
+            await _chiudi_campagna_se_finita(number_id)
         logger.info(f"[WA] {number_id}: sessione chiusa ({esito['motivo']}), "
                     "nessuna rischedulazione automatica")
         return

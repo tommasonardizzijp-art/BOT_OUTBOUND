@@ -150,6 +150,14 @@ La distinzione che conta: **colpa del contatto** (→ terminale, il contatto esc
 
 Il contatore FM2 è per-numero e per-sessione: **3 fallimenti consecutivi "nostri" su chat diverse** ⇒ stop invii del numero, campagna → `error`, screenshot diagnostico, alert Telegram. Nessun contatto marcato `failed` in quel giro.
 
+> **Emendamento M5.1 (07/08) — "nostri" è una proprietà dell'esito, non del motivo.**
+>
+> `EsitoApertura` porta già il campo `colpa_nostra`, documentato *"True → conta verso l'escalation FM2 del numero"*, ma quel giudizio si perdeva nella traduzione a `EsitoInvio` e il worker lo ricostruiva confrontando il motivo con una lista. Conseguenza: `ricerca_senza_risultati` — che è `colpa_nostra=False`, cioè *"questo numero probabilmente non è su WhatsApp"* — contava verso FM2. Tre contatti non raggiungibili di fila in una lista fermavano il numero per quattro ore con un alert che diceva "probabile DOM cambiato", mentre il contatto era già gestito correttamente da `_incrementa_fallimento` (rinvio a 6h, DNC a soglia): veniva contato due volte, e la seconda con la causa sbagliata.
+>
+> `EsitoInvio` ha ora un campo `arma_fm2`, **default `True`** (fail-closed: un esito che nessuno ha classificato deve fermare il numero, non passare inosservato). Lo imposta chi costruisce l'esito, che è l'unico che sa cosa significa. Il worker non ricostruisce più quel giudizio.
+>
+> Oggi è `False` in due soli punti: `ricerca_senza_risultati` (fatto sul contatto) e `quarantena_risync` (limite nostro dichiarato, §3.4.2). Tutto il resto arma FM2 come prima.
+
 ### 3.3 `nessun-risultato-di-ricerca`: come si scioglie l'ambiguità
 
 Non si scioglie in un colpo solo, si scioglie **statisticamente dentro la sessione**:
@@ -167,6 +175,14 @@ Trattare `unknown` come blocco fail-closed letterale bloccherebbe il 100% degli 
 
 1. **`unknown` non vale mai `synced`.** Nessun ramo di codice può scriverlo o assumerlo.
 2. **Quarantena post-riconnessione.** Nei primi `WA_RESYNC_QUARANTINE_MIN` minuti dopo l'avvio o il riavvio di un browser il numero **non invia**. Valore iniziale **15 min** — ⚠️ **stimato, non misurato**: la costante porta scritta accanto la sua provenienza e va rimisurata quando il selettore verrà catturato. La sincronizzazione riparte da capo a ogni riconnessione (poc-report §Rischi 1), ed è quella la finestra cieca.
+
+   > **Emendamento M5.1 (07/08) — "non invia" significa ASPETTA, non "rifiuta ogni contatto".**
+   >
+   > La prima implementazione realizzava questa regola solo come guardia in `wa_sender.guardia_pre_invio`: ogni contatto veniva claimato, portato fino alla guardia, e lì rifiutato. Ma il modello di esecuzione scelto in M3 è la **mini-sessione**, che apre un browser nuovo ogni volta: il contatore riparte da zero a ogni sessione e la quarantena non scade mai. E siccome il rifiuto tornava `queued`, cioè "guasto nostro", dopo tre tentativi (2-4 minuti, con il delay mediano di 90 s) scattava FM2 — numero in cooldown 4 ore, campagna in `error`, alert Telegram che diceva "probabile DOM cambiato". Misurato sul codice e sulla configurazione veri: **succedeva nel 99,8% delle sessioni**, cioè il canale non poteva inviare nulla a nessuno.
+   >
+   > Da M5.1 la mini-sessione **attende** la quarantena una volta sola, prima del primo claim (`wa_worker._attendi_quarantena_risync`), ricontrollando il kill-switch e rinnovando il lucchetto profilo a ogni minuto. La guardia in `wa_sender` **resta dov'è**, come seconda rete: se il flusso di sessione cambia, la protezione regge comunque. In più `quarantena_risync` è in `wa_worker.MOTIVI_NON_FM2` — non è un DOM rotto e non deve armare un'escalation che dichiara una causa falsa.
+   >
+   > **Alternativa valutata e rimandata**: legare la quarantena all'ultimo re-link del numero (una colonna `session_linked_at` scritta allo scan del QR) invece che all'avvio del browser. È probabilmente più fedele a *cosa* si risincronizza davvero — un profilo persistente già collegato ha la storia in IndexedDB, il download pieno avviene dopo il QR — e farebbe risparmiare 15 minuti per sessione. Non è stata fatta in M5.1 perché **cambia una regola di sicurezza dichiarata**, e quella decisione non si prende dentro un cantiere di sblocco: va presa guardando il comportamento reale durante il collaudo.
 3. **Incoerenza DB↔DOM ⇒ non si invia.** Se per quel contatto esiste già almeno un `wa_messages.status = 'sent'` (qualunque campagna dello stesso tenant e numero) ma la cronologia agganciata mostra **zero** messaggi, il DOM sta mentendo: la chat non è sincronizzata. Contatto **resta `queued`**, niente invio, evento diagnostico. È il controllo compensativo più forte disponibile finché il selettore manca, e costa una query.
 4. Quando il selettore verrà catalogato, la quarantena §3.4.2 **si sostituisce** con la guardia vera; il punto 3 resta comunque.
 
@@ -210,12 +226,20 @@ La regola generale: **una colonna ha un solo proprietario in scrittura.** Chi no
 | `wa_contacts.last_contacted_at` | — | ✅ | |
 | `wa_contacts.last_replied_at` | — | — | è di M4 |
 | `wa_campaigns`: config (`name`, `campaign_type`, `daily_limit`, `optout_*`, `active_hours_*`, `session_*`, `break_*`) | ✅ | — | M3 **legge** e obbedisce |
-| `wa_campaigns.status` | ✅ `draft`→`running`, `running`↔`paused`, →`stopped` | ✅ `running`→`completed`, `running`→`error` | M2 non scrive mai `completed`: lo vede solo chi svuota la coda |
+| `wa_campaigns.status` | ✅ `draft`→`running`, `running`↔`paused`, →`stopped` | ✅ `running`→`completed`, `running`→`error` | M2 non scrive mai `completed`: lo vede solo chi svuota la coda. **`error`→`paused` è di M5.1**, endpoint `POST /wa/campaigns/{id}/recover` con motivo obbligatorio (vedi nota sotto) |
 | `wa_campaigns.total_contacts` | ✅ | — | |
 | `wa_campaigns`: `sent`, `failed` | — | ✅ | |
 | `wa_campaigns`: `replied`, `opted_out` | — | ✅ solo `opted_out` da guardia | `replied` è di M4 |
 | `wa_campaigns`: `started_at` | ✅ | — | allo start |
 | `wa_campaigns.completed_at` | — | ✅ | insieme a `completed` |
+
+> **Emendamento M5.1 (07/08) — le due transizioni assegnate a M3 non erano implementate.**
+>
+> `running`→`completed` e `completed_at`: nessuna riga del backend le scriveva (verificato con grep su tutto `app/`). Quando l'ultimo contatto era servito la mini-sessione usciva con `niente_da_fare`, il task non rischedulava, e la campagna restava **`running` per sempre** — "In corso" nella UI, senza che nessuno potesse sapere che era finita. Ora le scrive `wa_worker._chiudi_campagna_se_finita`, chiamata sul motivo `niente_da_fare`: è l'unico momento in cui si sa che non è rimasto lavoro. Una riga con `next_action_at` futuro **non** chiude la campagna (è lavoro rimandato, non finito): la riaccoda il supervisore quando l'appuntamento arriva.
+>
+> **Chi accoda il worker.** `enqueue_wa_workers` aveva due soli chiamanti, entrambi in `wa_ops.py`, e nessuno dei due era il verbo che usa la UI: avviare una campagna scriveva `running` e non metteva in coda niente. Da M5.1 l'accodamento è dentro `wa_campaign_service.avvia()`, per la ragione già scritta nel docstring di quel modulo — una regola che vive in un handler HTTP è una regola che il resto del sistema può aggirare. In più il cron `wa_campaign_supervisor` riaccoda ogni campagna `running` con lavoro pronto e senza job: chiude anche il riavvio del PC (la guardia di cold-start in `work_enqueue` copre solo le campagne Instagram) e il resume dopo kill-switch.
+>
+> **Invariante nuova, che vale la pena tenere in mente più delle tre righe sopra:** una campagna `running` o ha lavoro pronto **e** un job che lo consuma, oppure non ha lavoro **e** allora è `completed`. Ogni altro stato è un bug, e per un mese ce n'è stato uno che nessuno vedeva.
 | `wa_sequence_steps` (tutto) | ✅ | — | |
 | `wa_campaign_contacts`: creazione righe, `status` iniziale `queued`/`skipped` da ingest | ✅ | — | |
 | `wa_campaign_contacts`: `status` runtime, `current_step`, `next_action_at` runtime, `failure_count`, `last_error` | ✅ solo il **seeding iniziale** di `next_action_at` (§7.2) | ✅ tutto il resto, **incluso `status=replied`** dalla guardia pre-invio a chat aperta (`wa_sender._esito_guardia_negativa`, §7.2 punto b) | M4 aggiunge una SECONDA via allo stesso `status=replied`: il reply-watcher lo scrive da chat chiusa (§7.3/§7.4). Stessa ridondanza intenzionale già in uso per `opted_out` (riga sotto) — non un conflitto, due strade allo stesso stato terminale. `replied_at_step` resta di M4 (riga sotto) — emendamento §9 03/08 |
