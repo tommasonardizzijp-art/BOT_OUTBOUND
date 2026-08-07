@@ -20,6 +20,7 @@ from app.utils.exceptions import (
     DMSendError, DMRestrictedError, AccountBannedError, AccountChallengeError,
     DMAbortedBeforeSendError, AccountSessionExpiredError,
 )
+from app.utils.ig_block_detect import detect_block_interstitial
 
 
 class InstagramPage:
@@ -30,6 +31,9 @@ class InstagramPage:
         self._page = None
         self._tm = timing_multiplier  # per-account speed factor (0.80–1.30)
         self._extended_browse = extended_browse  # True for fresh/low-warmup accounts
+        # Memorizzato da ensure_logged_in: serve a costruire AccountChallengeError
+        # quando un interstiziale di blocco compare DURANTE il lavoro.
+        self._account_id: str | None = None
 
     async def _get_page(self):
         if not self._page or self._page.is_closed():
@@ -44,6 +48,7 @@ class InstagramPage:
         automatico via credenziali e' un rischio-ban (redirect a challenge il
         giorno dopo) e va fatto solo a mano dall'operatore ('Login Browser').
         """
+        self._account_id = account_id
         page = await self._get_page()
         await page.goto(self.BASE_URL, wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(1.5, 3.0))
@@ -359,6 +364,19 @@ class InstagramPage:
         logger.debug(f"Navigating to profile: {profile_url}")
         await page.goto(profile_url, wait_until="domcontentloaded")
         await asyncio.sleep(random.uniform(1.5, 3.0))
+
+        # Blocco IG (scraping_warning / challenge / checkpoint / suspended): fermarsi
+        # QUI. Da dietro l'avviso la pagina profilo non si dipinge, i controlli DM non
+        # si trovano e il lead finirebbe buttato come 'dm_restricted'. Il worker DM
+        # gestisce gia' AccountChallengeError isolando l'account e sbloccando il
+        # follower senza marcarlo (campaign_orchestrator.py:721).
+        blocco = detect_block_interstitial(page.url)
+        if blocco:
+            logger.error(f"@{username}: interstiziale IG '{blocco}' — invio annullato ({page.url})")
+            raise AccountChallengeError(
+                account_id=self._account_id or "sconosciuto",
+                challenge_url=page.url,
+            )
 
         # Instagram occasionally serves a "Something went wrong" error page.
         # A single reload always fixes it — detect and retry once before giving up.
