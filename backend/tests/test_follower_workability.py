@@ -36,10 +36,15 @@ def test_senza_arricchimento_anche_pending_e_mandabile():
 @pytest.mark.parametrize("stato_escluso", [
     FollowerStatus.sent, FollowerStatus.failed,
     FollowerStatus.skipped, FollowerStatus.replied,
+    # pending_approval NON e' terminale (il messaggio e' pronto, aspetta solo
+    # un umano) ma non e' comunque mai mandabile ORA: e' la regressione che
+    # questo task esiste per impedire, uniformare le due liste e' il bug.
+    FollowerStatus.pending_approval,
 ])
-def test_gli_stati_terminali_non_sono_mai_mandabili(stato_escluso):
+def test_alcuni_stati_non_sono_mai_mandabili(stato_escluso):
     for livello in ("none", "bio", "contacts"):
         assert not is_sendable(_campagna(livello), stato_escluso)
+        assert stato_escluso not in sendable_statuses(_campagna(livello))
 
 
 def test_pending_mandabile_solo_a_livello_none():
@@ -58,6 +63,15 @@ def test_il_lavoro_residuo_include_lapprovazione_e_i_pending_a_livello_none():
     residuo_none = remaining_work_statuses(_campagna("none"))
     assert FollowerStatus.pending_approval in residuo_none
     assert FollowerStatus.pending in residuo_none
+
+
+@pytest.mark.parametrize("stato_terminale", [
+    FollowerStatus.sent, FollowerStatus.failed,
+    FollowerStatus.skipped, FollowerStatus.replied,
+])
+def test_gli_stati_terminali_non_sono_mai_lavoro_residuo(stato_terminale):
+    for livello in ("none", "bio", "contacts"):
+        assert stato_terminale not in remaining_work_statuses(_campagna(livello))
 
 
 def test_campagna_senza_il_campo_si_comporta_come_prima():
