@@ -878,6 +878,15 @@ async def test_mini_sessione_salta_se_profilo_occupato(db_session, monkeypatch):
     from app.services import wa_profile_lock
 
     monkeypatch.setattr(settings, "wa_send_enabled", True)
+    # Congelata dentro la finestra attiva (default 09:30-19:30): senza
+    # questo il precheck "Cancello 2" (_niente_da_fare_prima_del_browser,
+    # righe 208-211 di wa_worker.py) legge l'ora REALE di sistema e, fuori
+    # dall'orario di lavoro, esce con "fuori_finestra" PRIMA di arrivare al
+    # lucchetto del profilo che questo test vuole esercitare -- il test
+    # falliva in CI/locale la sera (assert 'fuori_finestra' == 'profilo_
+    # occupato'). Stesso valore/meccanismo del default ora_corrente=12 di
+    # _mini_sessione_con_doppi piu' sotto in questo file.
+    monkeypatch.setattr(wa_worker, "_ora_locale_corrente", lambda: 12)
     ctx = await _scenario_claim(db_session)
 
     class _CtxOccupato:
