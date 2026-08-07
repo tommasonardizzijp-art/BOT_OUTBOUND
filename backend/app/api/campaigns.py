@@ -201,6 +201,7 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         scrape_mode=data.scrape_mode,
         inbox_engine=data.inbox_engine,
         bio_engine=data.bio_engine,
+        enrichment_level=data.enrichment_level,
         scrape_session_size=data.scrape_session_size,
         scrape_break_minutes_min=data.scrape_break_minutes_min,
         scrape_break_minutes_max=data.scrape_break_minutes_max,
@@ -249,6 +250,10 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
         # bio_engine has its OWN status guard below (draft only — a scraping
         # campaign already has bio workers/loops that assume one engine).
         "bio_engine",
+        # enrichment_level has its OWN status guard below, same states as
+        # bio_engine — decide SE si aprono i profili, cambiarlo mentre la Fase
+        # Bio gira lascerebbe i worker con un'assunzione non piu' valida.
+        "enrichment_level",
         # Campi messaggi/AI: letti freschi a ogni generazione, sicuri da
         # cambiare anche a campagna running — i messaggi già generati restano,
         # i prossimi seguono la nuova modalità (decisione 11/07).
@@ -331,6 +336,15 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
                 detail="Il motore Fase Bio si cambia solo a campagna ferma (draft/ready/paused/error), non mentre sta girando.",
             )
         campaign.bio_engine = data.bio_engine
+    if data.enrichment_level is not None:
+        if campaign.status not in (
+            CampaignStatus.draft, CampaignStatus.ready, CampaignStatus.paused, CampaignStatus.error,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Il livello di arricchimento si cambia solo a campagna ferma (draft/ready/paused/error), non mentre sta girando.",
+            )
+        campaign.enrichment_level = data.enrichment_level
     if data.scrape_session_size is not None:
         campaign.scrape_session_size = data.scrape_session_size
     if data.scrape_break_minutes_min is not None:
