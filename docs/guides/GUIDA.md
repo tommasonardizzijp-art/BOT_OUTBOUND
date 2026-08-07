@@ -431,7 +431,9 @@ Queste regole sono già implementate nel codice. **Non disabilitarle.**
 Controlla che il venv sia attivato:
 cd backend
 venv\Scripts\activate
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --port 8000
+:: mai --reload su Windows: spegne Playwright nel processo web
+:: (perche': docs/setup/CONFIGURAZIONE.md)
 ```
 Leggi l'errore nella finestra CMD del backend.
 

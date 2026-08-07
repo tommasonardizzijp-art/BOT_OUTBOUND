@@ -44,8 +44,8 @@ cd backend
 source venv/bin/activate       # Unix
 python -m scripts.migrate
 
-# 3. Backend FastAPI
-uvicorn app.main:app --reload --port 8000
+# 3. Backend FastAPI — MAI con --reload su Windows (vedi nota sotto)
+uvicorn app.main:app --port 8000
 
 # 4. ARQ Worker DM (in un secondo terminale)
 cd backend
@@ -63,6 +63,23 @@ npm run dev
 ```
 
 URLs: Dashboard → http://localhost:3000 | API Docs → http://localhost:8000/docs
+
+### ⚠️ Perché il backend gira senza `--reload`
+
+Su Windows `--reload` implica `use_subprocess=True`, e uvicorn in quel caso sceglie
+**di proposito** il `SelectorEventLoop` invece del `ProactorEventLoop`
+(`uvicorn/loops/asyncio.py`). Il Selector non implementa `_make_subprocess_transport`:
+Patchright non riesce ad avviare il driver Node, e **tutto ciò che apre un browser dentro
+il processo web** — login QR, verifica sessione — muore con un `NotImplementedError`
+servito come 500 generico.
+
+Il sintomo che inganna: **da terminale lo stesso codice funziona, dall'API no.** Gli invii
+non ne soffrono, perché girano nei worker ARQ, che sono processi separati — per questo il
+problema è rimasto invisibile per settimane.
+
+Costo di non avere il reload: riavviare la finestra del backend dopo una modifica. Se un
+domani si vuole riavere il reload, la strada giusta non è forzare il loop, ma **spostare
+fuori dal processo web le azioni che aprono un browser**.
 
 ---
 

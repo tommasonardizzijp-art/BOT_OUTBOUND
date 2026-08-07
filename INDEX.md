@@ -179,9 +179,10 @@ OLLAMA_MODEL=llama3.2         # consigliato: llama3.1:8b (vedi docs/architecture
 # 1. Redis
 docker-compose up -d
 
-# 2. Backend
+# 2. Backend — MAI --reload su Windows: spegne Playwright nel processo web
+#    (perche': docs/setup/CONFIGURAZIONE.md)
 cd backend && venv\Scripts\activate
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --port 8000
 
 # 3. Worker ARQ DM
 cd backend && venv\Scripts\activate

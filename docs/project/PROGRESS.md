@@ -846,9 +846,11 @@ double-click start.bat
 docker-compose up -d
 
 # Terminale 2 — Backend
+# MAI --reload su Windows: spegne Playwright nel processo web
+# (perche': docs/setup/CONFIGURAZIONE.md)
 cd backend
 venv\Scripts\activate
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --port 8000
 
 # Terminale 3 — Worker ARQ DM
 cd backend
