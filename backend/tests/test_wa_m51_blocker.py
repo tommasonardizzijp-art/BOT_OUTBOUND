@@ -420,3 +420,70 @@ async def test_t5_supervisore_muto_a_canale_fermo(db_session, monkeypatch, _enqu
     await cron_worker.wa_campaign_supervisor({})
 
     assert _enqueue_spia == []
+
+
+# ---------------------------------------------------------------------------
+# T6 — una campagna finita diventa completed
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_t6_campagna_senza_righe_attive_diventa_completed(db_session):
+    """Nessuna riga del backend scriveva mai lo stato completed: una campagna
+    finita restava "In corso" nella UI per sempre."""
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from app.workers import wa_worker
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    ctx["cc"].status = WaContactStatus.completed
+    ctx["cc"].next_action_at = None
+    await db_session.commit()
+
+    chiusa = await wa_worker._chiudi_campagna_se_finita(ctx["number"].id)
+    await db_session.refresh(ctx["campaign"])
+
+    assert chiusa == ctx["campaign"].id
+    assert ctx["campaign"].status == WaCampaignStatus.completed
+    assert ctx["campaign"].completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_t6_campagna_con_appuntamento_futuro_resta_running(db_session):
+    """Una riga con next_action_at nel futuro non e' lavoro finito: e' lavoro
+    rimandato. La campagna non si chiude, la riaccodera' il supervisore."""
+    from datetime import timedelta
+
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from app.workers import wa_worker
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    ctx["cc"].status = WaContactStatus.in_sequence
+    ctx["cc"].next_action_at = datetime.utcnow() + timedelta(days=2)
+    await db_session.commit()
+
+    chiusa = await wa_worker._chiudi_campagna_se_finita(ctx["number"].id)
+    await db_session.refresh(ctx["campaign"])
+
+    assert chiusa is None
+    assert ctx["campaign"].status == WaCampaignStatus.running
+
+
+@pytest.mark.asyncio
+async def test_t6_una_campagna_in_pausa_non_viene_chiusa(db_session):
+    """Si chiude solo cio' che sta girando: una campagna messa in pausa da un
+    umano non deve diventare 'completed' perche' nel frattempo non ha lavoro."""
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from app.workers import wa_worker
+
+    ctx = await scenario_pronto(db_session)
+    ctx["campaign"].status = WaCampaignStatus.paused
+    ctx["cc"].status = WaContactStatus.completed
+    ctx["cc"].next_action_at = None
+    await db_session.commit()
+
+    chiusa = await wa_worker._chiudi_campagna_se_finita(ctx["number"].id)
+    await db_session.refresh(ctx["campaign"])
+
+    assert chiusa is None
+    assert ctx["campaign"].status == WaCampaignStatus.paused

@@ -476,6 +476,60 @@ async def _campagna_attiva_del_numero(number_id: str):
         )
 
 
+async def _chiudi_campagna_se_finita(number_id: str) -> str | None:
+    """Porta a 'completed' la campagna running del numero, se non le resta
+    nessuna riga non terminale. Ritorna l'id chiuso, o None.
+
+    Prima di M5.1 nessuno scriveva mai questo stato: il contratto 4.1 lo
+    assegna a M3 e M3 non lo aveva implementato (verificato con grep su tutto
+    app/, review 07/08). Una campagna finita restava "In corso" nella UI per
+    sempre, e il cliente non aveva modo di sapere che era conclusa.
+
+    Una riga con next_action_at nel FUTURO non e' lavoro finito, e' lavoro
+    rimandato: la campagna resta running e sara' il supervisore
+    (cron_worker.wa_campaign_supervisor) a riaccodarla quando l'appuntamento
+    arriva. In MVP lo step e' uno solo e il caso non si presenta, ma scriverlo
+    cosi' costa niente e non lascia una trappola al multi-step.
+    """
+    from sqlalchemy import func
+
+    from app.database import AsyncSessionLocal
+    from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                               WaContactStatus)
+    from app.services import notifier
+    from app.utils import events
+
+    async with AsyncSessionLocal() as db:
+        campagna = await db.scalar(
+            select(WaCampaign).where(WaCampaign.wa_number_id == number_id,
+                                     WaCampaign.status == WaCampaignStatus.running)
+        )
+        if campagna is None:
+            return None
+
+        rimaste = await db.scalar(
+            select(func.count(WaCampaignContact.id)).where(
+                WaCampaignContact.campaign_id == campagna.id,
+                WaCampaignContact.status.in_([WaContactStatus.queued,
+                                              WaContactStatus.in_sequence]),
+            )
+        ) or 0
+        if rimaste:
+            return None
+
+        campagna.status = WaCampaignStatus.completed
+        campagna.completed_at = datetime.utcnow()
+        campaign_id, nome, inviati = campagna.id, campagna.name, campagna.sent
+        await db.commit()
+
+    events.emit(campaign_id, "wa.campaign.completed",
+                f"campagna conclusa: {inviati} messaggi inviati")
+    logger.info(f"[WA] campagna {campaign_id} conclusa ({inviati} inviati)")
+    await notifier.send_telegram(
+        f'WhatsApp: campagna "{nome}" conclusa. {inviati} messaggi inviati.')
+    return campaign_id
+
+
 async def wa_send_task(ctx: dict, number_id: str) -> None:
     """Task ARQ. Esce SEMPRE presto: la pausa fra mini-sessioni non si fa
     dormendo dentro il job (lezione job_timeout della Fase Bio), si fa
@@ -503,6 +557,12 @@ async def wa_send_task(ctx: dict, number_id: str) -> None:
 
     if esito["motivo"] in ("send_disabled", "wa_halted", "numero_non_attivo",
                            "guasti_consecutivi", "niente_da_fare"):
+        if esito["motivo"] == "niente_da_fare":
+            # Unico momento in cui si sa che non e' rimasto lavoro da fare: e'
+            # qui che una campagna finita smette di sembrare "In corso" per
+            # sempre (M5.1). Gli altri motivi terminali dicono "non posso
+            # lavorare adesso", non "non c'e' piu' lavoro".
+            await _chiudi_campagna_se_finita(number_id)
         logger.info(f"[WA] {number_id}: sessione chiusa ({esito['motivo']}), "
                     "nessuna rischedulazione automatica")
         return
