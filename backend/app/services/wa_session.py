@@ -106,13 +106,21 @@ def _loop_puo_avviare_subprocess(loop, piattaforma: str | None = None) -> bool:
 
     `piattaforma` e' iniettabile per i test: la logica va verificata anche
     dalla CI Linux, dove `asyncio.ProactorEventLoop` non esiste proprio.
+
+    E quando la classe non c'e' ma la piattaforma dichiarata e' win32, la
+    risposta e' False, non True. Su un Windows vero quella classe c'e'
+    sempre: la combinazione si produce solo iniettando `piattaforma` da
+    un'altra macchina, cioe' in un test. Rispondere True li' rendeva il caso
+    win32 non verificabile dalla CI Linux -- il guard usciva prima di
+    guardare il loop, e il test "un loop qualunque su win32 non va bene"
+    passava per la ragione sbagliata (falliva in CI, che e' come e' emerso).
+    False e' anche la risposta coerente col resto del modulo: non poter
+    verificare non e' un permesso.
     """
     piattaforma = sys.platform if piattaforma is None else piattaforma
     if piattaforma != "win32":
         return True
-    if _ProactorEventLoop is None:
-        return True
-    return isinstance(loop, _ProactorEventLoop)
+    return _ProactorEventLoop is not None and isinstance(loop, _ProactorEventLoop)
 
 
 def _verifica_loop_o_solleva() -> None:
