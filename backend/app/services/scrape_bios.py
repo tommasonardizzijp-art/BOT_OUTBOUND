@@ -43,6 +43,14 @@ MICRO_YIELD_MAX_SECONDS = 40 * 60
 ENGINE_SWITCH_DEFER = 2
 
 
+def enrichment_blocca_la_fase_bio(campaign) -> bool:
+    """True se il livello della campagna esclude qualunque visita dedicata.
+    Difensivo: una campagna senza il campo non e' bloccata (comportamento
+    identico a prima dell'introduzione del livello)."""
+    from app.models.campaign import ENRICHMENT_NONE
+    return getattr(campaign, "enrichment_level", None) == ENRICHMENT_NONE
+
+
 def bio_should_continue(target: int | None, done: int) -> bool:
     """True se la Fase Bio deve continuare dato il target e i gia' fatti."""
     if target is None:
@@ -70,6 +78,16 @@ async def scrape_bios(campaign_id: str) -> int | None:
             return None
         if campaign.status not in SCRAPING_ACTIVE_STATES:
             logger.info(f"[Bio] Stato '{campaign.status.value}' — skip stale retry")
+            return None
+        if enrichment_blocca_la_fase_bio(campaign):
+            from app.utils.events import emit as emit_event
+            logger.info(
+                f"[Bio] Campaign {campaign_id}: enrichment_level='none', Fase Bio non avviata"
+            )
+            emit_event(
+                campaign_id, "bios_skipped",
+                "Livello di arricchimento 'none': nessuna visita ai profili, si passa ai DM",
+            )
             return None
         if await is_halted(db):
             from app.utils.events import emit as emit_event

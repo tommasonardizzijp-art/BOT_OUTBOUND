@@ -42,6 +42,21 @@ def bio_done_status(current: "CampaignStatus") -> "CampaignStatus":
     )
 
 
+# Livello di arricchimento: decide SE si aprono i profili per raccogliere dati.
+# Ortogonale a `bio_engine`, che decide COME (instagrapi o browser).
+#   none     = nessuna visita dedicata. I dati arrivano solo dalla Fase Lista, piu'
+#              l'harvest passivo durante la visita che il DM fa comunque.
+#   bio      = visita dedicata, bio/follower/link. Nessuna chiamata ai contatti.
+#   contacts = come 'bio' + /info/ sui profili professional (email/telefono).
+ENRICHMENT_NONE = "none"
+ENRICHMENT_BIO = "bio"
+ENRICHMENT_CONTACTS = "contacts"
+ENRICHMENT_LEVELS = (ENRICHMENT_NONE, ENRICHMENT_BIO, ENRICHMENT_CONTACTS)
+
+# Livelli che prevedono una visita dedicata al profilo (Fase Bio o risoluzione import).
+ENRICHMENT_WITH_VISIT = (ENRICHMENT_BIO, ENRICHMENT_CONTACTS)
+
+
 class Campaign(Base):
     __tablename__ = "campaigns"
 
@@ -107,6 +122,11 @@ class Campaign(Base):
     # 'browser' = Patchright (web_profile_info, prudente, no cap API). Vedi migration 022.
     bio_engine: Mapped[str] = mapped_column(
         String(10), nullable=False, default='api', server_default='api'
+    )
+    # Vedi ENRICHMENT_LEVELS sopra. Default 'none' sulle campagne nuove: un livello
+    # che consuma account si accende di proposito, non si trova acceso. Migration 029.
+    enrichment_level: Mapped[str] = mapped_column(
+        String(10), nullable=False, default=ENRICHMENT_NONE, server_default=ENRICHMENT_NONE
     )
     list_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bio_target: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -71,6 +71,9 @@ export interface Campaign {
   inbox_engine?: 'browser' | 'api'
   // Engine usato per la Fase Bio: 'api' = instagrapi (veloce); 'browser' = Patchright (prudente, no cap API)
   bio_engine?: 'api' | 'browser'
+  // Livello di arricchimento: 'none' non apre i profili (solo lista + raccolta passiva
+  // durante il DM); 'bio' li apre; 'contacts' aggiunge email/telefono business.
+  enrichment_level?: 'none' | 'bio' | 'contacts'
   scrape_completed_at: string | null
   started_at: string | null
   completed_at: string | null
@@ -129,6 +132,7 @@ export interface CampaignCreate {
   scrape_mode?: 'followers' | 'following' | 'dm_threads'
   inbox_engine?: 'browser' | 'api'
   bio_engine?: 'api' | 'browser'
+  enrichment_level?: 'none' | 'bio' | 'contacts'
   scrape_session_size?: number
   scrape_break_minutes_min?: number
   scrape_break_minutes_max?: number

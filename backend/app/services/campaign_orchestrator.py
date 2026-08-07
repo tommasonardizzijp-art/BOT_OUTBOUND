@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timedelta
 from arq.worker import Retry
 from loguru import logger
-from sqlalchemy import select, update, delete, func, or_
+from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.utils.events import emit as emit_event
 from app.utils.roles import can_dm
@@ -38,6 +38,9 @@ from app.models.global_contact import GlobalContact
 from app.services import account_manager
 from app.services import account_lease, reservation
 from app.services.account_manager import get_warmup_limit
+from app.services.follower_workability import (
+    is_sendable, remaining_work_filter, sendable_filter,
+)
 from app.services.ai_personalizer import compose_message
 from app.services.template_renderer import TemplateRenderError
 from app.services.human_behavior import SessionManager
@@ -626,7 +629,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                     _f = _res.scalar_one_or_none()
                     if _f is None:
                         return False
-                    return _f.status in (FollowerStatus.bio_scraped, FollowerStatus.message_generated)
+                    return is_sendable(campaign, _f.status)
 
                 await browser_session.page.send_dm(
                     username=follower.username,
@@ -646,6 +649,17 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 message.sent_at = datetime.utcnow()
                 message.account_id = account_id
                 await db.commit()
+
+                # Harvest: la visita al profilo l'abbiamo gia' pagata per mandare il DM.
+                # DOPO la marcatura 'sent' e best-effort: un guasto qui non tocca
+                # la contabilita' dell'invio.
+                try:
+                    from app.services.dm_harvest import harvest_profile_into_follower
+                    catturato = getattr(browser_session.page, "last_profile_capture", None)
+                    if await harvest_profile_into_follower(db, follower, catturato):
+                        logger.debug(f"[Harvest] dati passivi salvati per @{follower.username}")
+                except Exception as e:
+                    logger.warning(f"[Harvest] chiamata saltata per @{follower.username}: {e}")
 
                 # Success bookkeeping (any failure here does NOT cause resend — DM is committed)
                 try:
@@ -1085,13 +1099,18 @@ async def _claim_next_follower(
     )
     await db.commit()
 
+    # Serve la campagna per sapere quali stati sono mandabili (livello di
+    # arricchimento): vedi follower_workability.sendable_filter.
+    campaign_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign = campaign_result.scalar_one_or_none()
+
     for attempt in range(max_attempts):
         # Find an unclaimed candidate without ORDER BY random() full scan.
         base = (
             select(Follower)
             .where(
                 Follower.campaign_id == campaign_id,
-                Follower.status.in_([FollowerStatus.bio_scraped, FollowerStatus.message_generated]),
+                sendable_filter(campaign),
                 Follower.locked_by_account_id.is_(None),
             )
         )
@@ -1263,14 +1282,16 @@ async def _maybe_complete_campaign(campaign_id: str, db: AsyncSession) -> None:
     eliminate the TOCTOU race between concurrent workers finishing at the same time.
     Only the worker whose UPDATE returns rowcount==1 logs the completion event.
     """
+    # Serve la campagna per sapere quali stati contano come lavoro residuo
+    # (livello di arricchimento): vedi follower_workability.remaining_work_filter.
+    campaign_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign = campaign_result.scalar_one_or_none()
+
     remaining = await db.scalar(
         select(func.count(Follower.id))
         .where(
             Follower.campaign_id == campaign_id,
-            or_(
-                Follower.status.in_([FollowerStatus.bio_scraped, FollowerStatus.message_generated, FollowerStatus.pending_approval]),
-                Follower.locked_by_account_id.isnot(None),
-            )
+            remaining_work_filter(campaign),
         )
     )
 

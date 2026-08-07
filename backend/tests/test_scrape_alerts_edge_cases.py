@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from app.database import Base
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, ENRICHMENT_BIO
 from app.models.follower import Follower, FollowerStatus
 import app.models.account  # noqa: F401
 import app.models.campaign_account  # noqa: F401
@@ -211,7 +211,7 @@ def test_e2e_network_stop_produces_formatted_telegram_alert(monkeypatch):
                 db.add(Campaign(
                     id=campaign_id, name="E2E Rete Giu", source_type="scrape",
                     target_username="t", status=CampaignStatus.scraping,
-                    messaging_enabled=False,
+                    messaging_enabled=False, enrichment_level=ENRICHMENT_BIO,
                 ))
                 db.add(Follower(
                     id=str(uuid.uuid4()), campaign_id=campaign_id,

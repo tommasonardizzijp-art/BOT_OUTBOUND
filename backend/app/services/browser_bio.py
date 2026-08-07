@@ -39,6 +39,7 @@ from app.browser.context_manager import BrowserSession
 from app.utils.exceptions import (
     AccountChallengeError, AccountBannedError, AccountSessionExpiredError,
 )
+from app.utils.ig_block_detect import detect_block_interstitial
 
 # App-id pubblico del web di Instagram (usato dal suo stesso JS per web_profile_info).
 WEB_APP_ID = "936619743392459"
@@ -142,7 +143,9 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
          attivo di /api/graphql (solo lettura passiva).
 
     Ritorna il dict `data.user` (forma web_profile_info, eventualmente da GraphQL
-    gia' normalizzata), oppure {"__status": st} su fail rate-limit, oppure None.
+    gia' normalizzata), oppure {"__status": st} su fail rate-limit, oppure
+    {"__blocked": nome_blocco} se il goto e' finito su un interstiziale IG
+    (scraping_warning/challenge/checkpoint/suspended), oppure None.
     Non solleva su errori di parsing.
     """
     captured: dict = {}
@@ -180,6 +183,14 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
     try:
         url = f"https://www.instagram.com/{username}/"
         await raw_page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        # Blocco IG: uscire SUBITO. Insistere con la fetch esplicita da dietro
+        # l'avviso aggiunge richieste attribuibili proprio nel momento peggiore,
+        # e i profili tornerebbero vuoti facendoli marcare 'skipped' a vuoto.
+        blocco = detect_block_interstitial(raw_page.url)
+        if blocco:
+            logger.error(f"[BioBrowser] @{username}: interstiziale IG '{blocco}' ({raw_page.url})")
+            return {"__blocked": blocco}
 
         # Attendi l'intercettazione passiva (polling breve).
         waited = 0.0
@@ -287,12 +298,30 @@ async def _fetch_public_contact_inpage(raw_page, pk) -> dict | None:
         return None
 
 
+def contatti_richiesti(campaign) -> bool:
+    """True se questa campagna vuole email/telefono, cioe' se `/info/` puo' partire.
+
+    Due condizioni in AND:
+      - l'interruttore globale e' acceso (kill-switch operativo, vince su tutto);
+      - il livello della campagna e' 'contacts'.
+
+    Difensivo sulla retrocompatibilita': una campagna senza il campo si comporta
+    come prima dell'introduzione dei livelli (chiama /info/), altrimenti la
+    migrazione spegnerebbe in silenzio la raccolta contatti su campagne che la
+    volevano."""
+    from app.models.campaign import ENRICHMENT_CONTACTS
+    if not settings.bio_browser_contact_info_enabled:
+        return False
+    livello = getattr(campaign, "enrichment_level", None)
+    return livello is None or livello == ENRICHMENT_CONTACTS
+
+
 async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -> tuple[str, Exception | None]:
     """Come `fetch_and_store_bio` ma via browser. Scrive gli STESSI campi Follower +
     upsert_lead. NON consuma il cap API (nessun user_info_v1).
 
     Ritorna (outcome, err):
-      'done' | 'private' | 'not_found' | 'soft_block' | 'network' | 'error'
+      'done' | 'private' | 'not_found' | 'soft_block' | 'network' | 'error' | 'blocked'
     """
     from app.utils.contact_extract import extract_contacts
     from app.services.scraper import upsert_lead
@@ -314,6 +343,8 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     if user is None:
         # Nessun dato: profilo inesistente o parsing a vuoto. Skip non fatale.
         return "not_found", None
+    if isinstance(user, dict) and user.get("__blocked"):
+        return "blocked", Exception(f"interstiziale IG: {user['__blocked']}")
     if isinstance(user, dict) and user.get("__status"):
         st = user["__status"]
         # 429/401/403 dal web = soft-block/rate: il chiamante rallenta o pausa.
@@ -327,7 +358,7 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     # (business_email=null). Li prendiamo da /api/v1/users/{pk}/info/ (public_email/
     # public_phone_number) con un in-page fetch web-autenticato. Senza questo, il
     # motore browser perde ~95% delle email (verificato sul campo il 08/07).
-    if settings.bio_browser_contact_info_enabled:
+    if contatti_richiesti(campaign):
         info = await _fetch_public_contact_inpage(raw_page, shim.pk)
         if isinstance(info, dict) and info.get("__rate_limited"):
             # /info/ rate-limitato: NON ingoiare (era il bug INFO-1/PR-01). Propaga
@@ -797,6 +828,12 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     # Serve a decidere lo scroll pubblico/privato piu' sotto.
                     follower_is_private = bool(follower.is_private)
                     emit_event(campaign_id, "scrape_progress", f"@{uname} bio via browser")
+                elif outcome == "blocked":
+                    # NON marcare il follower: resta 'pending' e verra' ripreso quando
+                    # l'account sara' di nuovo pulito. Isola l'account e ferma tutto.
+                    await _resilient_release(db, fid)
+                    await _isolate_account_and_pause(campaign_id, account_id, err)
+                    return None
                 elif outcome in ("not_found", "private", "error"):
                     await _resilient_release(
                         db, fid, status=FollowerStatus.skipped, skip_reason=f"browser_{outcome}"
@@ -916,9 +953,14 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                 pass
 
 
-async def _scrape_batch(campaign, db, browser_session, count: int) -> int:
+async def _scrape_batch(campaign, db, browser_session, count: int, account_id: str) -> int:
     """Scrapa fino a `count` follower pending via la sessione browser gia' aperta,
-    a ritmo umano. Ritorna quante bio estratte. Difensivo: non solleva."""
+    a ritmo umano. Ritorna quante bio estratte. Difensivo: non solleva.
+
+    `account_id` serve SOLO al ramo 'blocked': se il batch gira durante la pausa
+    tra sessioni e l'account e' dietro un interstiziale IG, isola l'account cosi'
+    il ciclo successivo non lo ripesca (altrimenti continuerebbe a generare
+    traffico da dietro il blocco — mirror di scrape_bios_browser_session)."""
     from sqlalchemy import select
     from app.models.follower import Follower
 
@@ -941,6 +983,15 @@ async def _scrape_batch(campaign, db, browser_session, count: int) -> int:
 
         if outcome == "done":
             done += 1
+        elif outcome == "blocked":
+            # Come sopra: nessuna marcatura. In piu' (a differenza del vecchio
+            # solo-break): isola l'account e pausa la campagna, stesso mirror di
+            # scrape_bios_browser_session. Senza isolamento il ciclo di pausa
+            # successivo ripesca lo stesso account e continua a generare traffico
+            # da dietro l'interstiziale — esattamente il fail-mode da chiudere.
+            logger.error(f"[BioBrowser] batch fermo: interstiziale IG su @{follower.username}")
+            await _isolate_account_and_pause(campaign.id, account_id, err)
+            break
         elif outcome in ("not_found", "private", "error"):
             # Skip benigno: marca skipped cosi' non ri-seleziona lo stesso pending
             # (limit(1) senza ORDER BY ritornerebbe lo stesso -> loop).
@@ -1088,7 +1139,7 @@ async def run_pause_browser_activity(campaign_id: str, account_id: str, username
                     select(Campaign).where(Campaign.id == campaign_id)
                 )).scalar_one_or_none()
                 if campaign is not None:
-                    await _scrape_batch(campaign, db, session, n)
+                    await _scrape_batch(campaign, db, session, n, account_id)
 
         return int(time.monotonic() - start)
     except Exception as e:

@@ -1,6 +1,10 @@
 from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
-from app.models.campaign import CampaignStatus
+from app.models.campaign import CampaignStatus, ENRICHMENT_NONE, ENRICHMENT_LEVELS
+
+# Pattern derivato da ENRICHMENT_LEVELS (models/campaign.py), non riscritto qui:
+# un quarto livello aggiunto la' si riflette in automatico nella validazione.
+_ENRICHMENT_LEVEL_PATTERN = '^(' + '|'.join(ENRICHMENT_LEVELS) + ')$'
 
 
 class CampaignCreate(BaseModel):
@@ -34,6 +38,10 @@ class CampaignCreate(BaseModel):
     # Motore Fase Bio. 'api' = instagrapi (veloce, consuma cap). 'browser' = Patchright
     # (prudente, no cap API). Vedi migration 022.
     bio_engine: str = Field(default='api', pattern='^(api|browser)$')
+    # Livello di arricchimento: 'none' non apre i profili (solo Fase Lista + harvest
+    # passivo durante il DM), 'bio' li apre, 'contacts' aggiunge email/telefono.
+    # Ortogonale a bio_engine. Migration 029.
+    enrichment_level: str = Field(default=ENRICHMENT_NONE, pattern=_ENRICHMENT_LEVEL_PATTERN)
     # Session break config
     scrape_session_size: int = Field(default=250, ge=10, le=5000)
     scrape_break_minutes_min: int = Field(default=30, ge=5, le=240)
@@ -73,6 +81,7 @@ class CampaignUpdate(BaseModel):
     scrape_mode: str | None = Field(default=None, pattern='^(followers|following|dm_threads)$')
     inbox_engine: str | None = Field(default=None, pattern='^(browser|api)$')
     bio_engine: str | None = Field(default=None, pattern='^(api|browser)$')
+    enrichment_level: str | None = Field(default=None, pattern=_ENRICHMENT_LEVEL_PATTERN)
     # Session break config
     scrape_session_size: int | None = Field(default=None, ge=10, le=5000)
     scrape_break_minutes_min: int | None = Field(default=None, ge=5, le=240)
@@ -111,6 +120,7 @@ class CampaignResponse(BaseModel):
     scrape_mode: str
     inbox_engine: str = 'api'
     bio_engine: str = 'api'
+    enrichment_level: str = ENRICHMENT_NONE
     scrape_completed_at: datetime | None
     started_at: datetime | None
     completed_at: datetime | None

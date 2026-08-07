@@ -52,6 +52,7 @@ from app.services.browser_bio import (
     _scraping_accounts_of_campaign,
     _soft_block_incr,
     _soft_block_reset,
+    contatti_richiesti,
     human_profile_pause,
     maybe_micro_scroll,
     web_user_to_shim,
@@ -86,6 +87,7 @@ async def resolve_and_store_bio_browser(row, campaign, db, browser_session) -> t
       'soft_block' -> 429/401/403 (web_profile_info o /info/): row NON marcata (il chiamante
                       rilascia il claim -> torna 'pending' per il retry)
       'network'    -> pagina/rete giu': row NON marcata (il chiamante rilascia il claim)
+      'blocked'    -> row NON marcata (il chiamante isola l'account e mette in pausa la campagna)
     """
     username = row.username
     try:
@@ -108,6 +110,11 @@ async def resolve_and_store_bio_browser(row, campaign, db, browser_session) -> t
         await db.commit()
         return "not_found", None
 
+    if isinstance(user, dict) and user.get("__blocked"):
+        # Nessuna marcatura: il profilo non ha colpe, e' l'account a essere bloccato.
+        # Resta 'resolving' e il recupero degli stale lo rimettera' in coda.
+        return "blocked", Exception(f"interstiziale IG: {user['__blocked']}")
+
     if isinstance(user, dict) and user.get("__status"):
         st = user["__status"]
         if st in (429, 401, 403):
@@ -128,7 +135,7 @@ async def resolve_and_store_bio_browser(row, campaign, db, browser_session) -> t
 
     # Arricchimento contatti business via /info/ in-page (identico a fetch_and_store_bio_browser):
     # web_profile_info torna business_email=null, i contatti veri stanno su /api/v1/users/{pk}/info/.
-    if settings.bio_browser_contact_info_enabled:
+    if contatti_richiesti(campaign):
         info = await _fetch_public_contact_inpage(raw_page, shim.pk)
         if isinstance(info, dict) and info.get("__rate_limited"):
             return "soft_block", Exception(f"/info/ HTTP {info['__rate_limited']}")
@@ -458,6 +465,13 @@ async def resolve_imports_browser_session(campaign_id: str, account_id: str) -> 
                     if done_count == 1:
                         await _soft_block_reset(campaign_id, account_id)
                     emit_event(campaign_id, "scrape_batch", f"Risolto @{uname} via browser")
+                elif outcome == "blocked":
+                    # NON marcare la riga: resta 'resolving', il recupero degli stale
+                    # la rimettera' in coda. Isola l'account e ferma tutto (mirror del
+                    # path Fase Bio browser).
+                    logger.error(f"[ImportBrowser] interstiziale IG su @{uname} — isolo l'account")
+                    await _isolate_account_and_pause(campaign_id, account_id, err)
+                    return None
                 elif outcome in ("not_found", "error"):
                     emit_event(campaign_id, "scrape_progress", f"@{uname}: {outcome}", level="warn")
                 elif outcome == "soft_block":

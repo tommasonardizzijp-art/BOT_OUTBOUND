@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, ENRICHMENT_BIO
 from app.services import scrape_bios as sb
 
 
@@ -12,7 +12,8 @@ from app.services import scrape_bios as sb
 async def test_browser_engine_calls_enqueue_and_skips_api(monkeypatch):
     async with AsyncSessionLocal() as db:
         camp = Campaign(name="t", status=CampaignStatus.scraping,
-                        source_type="scrape", bio_engine="browser")
+                        source_type="scrape", bio_engine="browser",
+                        enrichment_level=ENRICHMENT_BIO)
         db.add(camp); await db.commit()
         cid = camp.id
 
@@ -40,7 +41,8 @@ async def test_browser_engine_calls_enqueue_and_skips_api(monkeypatch):
 async def test_browser_engine_no_account_sets_error(monkeypatch):
     async with AsyncSessionLocal() as db:
         camp = Campaign(name="t", status=CampaignStatus.scraping,
-                        source_type="scrape", bio_engine="browser")
+                        source_type="scrape", bio_engine="browser",
+                        enrichment_level=ENRICHMENT_BIO)
         db.add(camp); await db.commit()
         cid = camp.id
 

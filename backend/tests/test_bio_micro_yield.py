@@ -24,7 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.database import Base
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, ENRICHMENT_BIO
 from app.models.follower import Follower, FollowerStatus
 import app.models.account  # noqa: F401
 import app.models.campaign_account  # noqa: F401
@@ -58,6 +58,7 @@ def _setup(monkeypatch, n_followers, **campaign_kwargs):
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}", connect_args={"check_same_thread": False})
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     campaign_id = str(uuid.uuid4())
+    campaign_kwargs.setdefault("enrichment_level", ENRICHMENT_BIO)
 
     async def _seed():
         async with engine.begin() as conn:
