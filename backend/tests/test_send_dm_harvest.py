@@ -100,6 +100,47 @@ def test_senza_graphql_la_cattura_e_none_e_non_esplode(monkeypatch):
     assert page.last_profile_capture is None
 
 
+def test_harvest_che_esplode_non_ferma_il_dm(monkeypatch):
+    """Se il parsing del payload GraphQL solleva, la cattura resta None ma il
+    DM non deve fallire PER COLPA dell'harvest: e' il meccanismo che garantisce
+    'se l'harvest fallisce il DM parte lo stesso' — deve essere testato, non
+    solo garantito a lettura di codice."""
+    async def _noop(*a, **k):
+        return None
+    monkeypatch.setattr(asyncio, "sleep", _noop)
+
+    class _BoomResponse:
+        def __init__(self, url):
+            self.url = url
+            self.status = 200
+
+        async def json(self):
+            raise ValueError("payload non parsabile — forma cambiata")
+
+    page = InstagramPage(None)
+    fake = _FakePage()
+
+    async def _goto_boom(url, **kwargs):
+        for h in fake._handlers:
+            await h(_BoomResponse("https://www.instagram.com/api/graphql"))
+    fake.goto = _goto_boom
+
+    async def _get_page():
+        return fake
+    page._get_page = _get_page
+    page._account_id = "acc-1"
+
+    try:
+        asyncio.run(page.send_dm(username="mario_rossi", message="ciao"))
+    except Exception as e:
+        # send_dm fallisce comunque sulla pagina finta (nessun bottone
+        # Messaggio): l'eccezione simulata dell'harvest (ValueError) non deve
+        # essere quella che risale fino a qui.
+        assert not isinstance(e, ValueError)
+
+    assert page.last_profile_capture is None
+
+
 def test_la_cattura_e_del_profilo_giusto(monkeypatch):
     """Un payload di un altro utente non deve essere attribuito a questo follower."""
     async def _noop(*a, **k):

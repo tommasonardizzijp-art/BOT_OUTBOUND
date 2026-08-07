@@ -25,6 +25,9 @@ from app.utils.ig_block_detect import detect_block_interstitial
 
 class InstagramPage:
     BASE_URL = "https://www.instagram.com"
+    # Path della query GraphQL che IG spara da se' durante il caricamento del
+    # profilo — vedi harvest passivo in send_dm.
+    _GRAPHQL_PATH = "/api/graphql"
 
     def __init__(self, context, timing_multiplier: float = 1.0, extended_browse: bool = False):
         self._context = context
@@ -376,7 +379,7 @@ class InstagramPage:
 
         async def _on_response(resp):
             try:
-                if "/api/graphql" not in resp.url or resp.status != 200:
+                if self._GRAPHQL_PATH not in resp.url or resp.status != 200:
                     return
                 if self.last_profile_capture is not None:
                     return
@@ -388,7 +391,10 @@ class InstagramPage:
                         and str(u["username"]).lower() == username.lower()):
                     self.last_profile_capture = u
             except Exception as e:
-                logger.debug(f"@{username}: harvest passivo fallito ({e}) — DM prosegue")
+                # warning e non debug: un payload che non parsa piu' cosi' puo'
+                # voler dire che IG ha cambiato forma e la cattura e' morta in
+                # silenzio — deve restare visibile, non sparire nei log debug.
+                logger.warning(f"@{username}: harvest passivo fallito ({e}) — DM prosegue")
 
         page.on("response", _on_response)
         try:
