@@ -65,6 +65,14 @@ from app.utils.timing import (
 # Production max_delay = 480s (8 min) → 20 min gives plenty of buffer.
 LOCK_TIMEOUT_MINUTES = 20
 
+# Account lease contention (another job holds it, e.g. a parked session-break
+# resume) is transient — it clears itself once that lease's TTL expires. Retry
+# instead of exiting for good: an exit here used to be a dead end (no code path
+# re-enqueues this job), so the campaign sat at status=running with zero workers
+# and zero scheduled jobs until an operator noticed. run_campaign_task has
+# max_tries=10000, so retrying here is safe and matches the _defer_next_batch pattern.
+LEASE_CONTENTION_RETRY_SECONDS = 120
+
 
 def _gen_backoff_seconds(attempt: int, base: int, cap: int) -> int:
     """Backoff esponenziale per i fallimenti transient di generazione AI.
@@ -323,9 +331,16 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
             if not lease_acquired:
                 lease_acquired = await account_lease.acquire(account_id, lease_owner, db)
                 if not lease_acquired:
-                    logger.info(f"[Worker] Account {account_id[:8]} already leased by another job, exiting")
-                    emit_event(campaign_id, "worker_stopped", "Account gia' in uso da un altro worker", level="warn")
-                    return
+                    logger.info(
+                        f"[Worker] Account {account_id[:8]} already leased by another job, "
+                        f"retry in {LEASE_CONTENTION_RETRY_SECONDS}s"
+                    )
+                    emit_event(
+                        campaign_id, "worker_deferred",
+                        f"Account gia' in uso da un altro worker, ritento tra {LEASE_CONTENTION_RETRY_SECONDS}s",
+                        level="warn",
+                    )
+                    raise Retry(defer=LEASE_CONTENTION_RETRY_SECONDS)
 
             if not session_mgr.is_active_hour():
                 await _close_browser()
@@ -338,9 +353,16 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 # frattempo, esci → un solo worker per account procede.
                 lease_acquired = await account_lease.acquire(account_id, lease_owner, db)
                 if not lease_acquired:
-                    logger.info(f"[Worker] Account {account_id[:8]} preso da altro job dopo attesa orario, esco")
-                    emit_event(campaign_id, "worker_stopped", "Account preso da altro worker durante attesa", level="warn")
-                    return
+                    logger.info(
+                        f"[Worker] Account {account_id[:8]} preso da altro job dopo attesa orario, "
+                        f"retry in {LEASE_CONTENTION_RETRY_SECONDS}s"
+                    )
+                    emit_event(
+                        campaign_id, "worker_deferred",
+                        f"Account preso da altro worker durante attesa, ritento tra {LEASE_CONTENTION_RETRY_SECONDS}s",
+                        level="warn",
+                    )
+                    raise Retry(defer=LEASE_CONTENTION_RETRY_SECONDS)
             if session_mgr.should_break_session():
                 await _defer_next_batch("Fine sessione")
                 return
