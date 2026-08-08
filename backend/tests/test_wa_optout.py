@@ -192,6 +192,52 @@ async def test_circuit_breaker_non_riallerta_se_gia_fermo(db_session):
 
 
 @pytest.mark.asyncio
+async def test_circuit_breaker_scrive_lo_stop_a_DB_non_solo_in_sessione(db_session):
+    """Il breaker deve PERSISTERE lo stop, non lasciarlo pendente.
+
+    Gli altri test del breaker interrogano `is_wa_halted` sulla STESSA
+    sessione con cui il breaker ha scritto: l'autoflush di SQLAlchemy mostra
+    la modifica pendente come se fosse gia' a DB, quindi restano verdi anche
+    se il commit non avviene mai. In produzione a leggere e' un'altra
+    sessione -- il worker ne apre una nuova a ogni messaggio
+    (`wa_worker.py`, `async with AsyncSessionLocal()`) e chiama
+    `is_wa_halted()` senza argomenti. Se lo stop non e' committato, quella
+    lettura non lo vede e il canale continua a inviare mentre il Telegram
+    dice "FERMATO in automatico".
+
+    Qui si legge da una connessione DIVERSA: e' l'unico modo di distinguere
+    "scritto" da "scritto e salvato".
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.config import settings
+    from app.services import bot_state_service
+    from app.utils.db_dialect import to_async_database_url
+
+    campagna = await _campagna_con_conteggi(db_session, sent=20, opted_out=6)  # 30%
+    try:
+        assert await wa_optout.check_optout_circuit_breaker(db_session, campagna.id) is True
+
+        # Il worker non committa dopo il breaker: esce dal `async with` e la
+        # sessione si chiude, buttando via il pendente. Qui lo si riproduce
+        # con un rollback esplicito -- che e' anche cio' che fa il suo
+        # except quando l'invio solleva. Se il breaker ha committato, lo stop
+        # sopravvive; se ha solo sporcato la sessione, sparisce qui.
+        await db_session.rollback()
+
+        altro_engine = create_async_engine(to_async_database_url(settings.database_url))
+        try:
+            async with async_sessionmaker(altro_engine, expire_on_commit=False)() as altra_sessione:
+                assert await bot_state_service.is_wa_halted(altra_sessione) is True
+        finally:
+            await altro_engine.dispose()
+    finally:
+        # Il canale fermo e' stato COMMITTATO: senza questo ripristino resta
+        # fermo per tutti i test che girano dopo, in qualunque file.
+        await bot_state_service.resume_wa(by="test-cleanup")
+
+
+@pytest.mark.asyncio
 async def test_circuit_breaker_su_campaign_id_none_non_solleva(db_session):
     assert await wa_optout.check_optout_circuit_breaker(db_session, None) is False
 

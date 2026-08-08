@@ -30,6 +30,21 @@ sys.path.insert(0, os.path.abspath("."))
 OK, KO, WARN = "  OK  ", " MANCA", " ATTEN"
 
 
+def revision_attesa() -> str:
+    """La head di Alembic, letta dalle migrazioni sul disco.
+
+    Prima era la stringa "028" scritta a mano, e la 029 (`9be195d`) l'ha resa
+    falsa senza che nulla lo segnalasse: il pre-volo bocciava un database
+    corretto, uscendo con codice 1 proprio al go-live. Una costante a mano
+    qui e' garantita diventare sbagliata alla prossima migrazione — l'unica
+    versione che non va in deriva e' quella che va a leggere.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+
+
 def riga(esito: str, titolo: str, dettaglio: str = "") -> None:
     print(f"[{esito}] {titolo}" + (f" — {dettaglio}" if dettaglio else ""))
 
@@ -67,10 +82,11 @@ async def main() -> int:
             print("PRE-VOLO NON SUPERATO: database non raggiungibile o non migrato.")
             print("=" * 72)
             return 1
-        if rev == "028":
+        attesa = revision_attesa()
+        if rev == attesa:
             riga(OK, "migrazione", f"revision {rev}")
         else:
-            riga(KO, "migrazione", f"revision {rev}, attesa 028")
+            riga(KO, "migrazione", f"revision {rev}, attesa {attesa}")
             problemi += 1
 
         colonna = (await db.execute(text(
@@ -192,4 +208,7 @@ async def main() -> int:
     return 1 if problemi else 0
 
 
-sys.exit(asyncio.run(main()))
+if __name__ == "__main__":
+    # La riga era nuda: importare il modulo lo ESEGUIVA e lo faceva uscire dal
+    # processo. Senza questa guardia nessun test puo' nemmeno importarlo.
+    sys.exit(asyncio.run(main()))

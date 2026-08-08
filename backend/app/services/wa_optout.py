@@ -174,6 +174,21 @@ async def check_optout_circuit_breaker(db, campaign_id: str | None) -> bool:
               f"{tasso:.1f}% ({campagna.opted_out}/{inviati} invii), soglia "
               f"{settings.wa_optout_breaker_pct}%")
     await bot_state_service.halt_wa(reason=motivo, by="circuit_breaker", db=db)
+    # Il commit e' QUI e non e' un dettaglio. halt_wa committa solo se ha
+    # aperto lui la sessione (pattern own_session): con una sessione altrui
+    # lascia la riga sporca e il commit tocca al chiamante. I due chiamanti
+    # in wa_sender fanno `return` subito dopo, e sopra di loro il worker
+    # tiene una sessione per messaggio dentro un `async with`: uscire dal
+    # blocco CHIUDE la sessione, non la committa. Senza questa riga lo stop
+    # non arrivava mai a DB -- partiva il Telegram "FERMATO in automatico" e
+    # il canale continuava a inviare, perche' il worker rilegge
+    # `is_wa_halted()` su una sessione nuova.
+    #
+    # Committare qui e' sicuro: a questo punto persist_wa_optout e
+    # _incrementa_contatore_campagna hanno gia' committato per conto loro,
+    # quindi non c'e' lavoro altrui in sospeso che questo commit anticipi.
+    # E viene PRIMA dell'alert: mai annunciare uno stop che non e' salvato.
+    await db.commit()
     try:
         await notifier.send_telegram(
             f"WhatsApp FERMATO in automatico -- {motivo}. Verifica prima di "
