@@ -125,7 +125,8 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
 
     # 1. Quarantena post-riconnessione (contratto sez. 3.4.2). Costo zero, e
     #    copre la finestra in cui QUALUNQUE lettura sarebbe inaffidabile.
-    #    ATTENZIONE: 15 minuti e' un valore STIMATO, non misurato -- si
+    #    ATTENZIONE: il default (config.wa_resync_quarantine_min, 2 min
+    #    dall'08/08 -- prima 15) e' un valore STIMATO, non misurato -- si
     #    rimisura quando il selettore SYNC_INDICATOR verra' catturato.
     quarantena_s = float(settings.wa_resync_quarantine_min) * 60
     if browser_avviato_da_s < quarantena_s:

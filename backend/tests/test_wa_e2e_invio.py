@@ -101,8 +101,9 @@ async def test_e2e_dall_avvio_al_messaggio_inviato(db_session, monkeypatch):
     from sqlalchemy import select
 
     # --- configurazione VERA: nessun ritocco ai parametri del canale --------
-    assert settings.wa_resync_quarantine_min == 15
-    assert settings.wa_send_delay_median_s == 90
+    # Valori abbassati con Tommaso l'08/08 (prima 15 min / 90s mediana).
+    assert settings.wa_resync_quarantine_min == 2
+    assert settings.wa_send_delay_median_s == 15
     monkeypatch.setattr(settings, "wa_send_enabled", True)   # e' il Cancello 0
 
     orologio = orologio_virtuale(wa_worker, monkeypatch)

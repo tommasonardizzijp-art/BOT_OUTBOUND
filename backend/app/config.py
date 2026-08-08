@@ -360,7 +360,15 @@ class Settings(BaseSettings):
     # lungo. Il nome del campo dice "steps" apposta: era l'ambiguita' del nome
     # precedente ("per_day") ad aver prodotto l'errore.
     wa_warmup_advance_steps_per_day: int = 1
-    wa_send_delay_median_s: int = 90            # SDD 10.3
+    # Deciso con Tommaso 08/08 pomeriggio, sostituisce la proposta iniziale
+    # (mediana 90s, SDD 10.3 -- "proposta, da tarare sulla rampa M5"): a
+    # sigma invariata, mediana 15s tiene il tipico dentro 5-30s (coda
+    # lognormale, non un range uniforme -- vedi wa_timing.wa_send_delay_seconds,
+    # ogni tanto un delay piu' lungo di 30s o piu' corto di 5s e' voluto,
+    # e' la stessa firma non-piatta di prima con un centro piu' basso).
+    # SDD-whatsapp-channel.md §10.3 va allineato quando l'altra sessione in
+    # corso sugli stessi file la lascia libera (non toccato qui apposta).
+    wa_send_delay_median_s: int = 15
     wa_send_delay_sigma: float = 0.7            # SDD 10.3
     wa_session_min_msg: int = 8                 # SDD 10.3
     wa_session_max_msg: int = 15                # SDD 10.3
@@ -372,8 +380,12 @@ class Settings(BaseSettings):
     wa_active_hours: str = "09:00-20:00"
     # STIMATO, non misurato: finestra in cui la sincronizzazione post
     # riconnessione rende cieca la guardia (A9/FM16). Da rimisurare quando
-    # SYNC_INDICATOR sara' catalogato.
-    wa_resync_quarantine_min: int = 15
+    # SYNC_INDICATOR sara' catalogato. Abbassato da 15 a 2 (decisione
+    # Tommaso 08/08, dopo aver visto 15 min morti a ogni riavvio del
+    # browser nel collaudo dal vivo): resta una stima, non una misura --
+    # se la guardia mostra falsi "vuoto" dopo la riconnessione, il primo
+    # sospettato e' questo valore troppo basso, non un bug altrove.
+    wa_resync_quarantine_min: int = 2
     wa_guard_tail_n: int = 40                   # default del POM
     wa_guard_history_min: int = 80              # default del POM
     # Stesso valore di campaign_orchestrator.LOCK_TIMEOUT_MINUTES.

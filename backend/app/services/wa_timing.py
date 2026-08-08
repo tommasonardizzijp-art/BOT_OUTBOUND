@@ -13,9 +13,10 @@ from app.config import settings
 
 def wa_send_delay_seconds() -> float:
     """Delay tra due invii consecutivi dello stesso numero. Lognormale
-    centrata su WA_SEND_DELAY_MEDIAN_S (default 90s, SDD 10.3), sigma
-    WA_SEND_DELAY_SIGMA (default 0.7, stesso principio anti-firma-piatta
-    di utils.timing.random_delay_seconds)."""
+    centrata su WA_SEND_DELAY_MEDIAN_S (default 15s, tipico 5-30s -- deciso
+    con Tommaso 08/08, sostituisce la proposta iniziale di SDD 10.3, mediana
+    90s), sigma WA_SEND_DELAY_SIGMA (default 0.7, stesso principio
+    anti-firma-piatta di utils.timing.random_delay_seconds)."""
     median = float(settings.wa_send_delay_median_s)
     sigma = float(settings.wa_send_delay_sigma)
     mu = math.log(max(1.0, median))

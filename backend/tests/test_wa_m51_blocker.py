@@ -66,12 +66,13 @@ async def scenario_pronto(db) -> dict:
 
 @pytest.mark.asyncio
 async def test_t1_quarantena_si_aspetta_non_fallisce(monkeypatch):
-    """Con la config VERA (15 min), la mini-sessione aspetta la quarantena
-    prima del primo claim invece di bruciare tre contatti e armare FM2."""
+    """Con la config VERA (2 min dall'08/08, prima 15), la mini-sessione
+    aspetta la quarantena prima del primo claim invece di bruciare tre
+    contatti e armare FM2."""
     from app.config import settings
     from app.workers import wa_worker
 
-    assert settings.wa_resync_quarantine_min == 15, (
+    assert settings.wa_resync_quarantine_min == 2, (
         "questo test vale contro la config vera: se il default cambia, "
         "aggiornare l'atteso, non azzerare la config")
 
