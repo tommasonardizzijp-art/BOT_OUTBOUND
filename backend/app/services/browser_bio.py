@@ -552,6 +552,149 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     return "done", None
 
 
+# ── Costanti condivise dei ritardi hardcoded (Fase Bio via browser) ──
+# Usate SIA dal codice che dorme davvero (human_profile_pause, maybe_micro_scroll)
+# SIA dal budget CALCOLATO qui sotto (expected_delay_budget_s, worst_case_delay_budget_s):
+# un'unica fonte, cosi' chi taglia una pausa per "recuperare i secondi liberati
+# dall'inversione A.1" la taglia anche nella guardia, invece di lasciarla verde
+# per una costante duplicata e dimenticata in due punti del file.
+HUMAN_PAUSE_MIN_S = 5.0
+HUMAN_PAUSE_MAX_S = 10.0
+PUBLIC_SCROLL_MIN_S = 6.0   # ramo pubblico di maybe_micro_scroll -- non e' un settings
+PUBLIC_SCROLL_MAX_S = 10.0
+OPEN_POST_MIN_S = 3.0       # apertura di un post pubblico dentro maybe_micro_scroll
+OPEN_POST_MAX_S = 9.0
+
+# Baseline dello spec (Passo 4, S4.6): tempo TOTALE per profilo misurato PRIMA
+# dell'inversione sorgenti (A.1). Dentro quel numero c'era anche l'attesa della
+# sorgente dati: prima dell'inversione web_profile_info non arrivava MAI in
+# modo passivo (0/65 misurato), quindi si consumava sempre l'intero tetto
+# bio_browser_source_wait_s (~8s); il comportamento (pause/scroll/reel) valeva
+# il resto, ~7.5s. 8 + 7.5 = 15.5.
+BIO_PROFILE_TOTAL_BASELINE_S = 15.5
+# Dopo l'inversione A.1 la sorgente giusta (GraphQL passivo) arriva quasi
+# subito: mediana di attesa residua ~4s (misurata). Il totale per profilo non
+# deve calare -- e' il vincolo dello spec -- quindi il comportamento deve
+# SALIRE per compensare i secondi liberati dall'attesa: 15.5 - 4.0 = 11.5.
+# Confrontare un budget di solo comportamento contro il baseline TOTALE (15.5)
+# sarebbe scorretto: chiederebbe al comportamento di crescere di 8s invece dei
+# ~4s che l'inversione ha davvero liberato.
+BIO_SOURCE_WAIT_AFTER_INVERSION_S = 4.0
+BIO_BEHAVIOUR_FLOOR_S = BIO_PROFILE_TOTAL_BASELINE_S - BIO_SOURCE_WAIT_AFTER_INVERSION_S  # 11.5
+
+
+def expected_delay_budget_s(cfg=None) -> float:
+    """Valore atteso del ritardo comportamentale per profilo nella Fase Bio
+    via browser, sommando i contributi configurati in app.config.Settings.
+    Pura: nessun I/O, nessun sleep, nessun random -- serve a verificare CHE il
+    budget di ritardo configurato non scenda sotto BIO_BEHAVIOUR_FLOOR_S,
+    non a misurare un tempo reale di sessione (per quello serve un log su prod).
+
+    ATTENZIONE alla struttura reale del ciclo (righe ~1020-1048): la pausa reel
+    e human_profile_pause() sono in un if/else, cioe' ALTERNATIVE, non additive
+    -- sul profilo in cui scatta la pausa reel, la pausa umana NON viene
+    eseguita. Il micro-scroll invece e' FUORI dall'if/else e si somma sempre.
+    Stesso identico blocco if/else in browser_import.py (righe ~502-515): questa
+    funzione legge solo i settings condivisi, quindi la stima vale per entrambi
+    i motori anche se qui e' usata solo per la Fase Bio.
+
+    NON include bio_browser_source_wait_s: quello e' un TETTO (si esce appena
+    arriva la sorgente GraphQL passiva, mediana ~4s dopo l'inversione A.1), non
+    un'attesa garantita -- contarlo gonfierebbe il budget con tempo che nella
+    pratica non viene speso.
+
+    QUESTA E' UNA SOGLIA DI GUARDIA, NON UNA STIMA DI CAPACITY PLANNING: il
+    tempo reale e' SISTEMATICAMENTE MAGGIORE di quello modellato qui, mai
+    minore. Il ramo reel in particolare sottostima apposta (sottostima =
+    conservativo per una guardia-minimo): questa funzione conta solo
+    avg_n_reels * avg_dwell_s, ma InstagramPage.browse_reels() reale spende
+    anche ~1.5-3.0s (click sul link nav) o ~1.8-3.2s (goto diretto) di
+    navigazione verso /reels/ UNA VOLTA per pausa (instagram_page.py:1302 e
+    :1308), piu' ~0.2-0.6s di assestamento scroll per OGNI reel guardato
+    (instagram_page.py:1345). Chi riusa questo numero per stimare quanto dura
+    una sessione (non per la guardia sul budget minimo) deve sommarci questi
+    contributi a parte, o sottostimera' la durata reale.
+
+    cfg: oggetto settings da usare al posto del default globale (per iniettare
+    valori finti nei test). Deve esporre gli stessi attributi di app.config
+    usati qui sotto.
+    """
+    s = cfg if cfg is not None else settings
+
+    def _mid(lo: float, hi: float) -> float:
+        return (lo + hi) / 2.0
+
+    # 1) Pausa umana tra profili quando NON scatta la pausa reel: uniform(5,10)s.
+    pause_s = _mid(HUMAN_PAUSE_MIN_S, HUMAN_PAUSE_MAX_S)
+
+    # 2) Micro-scroll, su ~scroll_ratio dei profili -- fuori dall'if/else pausa
+    #    umana/reel, quindi additivo indipendentemente da quale delle due scatta.
+    #    Il ramo privato (solo header, ~4-5s) e il ramo pubblico (griglia post,
+    #    ~6-10s) hanno durate diverse: prendiamo il ramo PIU' BASSO come
+    #    garanzia inferiore. Il budget deve essere una soglia che il
+    #    comportamento reale supera sempre, non una media pesata sul mix
+    #    privato/pubblico (che qui non e' nota a priori).
+    private_scroll_s = _mid(s.bio_browser_scroll_min_s, s.bio_browser_scroll_max_s)
+    public_scroll_s = _mid(PUBLIC_SCROLL_MIN_S, PUBLIC_SCROLL_MAX_S)
+    conservative_scroll_s = min(private_scroll_s, public_scroll_s)
+    scroll_contrib_s = s.bio_browser_scroll_ratio * conservative_scroll_s
+
+    # 3) Apertura di un post pubblico: capita solo dentro il ramo scroll pubblico,
+    #    quindi la probabilita' e' composta (scroll_ratio * open_post_ratio).
+    open_post_s = _mid(OPEN_POST_MIN_S, OPEN_POST_MAX_S)
+    open_post_contrib_s = s.bio_browser_scroll_ratio * s.bio_browser_open_post_ratio * open_post_s
+
+    # 4) Pausa reel VS pausa umana: sono ALTERNATIVE (if/else), non additive.
+    #    Il profilo su cui scatta la pausa reel non fa human_profile_pause().
+    #    P(reel) ~= 1/E[every]: piu' la cadenza e' rada, meno spesso la pausa
+    #    reel sostituisce quella umana. every_min=0 di default: la cadenza
+    #    campionata puo' uscire 0 o 1, cioe' la pausa reel puo' scattare A OGNI
+    #    profilo (worst case, non un'ipotesi remota). Con E[every] <= 1 il
+    #    complemento (E[every]-1)/E[every] diventerebbe <= 0 (o la formula
+    #    esploderebbe a every=0): trattiamo esplicitamente E[every] <= 1 come
+    #    "reel sempre" (P(reel)=1, P(pausa umana)=0) invece di nasconderlo
+    #    dietro una media. E con count_min=0/dwell_min_s=0.0 la pausa reel puo'
+    #    valere PROPRIO 0 secondi: il budget deve renderlo visibile (contributo
+    #    -> 0), non compensarlo con la pausa umana che in quel caso non scatta.
+    avg_n_reels = _mid(s.bio_browser_reels_count_min, s.bio_browser_reels_count_max)
+    avg_dwell_s = _mid(s.bio_browser_reels_dwell_min_s, s.bio_browser_reels_dwell_max_s)
+    avg_every = _mid(s.bio_browser_reels_every_min, s.bio_browser_reels_every_max)
+    if avg_every <= 1.0:
+        p_reel = 1.0
+    else:
+        p_reel = 1.0 / avg_every
+    p_human = 1.0 - p_reel
+    reel_or_pause_contrib_s = p_human * pause_s + p_reel * (avg_n_reels * avg_dwell_s)
+
+    return reel_or_pause_contrib_s + scroll_contrib_s + open_post_contrib_s
+
+
+def worst_case_delay_budget_s(cfg=None) -> float:
+    """Caso peggiore (NON un valore atteso): ogni sorteggio esce al suo
+    estremo piu' sfavorevole -- pausa umana al minimo, cadenza/conteggio/dwell
+    reel ai minimi configurati, micro-scroll che non scatta mai (possibile con
+    qualunque scroll_ratio < 1, quindi lo escludiamo a prescindere dal suo
+    valore). Non entra in nessuna asserzione di budget: serve a documentare
+    quanto puo' scendere il ritardo reale con i minimi odierni, come argomento
+    per il task B.1. Pura, stessa firma/uso di expected_delay_budget_s.
+    """
+    s = cfg if cfg is not None else settings
+
+    n_reels_min = s.bio_browser_reels_count_min
+    dwell_min_s = s.bio_browser_reels_dwell_min_s
+    every_min = s.bio_browser_reels_every_min
+    reel_block_s = n_reels_min * dwell_min_s
+
+    if every_min <= 1:
+        # Cadenza al minimo puo' essere 0 o 1: la pausa reel scatta ad OGNI
+        # profilo, la pausa umana non viene mai eseguita in questo scenario
+        # deterministico (stesso caso limite di expected_delay_budget_s).
+        return reel_block_s
+
+    pause_block_s = (every_min - 1) * HUMAN_PAUSE_MIN_S
+    return (pause_block_s + reel_block_s) / every_min
+
+
 async def human_profile_pause() -> None:
     """Pausa tra un profilo e l'altro: 5-10s. La vecchia sosta stazionaria
     occasionale (12% di probabilita', 15-45s "distrazione") e' stata rimossa:
@@ -559,7 +702,7 @@ async def human_profile_pause() -> None:
     dopo un numero random di profili (0-10), `scrape_bios_browser_session`
     intercala una pausa ATTIVA sui reel (`InstagramPage.browse_reels`) — qualcosa
     che un account vero farebbe davvero, non uno stallo."""
-    await asyncio.sleep(random.uniform(5.0, 10.0))
+    await asyncio.sleep(random.uniform(HUMAN_PAUSE_MIN_S, HUMAN_PAUSE_MAX_S))
 
 
 async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> bool:
@@ -586,7 +729,7 @@ async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> 
             return True
 
         # Pubblico: scroll piu' lungo/deciso (c'e' davvero una griglia di post).
-        dur = r.uniform(6.0, 10.0)
+        dur = r.uniform(PUBLIC_SCROLL_MIN_S, PUBLIC_SCROLL_MAX_S)
         steps = max(1, int(dur / 1.5))
         for _ in range(steps):
             await raw_page.evaluate("window.scrollBy({top: 400, behavior: 'smooth'})")
@@ -597,7 +740,7 @@ async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> 
                 post_link = raw_page.locator('article a[href*="/p/"]').first
                 if await post_link.count() > 0:
                     await post_link.click(timeout=3000)
-                    await asyncio.sleep(r.uniform(3.0, 9.0))
+                    await asyncio.sleep(r.uniform(OPEN_POST_MIN_S, OPEN_POST_MAX_S))
                     try:
                         await raw_page.go_back()
                     except Exception:
