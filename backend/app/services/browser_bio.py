@@ -6,13 +6,19 @@ web-born su device sintetico -> firma da automazione (vedi memory
 molto piu' tollerato: la richiesta ai dati profilo viaggia dentro una sessione
 Chromium legittima (cookie reali, header, TLS, referer della navigazione).
 
-Come funziona (correzione al modello "nessuna chiamata API"): Instagram web e' una
-SPA React. Navigando su /<username>/ i dati profilo arrivano comunque da una
-chiamata interna `web_profile_info` (o embedded nell'HTML) — la fa il JS di IG, non
-noi. Noi la INTERCETTIAMO passivamente (nessuna chiamata extra); solo se non la
-cogliamo entro il timeout facciamo un fetch in-page (dentro il contesto della
-pagina, con x-ig-app-id come l'app). Niente API instagrapi -> NON consuma il cap
-scrape_daily_limit.
+Come funziona: Instagram web e' una SPA React. Navigando su /<username>/ i dati
+profilo arrivano comunque da chiamate interne che fa il JS di IG, non noi, e che
+noi INTERCETTIAMO passivamente (nessuna richiesta aggiunta). Niente API instagrapi
+-> NON consuma il cap scrape_daily_limit.
+
+QUALE sorgente passiva (passo 4, misurato — la v1 aveva l'ordine sbagliato): la
+sorgente e' la query GraphQL `PolarisProfilePageContentQuery`, disponibile 65/65 e
+senza campi mancanti. `web_profile_info` NON e' mai stato colto passivamente
+(0/65): attenderlo significava consumare l'attesa intera e poi fare una fetch
+in-page, cioe' UNA RICHIESTA ATTRIBUIBILE PER PROFILO che la pagina non avrebbe
+fatto. Ora la fetch esplicita e' solo il ripiego, ed e' contata
+(`contatore_ripieghi`) perche' una regressione la rimetterebbe in mezzo in
+silenzio. Vedi lo spec dei livelli di arricchimento §3 e §4.5.
 
 Anti-divergenza: i campi del JSON web sono mappati su uno shim con gli STESSI nomi
 attributo dell'oggetto instagrapi, poi passati allo stesso `extract_contacts` e
@@ -46,12 +52,39 @@ WEB_APP_ID = "936619743392459"
 _WEB_PROFILE_PATH = "/api/v1/users/web_profile_info/"
 
 # Endpoint interno del client web IG: il browser lo chiama da solo navigando il
-# profilo (query `PolarisProfilePageContentQuery`). Lo INTERCETTIAMO passivamente
-# come fallback quando web_profile_info fallisce col bug 400 "asset ...subvertical
-# deleted". VIETATO fare fetch attivo di questo endpoint (replicherebbe fb_dtsg/
-# lsd/doc_id = pattern anomalo + fragile): solo lettura passiva. Vedi
+# profilo (query `PolarisProfilePageContentQuery`). Lo INTERCETTIAMO passivamente.
+# Dal passo 4 e' la sorgente PRIMARIA, non piu' il ripiego: misurato disponibile
+# 65/65 e senza campi mancanti, mentre web_profile_info non e' mai stato colto
+# passivamente (0/65). VIETATO fare fetch attivo di questo endpoint (replicherebbe
+# fb_dtsg/lsd/doc_id = pattern anomalo + fragile): solo lettura passiva. Vedi
 # docs/audits/GRAPHQL_FALLBACK_BIO_BROWSER.md.
 _GRAPHQL_PATH = "/api/graphql"
+
+# Quante volte in questo processo si e' dovuto CHIEDERE web_profile_info invece di
+# leggere una sorgente passiva. Dopo l'inversione deve restare a zero o quasi: se
+# cresce, una regressione ha rimesso una richiesta attribuibile per profilo. Non
+# persistito: e' un termometro di processo, non un dato di dominio.
+_ripieghi_espliciti = 0
+
+
+def contatore_ripieghi() -> int:
+    """Numero di fetch esplicite di web_profile_info fatte da questo processo."""
+    return _ripieghi_espliciti
+
+
+def reset_contatore_ripieghi() -> None:
+    """Azzera il contatore (usato dai test; in produzione non serve chiamarla)."""
+    global _ripieghi_espliciti
+    _ripieghi_espliciti = 0
+
+
+def _conta_ripiego(username: str) -> None:
+    global _ripieghi_espliciti
+    _ripieghi_espliciti += 1
+    logger.warning(
+        f"[BioBrowser] @{username}: nessuna sorgente passiva entro l'attesa -> fetch "
+        f"esplicita di web_profile_info (ripieghi in questo processo: {_ripieghi_espliciti})"
+    )
 
 # Backstop iterazioni per mini-sessione: `cap` conta solo gli outcome 'done'. Un pool
 # di pending prevalentemente private/not_found/error potrebbe non raggiungere mai
@@ -125,22 +158,31 @@ def graphql_user_to_web_shape(gql_user: dict) -> dict:
     return shaped
 
 
-async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 8.0) -> dict | None:
-    """Naviga al profilo e cattura il JSON di web_profile_info.
+async def _capture_web_profile_info(
+    raw_page, username: str, timeout_s: float | None = None
+) -> dict | None:
+    """Naviga al profilo e ottiene i dati profilo nella forma di web_profile_info.
 
-    Strategia (dalla piu' "umana" alla piu' esplicita):
-      1. Listener passivo sulle response: se il JS di IG spara web_profile_info lo
-         intercettiamo (nessuna chiamata extra). In PARALLELO ascoltiamo anche le
-         response /api/graphql (PolarisProfilePageContentQuery), che il browser
-         genera comunque, come FALLBACK.
-      2. Se non colto entro timeout, fetch IN-PAGE di web_profile_info (cookie
-         reali, x-ig-app-id web).
-      3. FALLBACK: se web_profile_info fallisce con un errore NON-rate-limit
+    ORDINE DELLE SORGENTI (passo 4 — invertito rispetto alla v1):
+      1. **Sorgenti passive**, entrambe a costo zero, ascoltate in parallelo mentre
+         la pagina carica: la GraphQL che il JS di IG spara da se' (misurata
+         disponibile 65/65) e web_profile_info (misurata 0/65: praticamente mai).
+         Si esce APPENA una delle due e' pronta — l'attesa e' guidata dall'arrivo,
+         non dal timeout. A parita', web_profile_info vince: stesso costo ma piu'
+         ricco, espone `is_professional_account` in modo affidabile mentre nel
+         GraphQL e' sempre null (serve al gate professional).
+      2. **Ripiego esplicito**: fetch IN-PAGE di web_profile_info (cookie reali,
+         x-ig-app-id web) solo se nessuna sorgente passiva e' arrivata entro
+         `timeout_s`. NON e' invisibile — dove la pagina fa una richiesta dati,
+         questa ne fa due — quindi viene CONTATA (`contatore_ripieghi`).
+      3. **Ultima spiaggia**: se la fetch fallisce con un errore NON-rate-limit
          (tipicamente il bug 400 "asset ...subvertical deleted" su certi account
-         business) oppure non da' dati, e durante la navigazione abbiamo catturato
-         passivamente una risposta GraphQL del profilo giusto, la normalizziamo
-         nella forma di web_profile_info e la usiamo. NON facciamo MAI un fetch
-         attivo di /api/graphql (solo lettura passiva).
+         business) e nel frattempo e' arrivata una GraphQL del profilo giusto, la
+         normalizziamo e la usiamo. NON facciamo MAI un fetch attivo di
+         /api/graphql (solo lettura passiva).
+
+    `timeout_s` None => `settings.bio_browser_source_wait_s`. Non abbassarlo a
+    pochi secondi: la GraphQL arriva a mediana ~4s, con 2s le catture sono zero.
 
     Ritorna il dict `data.user` (forma web_profile_info, eventualmente da GraphQL
     gia' normalizzata), oppure {"__status": st} su fail rate-limit, oppure
@@ -148,10 +190,23 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
     (scraping_warning/challenge/checkpoint/suspended), oppure None.
     Non solleva su errori di parsing.
     """
+    if timeout_s is None:
+        timeout_s = settings.bio_browser_source_wait_s
     captured: dict = {}
 
     async def _on_response(resp):
         try:
+            # Rate-limit/soft-block visto PASSIVAMENTE. Va catturato e ha priorita'
+            # sui dati: prima dell'inversione il 429 lo scoprivamo solo perche' la
+            # fetch esplicita lo riceveva in faccia, e non mascherarlo era
+            # un'invariante dichiarata. Senza piu' fetch quel segnale sparirebbe.
+            # Cosi' e' anche meglio di prima: vediamo il throttle che IG serve al
+            # SUO stesso codice, che la vecchia strada non poteva vedere.
+            if resp.status in (429, 401, 403) and (
+                _WEB_PROFILE_PATH in resp.url or _GRAPHQL_PATH in resp.url
+            ):
+                captured.setdefault("blocco_passivo", resp.status)
+                return
             if _WEB_PROFILE_PATH in resp.url and resp.status == 200:
                 body = await resp.json()
                 u = (((body or {}).get("data") or {}).get("user"))
@@ -171,11 +226,11 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
         except Exception:
             pass  # response non-JSON o gia' consumata: ignora
 
-    def _graphql_fallback():
+    def _graphql_fallback(motivo: str = "web_profile_info non utilizzabile"):
         """Ritorna il user GraphQL normalizzato se catturato, altrimenti None."""
         g = captured.get("graphql_user")
         if g:
-            logger.info(f"[BioBrowser] @{username}: uso fallback GraphQL passivo (web_profile_info non utilizzabile)")
+            logger.info(f"[BioBrowser] @{username}: uso GraphQL passivo ({motivo})")
             return graphql_user_to_web_shape(g)
         return None
 
@@ -192,16 +247,40 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
             logger.error(f"[BioBrowser] @{username}: interstiziale IG '{blocco}' ({raw_page.url})")
             return {"__blocked": blocco}
 
-        # Attendi l'intercettazione passiva (polling breve).
+        # Attesa guidata dall'ARRIVO, non dal timeout: si esce appena UNA delle due
+        # sorgenti passive e' pronta. Prima dell'inversione si attendeva solo
+        # web_profile_info, che sul campo non arriva mai (0/65): otto secondi buttati
+        # e poi una fetch esplicita per ogni profilo. Passo 0,1s (non 0,4) per non
+        # regalare fino a mezzo secondo dopo che il dato e' gia' in mano.
         waited = 0.0
-        while waited < timeout_s and "user" not in captured:
-            await asyncio.sleep(0.4)
-            waited += 0.4
+        while waited < timeout_s and not (
+            "user" in captured or "graphql_user" in captured or "blocco_passivo" in captured
+        ):
+            await asyncio.sleep(0.1)
+            waited += 0.1
 
+        # PRIORITA', decisa esplicitamente: i dati passivi, se ci sono, si usano.
+        # Sono gia' in mano e non sono costati nessuna richiesta -- rifiutarli non
+        # protegge da niente e perde il lead. Il 429 passivo serve a decidere di NON
+        # chiedere (sotto), non a buttare dati gratuiti.
         if "user" in captured:
             return captured["user"]
+        gql_passivo = _graphql_fallback("sorgente primaria, nessuna richiesta aggiunta")
+        if gql_passivo is not None:
+            return gql_passivo
 
-        # Fallback esplicito: fetch in-page di web_profile_info.
+        # Niente dati passivi. Se abbiamo visto un throttle, NON si chiede: insistere
+        # da dentro un rate-limit e' esattamente il modo di trasformarlo in blocco.
+        st_passivo = captured.get("blocco_passivo")
+        if st_passivo:
+            logger.warning(
+                f"[BioBrowser] @{username}: HTTP {st_passivo} visto passivamente e nessun "
+                f"dato -> soft-block, nessuna richiesta aggiunta"
+            )
+            return {"__status": st_passivo}
+
+        # Nessuna sorgente passiva entro l'attesa: ripiego esplicito, contato.
+        _conta_ripiego(username)
         try:
             result = await raw_page.evaluate(
                 """async (args) => {

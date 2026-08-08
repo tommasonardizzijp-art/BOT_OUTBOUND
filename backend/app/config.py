@@ -187,6 +187,11 @@ class Settings(BaseSettings):
 
     # --- Motore Fase Bio via browser (bio_engine='browser') ---
     bio_browser_headless: bool = False          # test: finestra visibile; prod: True
+    # Attesa delle sorgenti PASSIVE dei dati profilo (passo 4). Si esce appena una
+    # arriva: questo e' il tetto, non il tempo speso. Non abbassarlo a pochi secondi
+    # -- la GraphQL arriva a mediana ~4s, con 2s le catture misurate sono ZERO e si
+    # ricadrebbe sulla fetch esplicita, cioe' una richiesta attribuibile per profilo.
+    bio_browser_source_wait_s: float = 8.0
     bio_browser_scroll_ratio: float = 0.35      # frazione profili con micro-scroll
     bio_browser_scroll_min_s: float = 4.0
     bio_browser_scroll_max_s: float = 5.0
