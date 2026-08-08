@@ -65,6 +65,8 @@ M1 ha chiuso di proposito la resurrezione automatica: `_persist_status` non fa p
 2. La riattivazione richiede un **motivo scritto** (campo obbligatorio) che finisce in `wa_numbers.notes` in append, con data. Uno stato che un umano ha messo a mano si toglie a mano, lasciando traccia.
 3. Riattivare **azzera** `sent_today` e `sent_date`, e riporta `warmup_day = 1`. Un numero fermo da settimane riparte dalla rampa, non dal cap a cui era arrivato.
 
+   > **Emendamento (08/08) — `warmup_day = 1` qui non riaccende la rampa se è stata spenta a livello di prodotto.** La regola sopra resta com'è (`riattiva` scrive sempre `warmup_day = 1`, comportamento voluto e non toccato). Ma la rampa può essere disattivata GLOBALMENTE col flag `settings.wa_warmup_enabled` (default `True`, G4): a `wa_warmup_enabled = False`, `effective_wa_daily_cap()` ignora il gradino qualunque sia `warmup_day` sulla riga, quindi un `warmup_day = 1` scritto da una riattivazione resta innocuo — e `advance_wa_warmup_if_needed()` non avanza nessun numero, a prescindere dal loro `warmup_day`. Prima di questo flag, `warmup_day = 0` era l'unico modo di "spegnere" la rampa per un numero, ed era ambiguo con "rampa mai partita" — e una riattivazione lo sovrascriveva in silenzio, riaccendendola. Non più: la disattivazione vive nel flag di configurazione (`.env`/env var, non una colonna — nessuna migrazione), non nel valore di `warmup_day`. Dettaglio del meccanismo nella SDD, §11 (riga FM2 e nota su FM2-bis).
+
 **Vincolante per M3:** M3 può portare un numero **in** `suspended` (segnale di ban/limitazione, FM8) e in `cooldown`, mai **fuori** da `suspended`/`retired`.
 
 ### 2.3 Mascheramento nei log dell'ingest — è M2

@@ -339,6 +339,18 @@ class Settings(BaseSettings):
     # lista si trova un numero. Per cambiare la velocita' della rampa si
     # cambia QUESTA lista, non il passo qui sotto.
     wa_warmup_steps: str = "20,20,30,40,60,80,100"
+    # Interruttore globale della rampa (G4, 08/08): a False il gradino di
+    # warmup NON entra piu' nel min() di effective_wa_daily_cap() e
+    # advance_wa_warmup_if_needed() non avanza NESSUN numero, QUALUNQUE sia
+    # il valore di warmup_day sulla riga. Serve perche' warmup_day da solo
+    # e' ambiguo: 0 poteva voler dire "rampa mai partita" o "spenta apposta",
+    # e riattiva() (wa_numbers.py) scrive warmup_day=1 incondizionatamente
+    # ad ogni riattivazione (decisione precedente e tuttora valida: un
+    # numero sospeso non deve ripartire dal cap alto a cui era arrivato) --
+    # senza questo flag separato, riattivare un numero con la rampa spenta
+    # la riaccendeva in silenzio. Default True: chi non tocca questo flag
+    # vede lo stesso comportamento di sempre.
+    wa_warmup_enabled: bool = True
     # GRADINI DELLA LISTA QUI SOPRA AL GIORNO -- **NON** messaggi al giorno.
     # Deve restare 1: alzarlo significa SALTARE gradini, non mandare piu'
     # messaggi. Con 10 su una lista di 7 voci un numero nuovo passava da 20 a

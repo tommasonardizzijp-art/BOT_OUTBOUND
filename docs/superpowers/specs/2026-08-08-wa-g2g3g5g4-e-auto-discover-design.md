@@ -179,18 +179,23 @@ giornaliero). La rampa **non è dormiente**, avanza davvero. La disattivazione v
 comunque corretta: la query di `advance_wa_warmup_if_needed` filtra già `warmup_day > 0`,
 quindi un numero a 0 ne resta fuori.
 
-**Buco scoperto in Fase 2, decisione aperta.** `POST /wa/numbers/{id}/riattiva`
+**Buco scoperto in Fase 2, corretto nella stessa PR.** `POST /wa/numbers/{id}/riattiva`
 (`backend/app/api/wa_numbers.py:306`) rimette `warmup_day = 1`. È comportamento voluto e
 documentato (`contratto-M2-M3.md:66`: un numero fermo da settimane riparte dalla rampa, non
-dal cap a cui era arrivato) — ma **riaccende in silenzio una rampa spenta apposta**. La causa
-di fondo è che la colonna `warmup_day` porta due significati che si scrivono addosso: "a che
-gradino sono" e "la rampa è spenta". Correzione proposta, **non ancora implementata**: un
-flag di configurazione `wa_warmup_enabled` (`.env`, nessuna migrazione) che
-`effective_wa_daily_cap()` e `advance_wa_warmup_if_needed()` controllano **in AND** con
-`warmup_day`. `riattiva` continua a scrivere `warmup_day = 1` come oggi, ma con il flag a
-`false` quel valore viene ignorato. Scartata l'alternativa "far leggere a `riattiva` il valore
-0 prima di sovrascriverlo": `warmup_day == 0` è ambiguo (può voler dire "mai partita" o
-"spenta apposta"), ed è esattamente il problema che un flag separato risolve.
+dal cap a cui era arrivato) — ma **riaccendeva in silenzio una rampa spenta apposta**. La
+causa di fondo è che la colonna `warmup_day` porta due significati che si scrivono addosso: "a
+che gradino sono" e "la rampa è spenta". **Corretto** con un flag di configurazione
+`settings.wa_warmup_enabled` (default `True`, `backend/app/config.py`, nessuna migrazione) che
+`wa_number_manager.effective_wa_daily_cap()` e `advance_wa_warmup_if_needed()` controllano **in
+AND** con `warmup_day` (`backend/app/services/wa_number_manager.py`). `riattiva` continua a
+scrivere `warmup_day = 1` come prima, senza modifiche — con il flag a `false` quel valore resta
+ignorato. Scartata l'alternativa "far leggere a `riattiva` il valore 0 prima di
+sovrascriverlo": `warmup_day == 0` è ambiguo (può voler dire "mai partita" o "spenta apposta"),
+ed è esattamente il problema che un flag separato risolve. Test in
+`backend/tests/test_wa_number_manager.py` (cap ignora il gradino a flag `false`; `advance_wa_
+warmup_if_needed` non avanza nessun numero a flag `false`; flag `true` di default invariato) e
+`backend/tests/test_wa_api_numbers.py` (il caso end-to-end: rampa spenta col flag →
+`riattiva` → cap effettivo non limitato dal gradino).
 
 **Decisione futura, già presa, da non ri-discutere.** Quando la rampa verrà riaccesa,
 la politica è: **avanza solo nei giorni con almeno un invio reale, e decade di un gradino

@@ -250,7 +250,7 @@ MVP: solo vista admin → il tenant è un'etichetta di scoping dati, non un logi
 | `browser_profile` | str | path profilo Chromium persistente (convenzione `data/browser_profiles/wa_<id>`) |
 | `proxy_url` | str | proxy mobile assegnato (vincolo V9 applicato a livello applicativo: max 2 numeri per proxy, stesso tenant) |
 | `daily_cap` | int | cap messaggi/giorno per numero (default basso, modificabile a mano) |
-| `warmup_day` | int | riuso semantica IG: rampa graduale del cap |
+| `warmup_day` | int | riuso semantica IG: rampa graduale del cap. **Nota (08/08, G4)**: il gradino corrispondente conta nel cap effettivo solo se `settings.wa_warmup_enabled` (flag di configurazione, default `True`) è vero — `warmup_day` da solo non basta più a dire "rampa spenta", perché `riattiva()` lo riporta sempre a `1` a ogni riattivazione. Vedi §10.3. |
 | `sent_today` / `sent_date` | int / str | contatore date-aware (stesso pattern lazy-reset di `scrape_lookups_date`, migrazione 018) |
 | `session_checked_at` | ts | ultimo health-check sessione |
 | `notes` | text | |
@@ -770,6 +770,12 @@ I contatti sono caldi: chat esistenti, relazione reale col business. I vettori d
 | Finestra oraria | 9:30-19:30 (per tenant) | orario da business, non da bot |
 | Frequency cap contatto | ≥ 14 giorni tra due campagne marketing | cross-campagna, per tenant |
 | Soglia allarme opt-out | > 5% opt-out su una campagna → pausa + review | KPI §15 |
+
+**Interruttore globale della rampa (08/08, decisione di prodotto G4).** `settings.wa_warmup_enabled` (default `True`, flag di configurazione — `.env`/env var, nessuna colonna a DB) decide se il gradino di warmup entra nel calcolo del cap effettivo. A `False`: `wa_number_manager.effective_wa_daily_cap()` ignora il gradino qualunque sia `warmup_day` sulla riga (il tetto resta il solo `daily_cap` del numero), e `advance_wa_warmup_if_needed()` non avanza nessun numero, qualunque sia il loro `warmup_day`.
+
+Perché non basta `warmup_day = 0`: `POST /wa/numbers/{id}/riattiva` (contratto §2.2) scrive `warmup_day = 1` **incondizionatamente** ad ogni riattivazione — comportamento voluto (un numero sospeso non deve ripartire dal cap alto a cui era arrivato) e non toccato da questa decisione. Prima del flag, un numero con `warmup_day = 0` (rampa "spenta" a mano) che passava per sospensione e riattivazione la riaccendeva in silenzio, perché la colonna non distingueva "rampa mai partita" da "rampa spenta apposta". Il flag risolve l'ambiguità spostando la decisione fuori dalla colonna: `riattiva` continua a scrivere `warmup_day = 1` esattamente come prima, ma quel valore resta innocuo finché `wa_warmup_enabled` è `False`.
+
+Script di supporto: `backend/scripts/wa_disable_warmup.py` (dry-run di default) azzera `warmup_day` sui numeri a scopo di igiene dei dati, ma stampa sempre un promemoria che la disattivazione robusta richiede ANCHE il flag — quella parte è configurazione di processo, fuori dalla portata di uno script sul DB.
 
 ---
 
