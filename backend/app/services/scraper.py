@@ -770,6 +770,8 @@ async def _store_followers_batch(
                 consecutive_soft_blocks = 0
                 break
             except Exception as e:
+                if isinstance(e, TypeError):
+                    raise  # bug di programmazione (es. firma sbagliata), non un fallimento IG: non va scambiato per "bio non recuperabile"
                 error_str = str(e).lower()
                 is_rate_limit = "429" in error_str or "too many" in error_str or "rate" in error_str
                 is_soft_block = "protect" in error_str or "restrict" in error_str or "community" in error_str
