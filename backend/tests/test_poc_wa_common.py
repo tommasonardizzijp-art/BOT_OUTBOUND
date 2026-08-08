@@ -21,11 +21,26 @@ import _common  # noqa: E402
 PROFILE = pathlib.PureWindowsPath(r"D:\wa-poc\profile")
 
 
+# Le ultime due varianti valgono SOLO su Windows: cmdline_matches_profile
+# normalizza con os.path.normcase/normpath, che sono deliberatamente
+# dipendenti dalla piattaforma — su Linux non abbassano il case e non
+# convertono '/' in '\'. Il PoC gira solo su Windows (Chromium su profilo
+# persistente, cmdline con lettera di unita'), quindi la funzione e' corretta
+# cosi': e' il runner CI a essere l'ambiente sbagliato per quelle due, non il
+# codice a essere rotto. Saltarle li' e' scoping, non nascondere un rosso.
+_SOLO_WINDOWS = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="normcase/normpath sono platform-dependent: equivalenza di case e "
+           "di separatore vale solo su Windows, dove il PoC gira")
+
+
 @pytest.mark.parametrize("cmdline", [
     ["chrome.exe", "--user-data-dir=D:\\wa-poc\\profile"],
     ["chrome.exe", '--user-data-dir="D:\\wa-poc\\profile"'],   # valore tra virgolette
-    ["chrome.exe", "--user-data-dir=D:/wa-poc/profile"],       # slash diversi
-    ["chrome.exe", "--user-data-dir=d:\\WA-POC\\PROFILE"],     # case diverso (Windows case-insensitive)
+    pytest.param(["chrome.exe", "--user-data-dir=D:/wa-poc/profile"],
+                 marks=_SOLO_WINDOWS),                          # slash diversi
+    pytest.param(["chrome.exe", "--user-data-dir=d:\\WA-POC\\PROFILE"],
+                 marks=_SOLO_WINDOWS),                          # case diverso
 ])
 def test_matches_stesso_profilo(cmdline):
     assert _common.cmdline_matches_profile(cmdline, PROFILE) is True
