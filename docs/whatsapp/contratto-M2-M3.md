@@ -150,6 +150,19 @@ La distinzione che conta: **colpa del contatto** (→ terminale, il contatto esc
 
 Il contatore FM2 è per-numero e per-sessione: **3 fallimenti consecutivi "nostri" su chat diverse** ⇒ stop invii del numero, campagna → `error`, screenshot diagnostico, alert Telegram. Nessun contatto marcato `failed` in quel giro.
 
+> **Emendamento (08/08) — drift codice vs contratto su `nessun-messaggio-nel-pannello`, e il contatore gemello che lo copre.**
+>
+> Questa tabella ha sempre detto che `nessun-messaggio-nel-pannello` è guardia V2 (riga 143, sopra). Il **codice** (`wa_sender._SEGNALI_COLPA_NOSTRA`) diceva l'opposto da un round di lavoro precedente: lo trattava come guasto nostro e lo faceva armare FM2 come le tre righe "nostra" qui sopra. Verificato e corretto (decisione di Tommaso): vince il contratto, il codice è stato allineato.
+>
+> Da solo, questo allineamento toglierebbe un campanello d'allarme reale: se il DOM si rompe **proprio** su questo selettore, un ramo `skipped` silenzioso brucerebbe un'intera lista segnando tutti come "chat inesistente" senza che nessuno se ne accorga. Per questo esiste un **secondo contatore, gemello di FM2 ma separato**: `wa_worker.MAX_NO_EXISTING_CHAT_CONSECUTIVI` (valore **5**, più alto dei 3 di FM2 perché qui il segnale singolo è ambiguo per costruzione — un pannello lento su una cronologia vecchia è un evento reale, solo una sequenza lunga tradisce un DOM cambiato).
+>
+> Regole del contatore (in `wa_worker.esegui_mini_sessione`, stesso punto del loop di FM2):
+> - conta solo i contatti che escono `skipped` con motivo `no_existing_chat` **generato da `nessun-messaggio-nel-pannello`** (le altre due righe "V2" della tabella sopra sono chat davvero inesistenti, non un sintomo di DOM rotto, ma producono lo stesso `esito.motivo`, quindi il contatore le conta tutte insieme — è una scelta conservativa: costa qualche falso positivo raro, mai un falso negativo);
+> - **è consecutivo**: un **invio riuscito** (`sent`) lo azzera; gli altri esiti che nel frattempo capitano (`failed`, altri `skipped`, `opted_out`, `replied`, `queued` non-FM2) **non lo toccano** — non è un secondo `guasti_consecutivi` generico, è dedicato a questa sequenza;
+> - a **5 di fila**: stesso trattamento di FM2 (`_ferma_numero_per_guasto`) — numero in `cooldown` 4h, campagna in `error`, alert Telegram con causa dedicata (non il generico "probabile DOM cambiato" di FM2 classico), contatti **non** ritoccati (restano `skipped`/`no_existing_chat`, non tornano `queued`: la guardia V2 sul singolo contatto resta valida anche quando la sequenza arma l'escalation).
+>
+> Nessuna migrazione: il contatore è una variabile locale del loop della mini-sessione (`esegui_mini_sessione`), esattamente come `guasti_consecutivi` — non persiste a DB, riparte da zero a ogni mini-sessione nuova.
+
 > **Emendamento M5.1 (07/08) — "nostri" è una proprietà dell'esito, non del motivo.**
 >
 > `EsitoApertura` porta già il campo `colpa_nostra`, documentato *"True → conta verso l'escalation FM2 del numero"*, ma quel giudizio si perdeva nella traduzione a `EsitoInvio` e il worker lo ricostruiva confrontando il motivo con una lista. Conseguenza: `ricerca_senza_risultati` — che è `colpa_nostra=False`, cioè *"questo numero probabilmente non è su WhatsApp"* — contava verso FM2. Tre contatti non raggiungibili di fila in una lista fermavano il numero per quattro ore con un alert che diceva "probabile DOM cambiato", mentre il contatto era già gestito correttamente da `_incrementa_fallimento` (rinvio a 6h, DNC a soglia): veniva contato due volte, e la seconda con la causa sbagliata.

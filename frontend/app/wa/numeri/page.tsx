@@ -163,7 +163,16 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
         <td className="px-4 py-3" style={{ color: 'var(--wa-muted)' }}>{formatCheck(numero.session_checked_at)}</td>
         <td className="px-4 py-3">
           <div className="flex flex-wrap gap-2">
-            {(numero.status === 'pending_qr' || numero.status === 'qr_required') && (
+            {/* G7: 'disconnected' aggiunto qui, non e' un nuovo bottone. Il
+                backend (POST /wa/numbers/{id}/login, wa_numbers.py:245-263)
+                non ha MAI ristretto per stato -- solo pending_qr/qr_required
+                erano collegati in UI, e un numero disconnesso restava senza
+                via d'uscita dallo schermo. retired/suspended restano fuori:
+                per quelli serve prima "Riattiva" (riporta a pending_qr),
+                altrimenti il login QR partirebbe su un numero che lo stato
+                dice "ritirato"/"sospeso" senza che nessuno l'abbia deciso. */}
+            {(numero.status === 'pending_qr' || numero.status === 'qr_required'
+              || numero.status === 'disconnected') && (
               <AvviaLoginQrButton numero={numero} onChanged={onChanged} />
             )}
             {numero.status !== 'retired' && (

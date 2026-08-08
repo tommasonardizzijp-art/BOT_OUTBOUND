@@ -19,27 +19,38 @@ from app.browser.whatsapp_page import OpenResult
 # _apri_chat_da_risultati / _history_signal: se cambiano li', questo modulo
 # smette di riconoscerli e cade nel ramo fail-closed (colpa nostra), che e'
 # il fallimento giusto.
+#
+# 'nessun-messaggio-nel-pannello' e' qui (drift SDD/contratto vs codice,
+# sessione 08/08 -- decisione di Tommaso: vincono i documenti). Il round1
+# precedente lo aveva messo fra i guasti nostri sotto, col ragionamento che
+# whatsapp_page.py lo emette SOLO dopo aver gia' trovato e cliccato una chat
+# esistente nei risultati di ricerca, quindi "nessun messaggio renderizzato
+# in 5s" sembrava un pannello lento (cronologia vecchia) e non "la chat non
+# esiste". SDD-whatsapp-channel.md § guardia V2 e contratto-M2-M3.md §7
+# dicono da sempre l'opposto, e sono la fonte usata per progettare il resto
+# del canale: il codice andava allineato a loro, non il contrario.
+#
+# Rete di sicurezza per non perdere il campanello d'allarme che questo
+# spostamento toglie (se il DOM si rompe PROPRIO in questo punto, un ramo
+# 'skipped' silenzioso brucerebbe una lista intera segnando tutti come
+# freddi): il worker (wa_worker.esegui_mini_sessione) conta i
+# 'no_existing_chat' CONSECUTIVI su questo segnale specifico e arma FM2
+# comunque a MAX_NO_EXISTING_CHAT_CONSECUTIVI, azzerato solo da un invio
+# riuscito -- non dagli altri 'skipped'/'failed' di mezzo, di proposito:
+# e' un contatore dedicato a QUESTO segnale, non un secondo guasti_
+# consecutivi. Vedi wa_worker.py e docs/whatsapp/SDD-whatsapp-channel.md.
 _SEGNALI_CHAT_INESISTENTE = (
     "nessuna-cronologia:sezione-chat-vuota:nessuna-conversazione-esistente",
     "nessuna-cronologia:nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione",
+    "nessuna-cronologia:nessun-messaggio-nel-pannello",
 )
 
 # Segnali che dicono "la pagina non era nello stato che ci aspettavamo":
 # infrastruttura nostra. Il contatto NON si tocca.
-#
-# 'nessun-messaggio-nel-pannello' e' qui, non sopra (decisione Tommaso
-# round1, escalation whole-branch review item (c)): whatsapp_page.py lo
-# emette SOLO dopo aver gia' trovato e cliccato una chat esistente nei
-# risultati di ricerca -- il segnale dice "nessun messaggio renderizzato in
-# 5s" (un pannello lento su cronologie vecchie e' un evento reale), non
-# "questa chat non esiste". Un contatto presente a DB e' gia' evidenza che
-# dovrebbe avere storico vero (l'ingest di M2 lo ha validato): non si
-# scarta il contatto per un rendering lento, si ritenta.
 _SEGNALI_COLPA_NOSTRA = (
     "nessuna-cronologia:casella-ricerca-non-trovata",
     "nessuna-cronologia:ricerca-non-svuotata",
     "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio",
-    "nessuna-cronologia:nessun-messaggio-nel-pannello",
 )
 
 _SEGNALE_RICERCA_VUOTA = "nessuna-cronologia:nessun-risultato-di-ricerca"

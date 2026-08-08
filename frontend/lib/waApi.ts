@@ -135,6 +135,27 @@ export type WaCampaignContactRow = {
   in_lavorazione: boolean
 }
 
+// wa_ops.wa_ops_status(): striscia di stato del canale (G3). motivo_stop e
+// cap_effettivo li aggiunge in parallelo l'agente sul backend (stesso design
+// 08/08, PR separata): possono arrivare assenti o null a seconda dell'ordine
+// di merge, vanno trattati come opzionali anche lato tipo.
+export type WaOpsStatus = {
+  wa_halted: boolean
+  send_enabled: boolean
+  numeri_attivi: number
+  campagne_running: number
+  inviati_oggi: number
+  motivo_stop?: string | null
+  cap_effettivo?: number | null
+}
+
+export type WaRecoverResult = {
+  recovered: boolean
+  status: WaCampaignStatus
+  stato_numero: WaNumberStatus | null
+  prossimo_passo: string
+}
+
 export type ScartoIngest = { riga: number; motivo: string; valore: string }
 
 export type ReportIngest = {
@@ -214,7 +235,23 @@ export const waApi = {
     pause: (id: string) => req<WaCampaign>(`/wa/campaigns/${id}/pause`, { method: 'POST' }),
     resume: (id: string) => req<WaCampaign>(`/wa/campaigns/${id}/resume`, { method: 'POST' }),
     stop: (id: string) => req<WaCampaign>(`/wa/campaigns/${id}/stop`, { method: 'POST' }),
+    // error -> paused (mai -> running: lo stesso "due click" di riattiva). Il
+    // motivo non ha una colonna dove finire, resta nel log e nell'evento.
+    recover: (id: string, motivo: string) =>
+      req<WaRecoverResult>(`/wa/campaigns/${id}/recover`, { method: 'POST', body: JSON.stringify({ motivo }) }),
     kpi: (id: string) => req<WaCampaignKpi>(`/wa/campaigns/${id}/kpi`),
+  },
+
+  // Operativita' di CANALE (kill-switch WhatsApp), non di singola campagna.
+  // Punta a /wa/ops/*, non a /admin/halt di lib/api.ts: quello e' l'interruttore
+  // Instagram (bot_state_service.halt, colonna diversa) e non ferma WhatsApp.
+  ops: {
+    status: () => req<WaOpsStatus>('/wa/ops/status'),
+    halt: (reason: string) =>
+      req<{ wa_halted: boolean; reason: string }>('/wa/ops/halt', {
+        method: 'POST', body: JSON.stringify({ reason }),
+      }),
+    resume: () => req<{ wa_halted: boolean }>('/wa/ops/resume', { method: 'POST' }),
   },
 
   contatti: {

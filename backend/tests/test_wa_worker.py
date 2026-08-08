@@ -350,6 +350,67 @@ async def test_tre_guasti_nostri_consecutivi_fermano_il_numero(db_session, monke
 
 
 @pytest.mark.asyncio
+async def test_g_fm2_singolo_no_existing_chat_non_arma_fm2(db_session, monkeypatch):
+    """Drift SDD/contratto: il segnale 'nessun-messaggio-nel-pannello' ora
+    produce skipped/no_existing_chat (guardia V2, non colpa nostra). UN
+    contatto solo con questo esito NON deve fermare il numero: e' il caso
+    normale, "un pannello lento su una cronologia vecchia"."""
+    from app.services.wa_sender import EsitoInvio
+
+    async def _no_existing_chat(*a, **kw):
+        return EsitoInvio("skipped", "no_existing_chat")
+
+    esito = await _mini_sessione_con_doppi(
+        db_session, monkeypatch, fake_invio=_no_existing_chat, contatti=1)
+    assert esito["motivo"] == "completata"   # un solo contatto, sessione finita normalmente
+    assert esito["saltati"] == 1
+    assert esito["inviati"] == 0
+
+
+@pytest.mark.asyncio
+async def test_g_fm2_cinque_no_existing_chat_consecutivi_fermano_il_numero(
+        db_session, monkeypatch):
+    """Rete di sicurezza richiesta esplicitamente: spostare il segnale fuori
+    da FM2 non deve spegnere del tutto l'allarme su un DOM davvero rotto in
+    quel punto. 5 'no_existing_chat' consecutivi armano comunque FM2, anche
+    se il contatto stesso viene marcato skipped (non e' un guasto nostro sul
+    singolo contatto, ma la SEQUENZA lo e')."""
+    from app.services.wa_sender import EsitoInvio
+
+    async def _no_existing_chat(*a, **kw):
+        return EsitoInvio("skipped", "no_existing_chat")
+
+    esito = await _mini_sessione_con_doppi(
+        db_session, monkeypatch, fake_invio=_no_existing_chat, contatti=5)
+    assert esito["motivo"] == "no_existing_chat_consecutivi"
+    assert esito["inviati"] == 0
+    assert esito["saltati"] == 5   # il contatto del 5o giro E' comunque skipped
+
+
+@pytest.mark.asyncio
+async def test_g_fm2_invio_riuscito_azzera_il_contatore_no_existing_chat(
+        db_session, monkeypatch):
+    """Il contatore e' CONSECUTIVO: un invio riuscito in mezzo lo azzera.
+    4 no_existing_chat + 1 sent + altri 4 no_existing_chat (9 contatti in
+    tutto) non devono armare FM2, perche' non ci sono mai 5 di fila."""
+    from app.services.wa_sender import EsitoInvio
+
+    chiamate = {"n": 0}
+
+    async def _sequenza(*a, **kw):
+        chiamate["n"] += 1
+        if chiamate["n"] == 5:
+            return EsitoInvio("sent", "ok")
+        return EsitoInvio("skipped", "no_existing_chat")
+
+    esito = await _mini_sessione_con_doppi(
+        db_session, monkeypatch, fake_invio=_sequenza, contatti=9)
+    assert esito["motivo"] == "completata"   # tutti e 9 processati, mai fermato
+    assert esito["inviati"] == 1
+    assert esito["saltati"] == 8
+
+
+@pytest.mark.asyncio
 async def test_eccezione_imprevista_in_invia_a_contatto_non_rompe_la_mini_sessione(
         db_session, monkeypatch):
     """Fix 4 (review finale I7): un'eccezione IMPREVISTA da invia_a_contatto
@@ -622,6 +683,146 @@ async def test_20b_recovery_non_tocca_contatti_senza_messaggio_appeso(db_session
     await db_session.refresh(cc)
     assert cc.locked_by == "worker-vivo-ma-lento"   # NON toccato
     assert cc.status == WaContactStatus.queued
+
+
+@pytest.mark.asyncio
+async def test_g5_recovery_non_declassa_contatto_gia_completato(db_session):
+    """G5: la UPDATE su wa_campaign_contacts di recover_wa_sending_on_startup
+    non filtrava per lo stato ATTUALE del contatto. Un contatto che ha
+    lasciato un messaggio orfano 'sending' ma e' poi stato servito bene
+    (completed) tornava 'skipped', corrompendo i conteggi della campagna e
+    la sua chiusura automatica. Il messaggio orfano si chiude comunque
+    (failed): e' il contatto che non deve muoversi."""
+    from app.models.tenant import Tenant
+    from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                               WaCampaignType, WaContact, WaContactStatus, WaMessage,
+                               WaMessageStatus, WaNumber)
+
+    tenant = Tenant(id=str(uuid.uuid4()), name="TG5a", status="active")
+    db_session.add(tenant)
+    await db_session.flush()
+    contact = WaContact(id=str(uuid.uuid4()), tenant_id=tenant.id,
+                        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e")
+    number = WaNumber(id=str(uuid.uuid4()), tenant_id=tenant.id, label="n",
+                      phone_hmac=f"h2-{uuid.uuid4()}", encrypted_phone="e")
+    db_session.add_all([contact, number])
+    await db_session.flush()
+    campaign = WaCampaign(id=str(uuid.uuid4()), tenant_id=tenant.id, wa_number_id=number.id,
+                          name="cg5a", campaign_type=WaCampaignType.followup,
+                          status=WaCampaignStatus.running)
+    db_session.add(campaign)
+    await db_session.flush()
+    cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
+                           status=WaContactStatus.completed, current_step=0)
+    msg = WaMessage(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
+                    wa_number_id=number.id, step_index=0, template_variant="a",
+                    rendered_text="ciao", status=WaMessageStatus.sending)
+    db_session.add_all([cc, msg])
+    await db_session.commit()
+
+    n = await wa_worker.recover_wa_sending_on_startup()
+    assert n == 1   # il messaggio orfano si chiude comunque
+
+    await db_session.refresh(msg)
+    assert msg.status == WaMessageStatus.failed
+
+    await db_session.refresh(cc)
+    assert cc.status == WaContactStatus.completed   # NON declassato a skipped
+
+
+@pytest.mark.asyncio
+async def test_g5_recovery_declassa_ancora_contatto_in_sequence(db_session):
+    """Non regressione: un contatto ancora IN LAVORAZIONE (in_sequence, non
+    solo queued) con un messaggio orfano 'sending' va comunque fermato in
+    skipped -- il fix G5 restringe il filtro dell'UPDATE a (queued,
+    in_sequence), non lo rimuove."""
+    from app.models.tenant import Tenant
+    from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                               WaCampaignType, WaContact, WaContactStatus, WaMessage,
+                               WaMessageStatus, WaNumber)
+
+    tenant = Tenant(id=str(uuid.uuid4()), name="TG5b", status="active")
+    db_session.add(tenant)
+    await db_session.flush()
+    contact = WaContact(id=str(uuid.uuid4()), tenant_id=tenant.id,
+                        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e")
+    number = WaNumber(id=str(uuid.uuid4()), tenant_id=tenant.id, label="n",
+                      phone_hmac=f"h2-{uuid.uuid4()}", encrypted_phone="e")
+    db_session.add_all([contact, number])
+    await db_session.flush()
+    campaign = WaCampaign(id=str(uuid.uuid4()), tenant_id=tenant.id, wa_number_id=number.id,
+                          name="cg5b", campaign_type=WaCampaignType.followup,
+                          status=WaCampaignStatus.running)
+    db_session.add(campaign)
+    await db_session.flush()
+    cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
+                           status=WaContactStatus.in_sequence, current_step=1,
+                           locked_by="worker-crashato")
+    msg = WaMessage(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
+                    wa_number_id=number.id, step_index=1, template_variant="a",
+                    rendered_text="ciao", status=WaMessageStatus.sending)
+    db_session.add_all([cc, msg])
+    await db_session.commit()
+
+    n = await wa_worker.recover_wa_sending_on_startup()
+    assert n == 1
+
+    await db_session.refresh(cc)
+    assert cc.status == WaContactStatus.skipped
+    assert cc.locked_by is None
+
+
+@pytest.mark.asyncio
+async def test_g5_recovery_e_guardia_doppio_invio_convergono(db_session):
+    """La guardia anti-doppio-invio di PR #52 (wa_sender.py:317-352),
+    trovando un WaMessage 'sending'/'sent' per la tripla (campagna, contatto,
+    step), marca subito il contatto 'skipped' e LASCIA il messaggio in
+    'sending'. Al riavvio successivo la recovery lo ritrova: con il filtro
+    di stato del fix G5 (skipped non e' in (queued, in_sequence)) questo
+    secondo passaggio deve diventare un no-op sul contatto, invece di
+    ripetere la stessa scrittura sopra quella gia' fatta dalla guardia."""
+    from app.models.tenant import Tenant
+    from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
+                               WaCampaignType, WaContact, WaContactStatus, WaMessage,
+                               WaMessageStatus, WaNumber)
+
+    tenant = Tenant(id=str(uuid.uuid4()), name="TG5c", status="active")
+    db_session.add(tenant)
+    await db_session.flush()
+    contact = WaContact(id=str(uuid.uuid4()), tenant_id=tenant.id,
+                        phone_hmac=f"h-{uuid.uuid4()}", encrypted_phone="e")
+    number = WaNumber(id=str(uuid.uuid4()), tenant_id=tenant.id, label="n",
+                      phone_hmac=f"h2-{uuid.uuid4()}", encrypted_phone="e")
+    db_session.add_all([contact, number])
+    await db_session.flush()
+    campaign = WaCampaign(id=str(uuid.uuid4()), tenant_id=tenant.id, wa_number_id=number.id,
+                          name="cg5c", campaign_type=WaCampaignType.followup,
+                          status=WaCampaignStatus.running)
+    db_session.add(campaign)
+    await db_session.flush()
+    motivo_guardia = ("invio gia' registrato (sending) per questo step: "
+                      "possibile guasto DB a invio avvenuto, verificare "
+                      "se il messaggio e' arrivato")
+    cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
+                           status=WaContactStatus.skipped, current_step=0,
+                           last_error=motivo_guardia)
+    msg = WaMessage(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
+                    wa_number_id=number.id, step_index=0, template_variant="a",
+                    rendered_text="ciao", status=WaMessageStatus.sending)
+    db_session.add_all([cc, msg])
+    await db_session.commit()
+
+    n = await wa_worker.recover_wa_sending_on_startup()
+    assert n == 1   # il messaggio si chiude comunque
+
+    await db_session.refresh(msg)
+    assert msg.status == WaMessageStatus.failed
+
+    await db_session.refresh(cc)
+    assert cc.status == WaContactStatus.skipped
+    # il motivo scritto dalla guardia NON viene sovrascritto dal motivo
+    # generico di recovery: il contatto non e' stato ri-toccato.
+    assert cc.last_error == motivo_guardia
 
 
 @pytest.mark.asyncio

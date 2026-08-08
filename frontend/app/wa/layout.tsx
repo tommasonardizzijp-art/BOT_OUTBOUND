@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import WaNav from './WaNav'
+import StatoCanaleStriscia from '@/components/wa/StatoCanaleStriscia'
 
 export const metadata: Metadata = {
   title: 'WhatsApp - BOT OUTBOUND',
@@ -31,7 +32,12 @@ export default function WaLayout({ children }: { children: React.ReactNode }) {
       }}
     >
       <WaNav />
-      <main className="flex-1 overflow-y-auto p-8">{children}</main>
+      <main className="flex-1 overflow-y-auto p-8">
+        {/* G3: su ogni pagina /wa/*, non solo sulla home -- il valore vero e'
+            vederla mentre si guarda una campagna che sembra in corso e non lo e'. */}
+        <StatoCanaleStriscia />
+        {children}
+      </main>
     </div>
   )
 }
