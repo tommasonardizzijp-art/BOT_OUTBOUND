@@ -465,5 +465,24 @@ class Settings(BaseSettings):
     # senza limite dei 'completed' farebbe crescere la lista per sempre.
     wa_reply_scan_window_days: int = 3
 
+    # Lock Redis cross-processo sul profilo browser IG (C.2, passo 4): TTL
+    # CORTO + rinnovo automatico dentro il chokepoint (context_manager),
+    # non lungo per prudenza come il lock WA sopra (90min, gia' causa di un
+    # orfano risolto a mano — vedi app/browser/profile_lock.py). Un crash a
+    # meta' sessione si autolibera in pochi minuti invece di bloccare
+    # l'account per un'ora e mezza. Rapporto renew:TTL circa 1:3, cosi' un
+    # singolo rinnovo mancato (blip Redis) lascia comunque margine prima
+    # della scadenza.
+    browser_profile_lock_ttl_s: int = 180
+    browser_profile_lock_renew_s: int = 60
+    # Rilievo review C.1-C.3: un blip Redis singolo durante il rinnovo resta
+    # fail-open (non abbatte una sessione viva per un hiccup), ma oltre N
+    # fallimenti CONSECUTIVI il lock e' trattato come perso (fail-closed).
+    # N=2 = almeno un ciclo di rinnovo intero (60s, vedi sopra) di Redis
+    # confermata irraggiungibile, non un singolo blip isolato; con TTL 180s
+    # questo lascia comunque margine di reazione prima della scadenza
+    # naturale, invece di aspettarla e basta.
+    browser_profile_lock_max_renew_errors: int = 2
+
 
 settings = Settings()

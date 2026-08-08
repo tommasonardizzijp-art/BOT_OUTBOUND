@@ -405,6 +405,7 @@ async def manual_login_account(account_id: str, db: AsyncSession = Depends(get_d
     from loguru import logger
     from app.services.manual_login import manual_browser_login_sync
     from app.browser.context_manager import _fetch_account_proxy
+    from app.browser.profile_lock import AccountBrowserBusy
 
     account = await _get_or_404(account_id, db)
 
@@ -435,6 +436,11 @@ async def manual_login_account(account_id: str, db: AsyncSession = Depends(get_d
         await db.refresh(account)
         return account
 
+    except AccountBrowserBusy as e:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Account occupato da un'altra sessione browser (campagna o altro job in corso) — riprova fra poco. ({e})",
+        )
     except TimeoutError as e:
         raise HTTPException(status_code=408, detail=str(e))
     except RuntimeError as e:
@@ -472,6 +478,7 @@ async def browse_session(account_id: str, db: AsyncSession = Depends(get_db), ma
     from loguru import logger
     from app.services.manual_login import manual_browse_session_sync
     from app.browser.context_manager import _fetch_account_proxy
+    from app.browser.profile_lock import AccountBrowserBusy
 
     account = await _get_or_404(account_id, db)
 
@@ -490,6 +497,18 @@ async def browse_session(account_id: str, db: AsyncSession = Depends(get_db), ma
         db.add(log)
         await db.commit()
         return result
+    except AccountBrowserBusy as e:
+        log = ActivityLog(
+            account_id=account.id,
+            action="manual_browse_busy",
+            details=json.dumps({"error": str(e)[:200]}),
+        )
+        db.add(log)
+        await db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Account occupato da un'altra sessione browser (campagna o altro job in corso) — riprova fra poco. ({e})",
+        )
     except Exception as e:
         logger.error(f"Browse session error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
         detail = f"Sessione browse fallita: {type(e).__name__}: {e}"
@@ -501,6 +520,67 @@ async def browse_session(account_id: str, db: AsyncSession = Depends(get_db), ma
         db.add(log)
         await db.commit()
         raise HTTPException(status_code=500, detail=detail)
+
+
+@router.post("/{account_id}/organic-session")
+async def organic_session_start(account_id: str, db: AsyncSession = Depends(get_db)):
+    """Accoda una sessione di navigazione organica (warm-up: scroll feed, apre
+    qualche post/reel, like raro) su un job ARQ -- NON blocca la richiesta HTTP
+    a differenza di /browse-session, che apre il browser dentro il processo
+    backend e tiene la connessione aperta finche' l'utente non chiude la finestra.
+    Affianca /browse-session, non lo sostituisce (backend only per ora — il
+    pulsante UI e' un task successivo).
+
+    Idempotente per account: click ripetuti mentre una sessione e' gia' in coda
+    o in esecuzione non ne accodano una seconda (work_enqueue.enqueue_organic_session).
+    La vera protezione contro il doppio Chromium resta comunque il lock Redis sul
+    profilo (C.2): questo endpoint evita solo il rumore di 5 job in coda per lo
+    stesso account."""
+    from app.services.work_enqueue import enqueue_organic_session, organic_session_job_id
+
+    account = await _get_or_404(account_id, db)
+    started = await enqueue_organic_session(account.id, account.username)
+    job_id = organic_session_job_id(account.id)
+    if not started:
+        raise HTTPException(
+            status_code=409,
+            detail="Sessione organica gia' in coda o in corso per questo account — riprova fra poco.",
+        )
+    log = ActivityLog(
+        account_id=account.id,
+        action="organic_session_queued",
+        details=json.dumps({"job_id": job_id}),
+    )
+    db.add(log)
+    await db.commit()
+    return {"queued": True, "job_id": job_id}
+
+
+@router.get("/{account_id}/organic-session")
+async def organic_session_status(account_id: str, db: AsyncSession = Depends(get_db)):
+    """Stato leggibile della sessione organica per l'account: deferred/queued/
+    in_progress/complete/not_found (arq.jobs.JobStatus), piu' il risultato
+    (ran/duration_seconds/reason) se completata. Nessuna tabella dedicata: lo
+    stato vive nelle chiavi ARQ del job_id deterministico per account."""
+    import arq
+    from arq.jobs import Job
+    from app.services.work_enqueue import arq_redis_settings, ARQ_MAIN_QUEUE, organic_session_job_id
+
+    await _get_or_404(account_id, db)
+    job_id = organic_session_job_id(account_id)
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        job = Job(job_id, redis, _queue_name=ARQ_MAIN_QUEUE)
+        job_status = await job.status()
+        result_info = await job.result_info()
+    finally:
+        await redis.aclose()
+
+    payload = {"status": job_status.value}
+    if result_info is not None:
+        payload["success"] = result_info.success
+        payload["result"] = result_info.result if result_info.success else str(result_info.result)
+    return payload
 
 
 @router.get("/{account_id}/check-session")

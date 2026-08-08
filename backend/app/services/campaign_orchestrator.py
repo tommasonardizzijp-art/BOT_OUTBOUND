@@ -106,6 +106,48 @@ async def _release_cancelled_pending_attempt(
     return True
 
 
+async def _release_after_browser_busy(
+    follower: Follower,
+    db: AsyncSession,
+    campaign_id: str,
+    account_id: str,
+    lease_owner: str,
+    exc: Exception,
+) -> int:
+    """Cleanup + calcolo del defer quando l'apertura del browser trova
+    l'account occupato (AccountBrowserBusy, C.2). Isolata dal resto del loop
+    di `run_campaign_worker` apposta per essere testabile senza dover montare
+    l'intero worker (campagna/account/follower/message/gate vari) -- il
+    chiamante fa solo `release_lease_on_exit = False` e `raise Retry(defer=...)`
+    col valore ritornato.
+
+    NON e' un fallimento del follower: senza questa traduzione la busy-
+    exception cadrebbe nel catch-all generico del loop, che marca il
+    follower fallito dopo 3 retry e puo' auto-pausare la campagna dopo 5
+    errori consecutivi (rischio segnalato in review). Qui invece: follower e
+    reservation liberati, nessuna penalita', l'unico costo e' un breve
+    ritardo prima che l'intero job (account) riprovi."""
+    from app.browser.profile_lock import BUSY_RETRY_S
+
+    logger.info(
+        f"[Worker] account {account_id[:8]} occupato da un'altra sessione "
+        f"browser — rinvio {BUSY_RETRY_S}s ({exc})"
+    )
+    follower.locked_by_account_id = None
+    follower.locked_at = None
+    await reservation.release(follower.ig_user_id, db)
+    await db.commit()
+    emit_event(
+        campaign_id, "worker_stopped",
+        f"Account occupato da un'altra sessione browser — rinvio", level="warn",
+    )
+    try:
+        await account_lease.hold_for_seconds(account_id, lease_owner, db, max(1, BUSY_RETRY_S - 5))
+    except Exception as lease_err:
+        logger.warning(f"[Worker] lease hold (account busy) failed: {lease_err}")
+    return BUSY_RETRY_S
+
+
 # ─────────────────────────── Public entry point ───────────────────────────
 
 async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
@@ -583,7 +625,15 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 # active-hours wait, or worker exit (via `_close_browser` in finally).
                 if browser_session is None:
                     from app.browser.context_manager import BrowserSession
-                    browser_session = await BrowserSession(account_id).open()
+                    from app.browser.profile_lock import AccountBrowserBusy
+                    try:
+                        browser_session = await BrowserSession(account_id).open()
+                    except AccountBrowserBusy as e:
+                        defer = await _release_after_browser_busy(
+                            follower, db, campaign_id, account_id, lease_owner, e
+                        )
+                        release_lease_on_exit = False
+                        raise Retry(defer=defer)
                     await browser_session.page.ensure_logged_in(account_id)
                     ambient_init = initial_session_browse_seconds()
                     emit_event(
