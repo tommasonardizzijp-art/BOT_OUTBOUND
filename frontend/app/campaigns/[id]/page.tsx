@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import type { Campaign, Follower, FollowerStatus, CampaignAccount, Account, AccountStatus, ABStats, ApprovalQueueItem, ApprovalQueue, WorkerEvent, AccountRole, ImportStatusResponse } from '@/lib/types'
 import { canDm } from '@/lib/roles'
+import { avvioLabel } from '@/lib/avvio'
 
 const FOLLOWER_STATUS_LABEL: Record<FollowerStatus, string> = {
   pending: 'In attesa',
@@ -98,6 +99,9 @@ function TwoPhasePanel({ campaign, id, action, loadingAction }: {
   const bp = campaign.bio_progress
   const listing = campaign.status === 'listing' || campaign.status === 'listing_break'
   const bioing = campaign.status === 'scraping' || campaign.status === 'scraping_break'
+  // A livello 'none' il backend rifiuta /bios/start con 400 ("non apre i profili").
+  // Senza questo la card resta un pulsante-trappola: sembra premibile e non parte mai.
+  const bioSpentaDalLivello = (campaign.enrichment_level ?? 'none') === 'none'
 
   return (
     <div className="grid gap-4 md:grid-cols-2">
@@ -143,8 +147,10 @@ function TwoPhasePanel({ campaign, id, action, loadingAction }: {
         </CardContent>
       </Card>
 
-      {/* Fase 2 — Scraping bio/contatti */}
-      <Card className="bg-gray-900 border-gray-800">
+      {/* Fase 2 — Scraping bio/contatti. A livello 'none' resta VISIBILE ma grigia:
+          nasconderla lascerebbe l'operatore a chiedersi dove sia finita la fase, mentre
+          così si vede a colpo d'occhio cosa il livello ha spento. */}
+      <Card className={`bg-gray-900 border-gray-800 ${bioSpentaDalLivello ? 'opacity-60' : ''}`}>
         <CardContent className="pt-4 space-y-3">
           <div className="font-semibold text-sm text-gray-200">Fase 2 — Scraping bio/contatti</div>
           <div className="text-sm text-gray-400">
@@ -157,10 +163,25 @@ function TwoPhasePanel({ campaign, id, action, loadingAction }: {
             placeholder="Target (vuoto = tutti i pending)"
             value={bioTarget}
             onChange={(e) => setBioTarget(e.target.value)}
-            disabled={bioing}
+            disabled={bioing || bioSpentaDalLivello}
             className="bg-gray-800 border-gray-700 text-white text-sm h-8 disabled:opacity-50"
           />
-          {!bioing ? (
+          {bioSpentaDalLivello ? (
+            <>
+              <Button
+                size="sm"
+                disabled
+                title="Livello di arricchimento «Solo DM»: questa campagna non apre i profili. Alza il livello a Bio o Bio + contatti per abilitare la Fase Bio."
+                className="w-full bg-gray-800 text-gray-500 cursor-not-allowed"
+              >
+                Avvia Fase Bio
+              </Button>
+              <p className="text-xs text-amber-400/80">
+                Livello <span className="font-medium">Solo DM</span>: nessuna visita ai profili.
+                Alza il livello qui sopra per abilitarla.
+              </p>
+            </>
+          ) : !bioing ? (
             <Button
               size="sm"
               className="w-full bg-green-600 hover:bg-green-700 text-white"
@@ -863,8 +884,9 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
         <div className="flex gap-2 flex-shrink-0">
           {campaign.status === 'draft' && (
             <Button size="sm" variant="outline" className="border-gray-700 text-gray-300"
-              onClick={() => action(() => api.campaigns.startScrape(id))} disabled={loadingAction}>
-              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Avvia scraping'}
+              onClick={() => action(() => api.campaigns.startScrape(id))} disabled={loadingAction}
+              title={avvioLabel(campaign).title}>
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : avvioLabel(campaign).label}
             </Button>
           )}
           {campaign.status === 'ready' && campaign.messaging_enabled && (
@@ -975,8 +997,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           {campaign.status === 'error' && (
             <Button size="sm" className="bg-green-600 hover:bg-green-700"
               onClick={() => action(() => api.campaigns.startScrape(id))} disabled={loadingAction}
-              title="Riprende la campagna dall'errore senza perdere i profili già raccolti (i profili non ancora risolti vengono ripresi)">
-              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />{campaign.source_type === 'import' ? 'Riprendi risoluzione' : 'Riavvia scraping'}</>}
+              title={`Riprende dall'errore senza perdere i profili già raccolti. ${avvioLabel(campaign, true).title}`}>
+              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />{avvioLabel(campaign, true).label}</>}
             </Button>
           )}
           {(campaign.status === 'error' || campaign.status === 'completed' || campaign.status === 'paused' || campaign.status === 'scraping' || campaign.status === 'scraping_and_running' || campaign.status === 'scraping_break' || campaign.status === 'listing' || campaign.status === 'listing_break') && (
@@ -1120,11 +1142,23 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               </button>
             ))}
           </div>
+          {/* La nota sui nomi mancanti vale solo per le campagne scrape, dove i dati
+              arrivano dalla Fase Lista. Su import la risoluzione apre il profilo e il
+              nome ce l'ha sempre — lì il livello 'none' ha un limite diverso, e va
+              detto: non evita la visita, perché serve l'ID Instagram. */}
           {(campaign.enrichment_level ?? 'none') === 'none' && (
-            <p className="text-xs text-amber-400/80">
-              Circa un contatto su quattro non ha il nome nella lista: in quei DM
-              «{'{nome}'}» diventa «@nomeutente». Usa un testo che regga anche così.
-            </p>
+            campaign.source_type === 'import' ? (
+              <p className="text-xs text-amber-400/80">
+                Su una lista importata questo livello spegne solo la raccolta di email e
+                telefono: la risoluzione apre comunque un profilo per riga, perché serve
+                l&apos;ID Instagram per creare il contatto.
+              </p>
+            ) : (
+              <p className="text-xs text-amber-400/80">
+                Circa un contatto su quattro non ha il nome nella lista: in quei DM
+                «{'{nome}'}» diventa «@nomeutente». Usa un testo che regga anche così.
+              </p>
+            )
           )}
         </div>
       )}
