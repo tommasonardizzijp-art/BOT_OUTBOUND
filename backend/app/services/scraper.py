@@ -21,7 +21,7 @@ from loguru import logger
 
 from app.database import AsyncSessionLocal
 from app.models.account import InstagramAccount, AccountStatus
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, contatti_richiesti_dal_livello
 from app.models.follower import Follower, FollowerStatus
 from app.models.activity_log import ActivityLog
 from app.utils.crypto import decrypt
@@ -36,7 +36,7 @@ from app.utils.instagrapi_client import (
     get_scraping_account_ids,
 )
 from app.services.bot_state_service import is_halted
-from app.utils.contact_extract import extract_contacts, ContactData
+from app.utils.contact_extract import extract_contacts, extract_bio_links_only, ContactData
 from app.services.global_contact_service import upsert_lead
 from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty
 from app.services.account_manager import has_scrape_budget, increment_scrape_lookup
@@ -328,8 +328,19 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
         logger.warning(f"[Bio] user_info @{follower.username} fallito: {e}")
         return "error", current_account, e
 
-    from app.utils.contact_extract import extract_contacts
-    contacts = extract_contacts(user_info)
+    from app.utils.contact_extract import extract_contacts, extract_bio_links_only
+    # Ramo API: i contatti sono gia' dentro `user_info` (stesso payload della bio,
+    # zero richieste in piu'), quindi il gate qui NON risparmia nessuna chiamata IG
+    # — decide solo se salvarli, per coerenza con quanto l'utente ha scelto in UI.
+    # Non "ottimizzare" togliendolo: costa 0 lookup, ma i contatti finirebbero nel
+    # DB anche a livello 'bio', che promette il contrario.
+    # NB: a livello 'bio' i bio_links/external_url restano — non sono un contatto,
+    # sono cio' che quel livello promette (bio/follower/link).
+    contacts = (
+        extract_contacts(user_info)
+        if contatti_richiesti_dal_livello(campaign)
+        else extract_bio_links_only(user_info)
+    )
     # Una sola sorgente per il contatore cap: bump in-memory, persistito dal
     # db.commit() sotto. NON usare anche increment_scrape_lookup (UPDATE atomico
     # che committa subito): con expire_on_commit=False i due incrementi si
@@ -742,7 +753,18 @@ async def _store_followers_batch(
                 following_count = getattr(user_info, 'following_count', None)
                 ext = getattr(user_info, 'external_url', None)
                 external_url = str(ext) if ext else None
-                contacts = extract_contacts(user_info)
+                # Ramo API: i contatti sono gia' dentro `user_info` (stesso payload
+                # della bio, zero richieste in piu'), quindi il gate qui NON risparmia
+                # nessuna chiamata IG — decide solo se salvarli, per coerenza con
+                # quanto l'utente ha scelto in UI. Non "ottimizzare" togliendolo: costa
+                # 0 lookup, ma i contatti finirebbero nel DB anche a livello 'bio'.
+                # NB: a livello 'bio' i bio_links/external_url restano — non sono un
+                # contatto, sono cio' che quel livello promette (bio/follower/link).
+                contacts = (
+                    extract_contacts(user_info)
+                    if contatti_richiesti_dal_livello(campaign)
+                    else extract_bio_links_only(user_info)
+                )
                 # Un solo conteggio: bump in-memory date-aware, persistito dal commit
                 # del batch. (Prima sommava anche increment_scrape_lookup -> doppio.)
                 from app.services.account_manager import bump_scrape_lookup

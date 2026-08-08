@@ -430,23 +430,24 @@ def profilo_professional(profilo) -> bool | None:
 def contatti_richiesti(campaign, profilo=None) -> bool:
     """True se `/info/` puo' partire per QUESTO profilo di QUESTA campagna.
 
-    Tre condizioni in AND:
-      - l'interruttore globale e' acceso (kill-switch operativo, vince su tutto);
-      - il livello della campagna e' 'contacts';
-      - il profilo non e' esplicitamente non-professional (gate, §4.3 dello spec).
-
-    `/info/` e' l'unica richiesta del canale browser che nessuna pagina web produce
-    in nessuna condizione: non si puo' rendere invisibile, solo fare meno spesso.
+    Tre condizioni in AND, e sono TUTTE necessarie solo qui (canale browser),
+    perche' `/info/` e' una richiesta reale che nessuna pagina web produce mai:
+      - l'interruttore globale e' acceso (kill-switch operativo, vince su tutto) —
+        e' un interruttore del canale browser, non tocca il ramo API;
+      - il livello della campagna e' 'contacts' (`contatti_richiesti_dal_livello`,
+        condivisa col ramo API — vedi il suo docstring per la differenza);
+      - il profilo non e' esplicitamente non-professional (gate, §4.3 dello spec) —
+        esiste solo per evitare QUESTA richiesta, quindi non si applica al ramo API
+        dove i contatti arrivano gia' col payload della bio.
 
     Difensivo sulla retrocompatibilita': una campagna senza il campo si comporta
     come prima dell'introduzione dei livelli (chiama /info/), altrimenti la
     migrazione spegnerebbe in silenzio la raccolta contatti su campagne che la
     volevano. `profilo` None => gate non applicabile => si procede."""
-    from app.models.campaign import ENRICHMENT_CONTACTS
+    from app.models.campaign import contatti_richiesti_dal_livello
     if not settings.bio_browser_contact_info_enabled:
         return False
-    livello = getattr(campaign, "enrichment_level", None)
-    if not (livello is None or livello == ENRICHMENT_CONTACTS):
+    if not contatti_richiesti_dal_livello(campaign):
         return False
     if not settings.bio_browser_professional_gate_enabled:
         return True

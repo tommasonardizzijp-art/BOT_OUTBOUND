@@ -138,6 +138,27 @@ def text_has_contact(text: str | None) -> bool:
     return bool(wa)
 
 
+def extract_bio_links_only(info) -> ContactData:
+    """Come `extract_contacts` ma SOLO bio_links + external_url, senza email/
+    telefono/whatsapp. Never raises.
+
+    Serve al gate di livello 'bio' (passo 4, A.5): il link in bio NON e' un
+    contatto, e' parte di quello che quel livello promette ("bio/follower/link").
+    Chi chiama con livello 'bio' deve continuare a salvare i link anche se non
+    salva email/telefono — altrimenti si perde dato che l'utente ha chiesto.
+    """
+    data = ContactData()
+    if info is None:
+        return data
+    try:
+        bio_links, external = _bio_links_from(info)
+        data.bio_links = bio_links
+        data.external_url = external
+    except Exception:
+        return data
+    return data
+
+
 def extract_contacts(info) -> ContactData:
     """Extract contacts from an instagrapi User (or None). Never raises."""
     data = ContactData()
