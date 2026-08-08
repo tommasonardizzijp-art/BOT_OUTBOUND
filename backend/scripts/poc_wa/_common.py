@@ -21,8 +21,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-import psutil
-
 from wa_lib import mask_pii  # type: ignore  # eseguito come script dalla sua cartella
 
 # La console Windows di Tommaso e' cp1252 e SOLLEVA su qualunque carattere che
@@ -162,7 +160,15 @@ def _profile_in_use() -> bool:
 
     I lock si cancellano solo se NON c'e': cancellarli sotto una sessione viva
     (heartbeat lanciato mentre poc3_scan --loop gira) corrompe entrambe.
+
+    psutil si importa QUI e non in testa al modulo: e' l'unico punto che lo
+    usa, serve solo a runtime su una macchina con un browser vero, e non e'
+    fra le dipendenze del backend. In testa al modulo rendeva non importabile
+    tutto _common.py sul runner CI, dove psutil non c'e' — e con esso il test
+    di cmdline_matches_profile, che di psutil non ha alcun bisogno.
     """
+    import psutil
+
     for proc in psutil.process_iter(["cmdline"]):
         try:
             if cmdline_matches_profile(proc.info.get("cmdline")):
