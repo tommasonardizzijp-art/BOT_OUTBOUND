@@ -28,6 +28,7 @@ import asyncio
 import json as _json
 import random
 import time
+import weakref
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -1543,10 +1544,47 @@ async def run_pause_browser_activity(campaign_id: str, account_id: str, username
                 logger.debug(f"[BioBrowser] {tag}: close fallita ({e})")
 
 
+# Cap sui browser concorrenti aperti da run_pause_browser_all_accounts: deve essere
+# GLOBALE AL PROCESSO, non per-chiamata. Un semaforo creato dentro la funzione e'
+# un tetto per-chiamata: se due campagne entrano in pausa bio nello stesso momento,
+# ognuna avrebbe il proprio semaforo pieno -> tetto reale 3xN campagne invece di 3
+# totali (bug corretto qui: prima il semaforo era locale alla funzione).
+#
+# Non basta pero' un semplice `asyncio.Semaphore(...)` a livello di modulo: e' un
+# oggetto che crea i Future dei suoi waiter sul loop corrente alla prima attesa
+# contesa, quindi se due `asyncio.run()` distinti lo contendono (tipicamente nei
+# test, che aprono un loop nuovo per ogni chiamata) i waiter restano legati a un
+# loop poi chiuso -- stessa famiglia di problema gia' documentato per il lock
+# per-account in app/browser/context_manager.py (`_get_account_lock`). In
+# PRODUZIONE questa funzione gira sempre nell'unico worker ARQ del processo
+# (`arq app.workers.task_queue.WorkerSettings`, un solo processo, un solo event
+# loop per tutta la vita del worker -- vedi start.bat e task_queue.WorkerSettings),
+# quindi in pratica un solo semaforo per tutta la vita del processo basterebbe gia'.
+# Per restare corretti anche fuori da quell'assunzione (test, refactor futuro),
+# il semaforo e' tenuto in una WeakKeyDictionary keyata sul loop corrente:
+# get-or-create per loop, MAI ricreato o sovrascritto una volta esistente per
+# quel loop -- a differenza di `_get_account_lock` (che e' per-account e
+# SOSTITUISCE silenziosamente il lock quando cambia loop, perdendo chi lo tiene
+# gia'), qui non c'e' nulla da perdere: tutte le chiamate concorrenti sullo
+# STESSO loop condividono SEMPRE la STESSA istanza, quindi il tetto resta
+# davvero globale finche' il loop e' lo stesso -- cioe' sempre, in produzione.
+_pause_browser_sems: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _get_pause_browser_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _pause_browser_sems.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(max(1, settings.max_concurrent_browsers))
+        _pause_browser_sems[loop] = sem
+    return sem
+
+
 async def run_pause_browser_all_accounts(campaign_id: str) -> int:
     """Ogni account scraping della campagna fa la sua sessione scroll+batch in pausa.
     Parallelo con partenze SCAGLIONATE (offset random 1-3 min tra account, mai tutti
-    nello stesso istante) e cap sui browser concorrenti (max_concurrent_browsers).
+    nello stesso istante) e cap sui browser concorrenti (max_concurrent_browsers),
+    GLOBALE al processo -- non solo a questa chiamata, vedi _get_pause_browser_semaphore.
     Ritorna i secondi totali spesi (0 se disabilitato / nessun account). Difensivo."""
     if not (settings.warmup_browse_enabled or settings.bio_browser_batch_enabled):
         return 0
@@ -1555,7 +1593,7 @@ async def run_pause_browser_all_accounts(campaign_id: str) -> int:
         return 0
 
     start = time.monotonic()
-    sem = asyncio.Semaphore(max(1, settings.max_concurrent_browsers))
+    sem = _get_pause_browser_semaphore()
 
     async def _one(account_id, username, idx):
         # Stagger: parte dopo idx * (1-3 min), cosi' non tutti nello stesso istante.

@@ -15,7 +15,8 @@ Lo stato "prod gia' a 024" viene fabbricato con i modelli SQLAlchemy REALI
 fedele di DDL scritto a mano, e non serve rigiocare la catena di migrazioni.
 Le colonne che una migrazione SUCCESSIVA alla 025 aggiunge a una tabella
 GIA' esistente (027 -> bot_state.wa_halted*, 029 -> campaigns.enrichment_level,
-...) vanno tolte a parte: il modello corrente le ha gia', ma a "stamp 024"
+030 -> instagram_accounts.daily_likes_today/date, ...) vanno tolte a parte:
+il modello corrente le ha gia', ma a "stamp 024"
 non devono esistere, altrimenti la migrazione che le introduce duplica la
 colonna. Il drop e' condizionale (PRAGMA table_info) perche' questo fixture
 gira anche su alberi dove quella colonna non e' ancora nel modello (es.
@@ -57,6 +58,7 @@ WA_NEW_TABLES = {
 POST_024_COLUMNS = {
     "bot_state": ["wa_halted", "wa_halted_reason", "wa_halted_at", "wa_halted_by"],  # 027
     "campaigns": ["enrichment_level"],  # 029
+    "instagram_accounts": ["daily_likes_today", "daily_likes_date"],  # 030
 }
 
 
@@ -284,3 +286,51 @@ def test_028_ciclo_su_giu_su_isolato(migration_db):
 
     _run_alembic(["upgrade", "head"], migration_db)
     assert "warmup_advanced_date" in _wa_numbers_columns(migration_db)
+
+
+# ---------------------------------------------------------------------------
+# Funzionale 5 -- 030: tetto giornaliero like, raggiungibile e ciclo su-giu-su
+# ---------------------------------------------------------------------------
+
+def _instagram_accounts_columns(db_path: Path) -> set[str]:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return {row[1] for row in conn.execute("PRAGMA table_info(instagram_accounts)").fetchall()}
+    finally:
+        conn.close()
+
+
+def test_030_daily_likes_raggiungibile_da_upgrade_pulito(migration_db):
+    """stamp 024 (prod reale) -> upgrade head: le due colonne nuove (B.3,
+    tetto giornaliero like persistito) sono fisicamente su instagram_accounts.
+    E' il caso che duplicava la colonna prima del fix di POST_024_COLUMNS
+    (il fixture, costruito sui modelli correnti, le creava gia' a "stamp 024",
+    e l'ADD COLUMN della 030 falliva con "duplicate column name")."""
+    _run_alembic(["stamp", "024"], migration_db)
+    _run_alembic(["upgrade", "head"], migration_db)
+
+    cols = _instagram_accounts_columns(migration_db)
+    assert "daily_likes_today" in cols
+    assert "daily_likes_date" in cols
+
+
+def test_030_ciclo_su_giu_su_isolato(migration_db):
+    """downgrade 029 (via batch_alter_table) -> upgrade head: nessun errore,
+    entrambe le colonne tornano ad esserci dopo il secondo upgrade. Profilo
+    diverso dalla 028 (colonna singola nullable): qui daily_likes_today e'
+    NOT NULL con server_default, il batch rebuild di SQLite deve reggerlo."""
+    _run_alembic(["stamp", "024"], migration_db)
+    _run_alembic(["upgrade", "head"], migration_db)
+    cols = _instagram_accounts_columns(migration_db)
+    assert "daily_likes_today" in cols
+    assert "daily_likes_date" in cols
+
+    _run_alembic(["downgrade", "029"], migration_db)
+    cols = _instagram_accounts_columns(migration_db)
+    assert "daily_likes_today" not in cols
+    assert "daily_likes_date" not in cols
+
+    _run_alembic(["upgrade", "head"], migration_db)
+    cols = _instagram_accounts_columns(migration_db)
+    assert "daily_likes_today" in cols
+    assert "daily_likes_date" in cols
