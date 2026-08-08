@@ -227,6 +227,13 @@ class Settings(BaseSettings):
     # browser perde ~95% delle email. ON di default (e' lo scopo). Kill-switch se un giorno
     # /info/ dal browser venisse rate-limitato a volume.
     bio_browser_contact_info_enabled: bool = True
+    # Gate professional (passo 4, §4.3): /info/ parte solo sui profili professional,
+    # letti dal payload GIA' scaricato -> zero richieste in piu' per decidere. Misurato
+    # su tre probe (44 casi): ogni profilo con un contatto reale era professional, zero
+    # persi; risparmio atteso ~34% delle chiamate. ON di default (e' lo scopo del
+    # passo 4). Spegnerlo se sul campo si vedessero contatti persi: la raccolta
+    # contatti resta accesa, cade solo la selezione.
+    bio_browser_professional_gate_enabled: bool = True
     # Breaker soft-block sul canale browser (mirror del guard consecutivi del path API):
     # dopo N mini-sessioni CONSECUTIVE di UN account chiuse in soft-block (429), invece
     # di ritentare all'infinito ogni 15-30min, la campagna va in pausa e l'operatore

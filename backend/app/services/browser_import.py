@@ -135,7 +135,10 @@ async def resolve_and_store_bio_browser(row, campaign, db, browser_session) -> t
 
     # Arricchimento contatti business via /info/ in-page (identico a fetch_and_store_bio_browser):
     # web_profile_info torna business_email=null, i contatti veri stanno su /api/v1/users/{pk}/info/.
-    if contatti_richiesti(campaign):
+    # `user` e' il payload GIA' scaricato: il gate professional decide da li', senza
+    # aggiungere richieste (spec §4.9: sul percorso import il gate e' il secondo punto
+    # di chiamata di /info/ e vale allo stesso modo).
+    if contatti_richiesti(campaign, user):
         info = await _fetch_public_contact_inpage(raw_page, shim.pk)
         if isinstance(info, dict) and info.get("__rate_limited"):
             return "soft_block", Exception(f"/info/ HTTP {info['__rate_limited']}")

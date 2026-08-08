@@ -86,6 +86,26 @@ def _conta_ripiego(username: str) -> None:
         f"esplicita di web_profile_info (ripieghi in questo processo: {_ripieghi_espliciti})"
     )
 
+
+# Chiamate a /info/ risparmiate dal gate professional. E' il numero che dice se il
+# gate sta lavorando: se resta a zero su una lista lunga, il segnale non arriva.
+_gate_risparmi = 0
+
+
+def contatore_gate() -> int:
+    """Chiamate /info/ evitate dal gate professional in questo processo."""
+    return _gate_risparmi
+
+
+def reset_contatore_gate() -> None:
+    global _gate_risparmi
+    _gate_risparmi = 0
+
+
+def _conta_gate() -> None:
+    global _gate_risparmi
+    _gate_risparmi += 1
+
 # Backstop iterazioni per mini-sessione: `cap` conta solo gli outcome 'done'. Un pool
 # di pending prevalentemente private/not_found/error potrebbe non raggiungere mai
 # `cap` pur richiedendo moltissime iterazioni (ognuna con un human_profile_pause di
@@ -377,22 +397,63 @@ async def _fetch_public_contact_inpage(raw_page, pk) -> dict | None:
         return None
 
 
-def contatti_richiesti(campaign) -> bool:
-    """True se questa campagna vuole email/telefono, cioe' se `/info/` puo' partire.
+def profilo_professional(profilo) -> bool | None:
+    """True / False / None (nessun segnale leggibile) dal payload GIA' scaricato.
 
-    Due condizioni in AND:
+    Zero richieste in piu' per decidere: e' la ragione per cui il gate non e'
+    circolare. Regola misurata su tre probe (44 casi, 07/08): ogni profilo che ha
+    reso un contatto reale era marcato professional.
+
+    Si guardano TRE campi e non solo `is_professional_account` perche' quel flag e'
+    affidabile in `web_profile_info` ma e' SEMPRE null nella GraphQL, che dal passo 4
+    e' la sorgente primaria: la' il segnale sta su `account_type` / `is_business`.
+
+    I positivi vengono valutati prima dei negativi (stesso ordine del probe), e
+    qualunque forma inattesa cade su None -- che il chiamante tratta come "procedi".
+    Un tipo strano (`account_type` stringa) quindi NON chiude il gate: fallire da
+    questo lato costa footprint, dall'altro costa un contatto che non si recupera."""
+    if not isinstance(profilo, dict):
+        return None
+    if profilo.get("is_professional_account") is True:
+        return True
+    if profilo.get("account_type") in (2, 3):
+        return True
+    if profilo.get("is_business") is True:
+        return True
+    if (profilo.get("is_professional_account") is False
+            or profilo.get("account_type") == 1
+            or profilo.get("is_business") is False):
+        return False
+    return None
+
+
+def contatti_richiesti(campaign, profilo=None) -> bool:
+    """True se `/info/` puo' partire per QUESTO profilo di QUESTA campagna.
+
+    Tre condizioni in AND:
       - l'interruttore globale e' acceso (kill-switch operativo, vince su tutto);
-      - il livello della campagna e' 'contacts'.
+      - il livello della campagna e' 'contacts';
+      - il profilo non e' esplicitamente non-professional (gate, §4.3 dello spec).
+
+    `/info/` e' l'unica richiesta del canale browser che nessuna pagina web produce
+    in nessuna condizione: non si puo' rendere invisibile, solo fare meno spesso.
 
     Difensivo sulla retrocompatibilita': una campagna senza il campo si comporta
     come prima dell'introduzione dei livelli (chiama /info/), altrimenti la
     migrazione spegnerebbe in silenzio la raccolta contatti su campagne che la
-    volevano."""
+    volevano. `profilo` None => gate non applicabile => si procede."""
     from app.models.campaign import ENRICHMENT_CONTACTS
     if not settings.bio_browser_contact_info_enabled:
         return False
     livello = getattr(campaign, "enrichment_level", None)
-    return livello is None or livello == ENRICHMENT_CONTACTS
+    if not (livello is None or livello == ENRICHMENT_CONTACTS):
+        return False
+    if not settings.bio_browser_professional_gate_enabled:
+        return True
+    if profilo_professional(profilo) is False:
+        _conta_gate()
+        return False
+    return True
 
 
 async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -> tuple[str, Exception | None]:
@@ -437,7 +498,9 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     # (business_email=null). Li prendiamo da /api/v1/users/{pk}/info/ (public_email/
     # public_phone_number) con un in-page fetch web-autenticato. Senza questo, il
     # motore browser perde ~95% delle email (verificato sul campo il 08/07).
-    if contatti_richiesti(campaign):
+    # `user` e' il payload GIA' scaricato: serve al gate professional, che decide
+    # senza aggiungere nessuna richiesta.
+    if contatti_richiesti(campaign, user):
         info = await _fetch_public_contact_inpage(raw_page, shim.pk)
         if isinstance(info, dict) and info.get("__rate_limited"):
             # /info/ rate-limitato: NON ingoiare (era il bug INFO-1/PR-01). Propaga
