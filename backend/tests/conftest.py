@@ -123,6 +123,28 @@ def _no_real_telegram(monkeypatch):
     monkeypatch.setattr(notifier, "_telegram_enabled", lambda: False)
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _kill_switch_wa_pulito():
+    """Rimette il kill-switch WhatsApp a 'non fermo' dopo ogni test.
+
+    `wa_halted` vive su una riga singleton committata: a differenza di tutto
+    il resto, il rollback di `db_session` non lo tocca. Un test che ferma il
+    canale davvero -- POST /wa/ops/halt, o il circuit breaker opt-out da
+    quando committa -- lo lascia fermo per OGNI test successivo, in
+    qualunque file: le guardie leggono `is_wa_halted()` e si comportano da
+    canale spento, producendo rossi che non c'entrano nulla col test che li
+    riporta.
+
+    Il costo e' una SELECT per test, e la scrittura solo nei pochi casi in
+    cui il canale e' rimasto fermo davvero.
+    """
+    yield
+    from app.services import bot_state_service
+
+    if await bot_state_service.is_wa_halted():
+        await bot_state_service.resume_wa(by="test-teardown")
+
+
 @pytest_asyncio.fixture
 async def db_session():
     """Sessione su SQLite di test, con rollback a fine test: nessun test

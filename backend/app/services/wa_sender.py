@@ -314,6 +314,43 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
         await _incrementa_fallimento(db, cc, apertura.motivo)
         return EsitoInvio("queued", apertura.motivo, arma_fm2=False)
 
+    # --- idempotenza: questo step e' gia' stato mandato? -------------------
+    # Fra send_text e _avanza_contatto ci sono cinque commit: se uno solleva
+    # (il blip del pooler :6543 e' l'incidente noto), il worker fa rollback e
+    # il contatto resta queued con next_action_at nel passato -- quindi viene
+    # ripreso PER PRIMO, e ~110 s dopo lo stesso testo ripartirebbe allo
+    # stesso numero. E' l'unico danno del canale che il destinatario vede.
+    #
+    # 'sending' vale quanto 'sent': vuol dire "potrebbe essere gia' partito,
+    # lo stato reale e' ignoto", e in dubbio non si rimanda -- lo stesso
+    # principio che la recovery FM14 dichiara nel suo docstring. 'failed'
+    # invece e' un invio che NON e' partito (send_text ha sollevato prima di
+    # scrivere nel composer): quello non deve bloccare il tentativo dopo, o
+    # un errore transitorio brucerebbe il contatto per sempre.
+    #
+    # NOTA: qui la chiave e' la tripla (campagna, contatto, step). La query
+    # sotto (`gia_scritto`) somiglia ma non c'entra: guarda il solo contatto,
+    # ignora campagna e step, e alimenta la guardia reply -- non e' e non e'
+    # mai stata una difesa anti-doppione.
+    gia_registrato = await db.scalar(
+        select(WaMessage.status).where(
+            WaMessage.campaign_id == campaign.id,
+            WaMessage.contact_id == contact.id,
+            WaMessage.step_index == step.step_index,
+            WaMessage.status.in_((WaMessageStatus.sending, WaMessageStatus.sent)),
+        ).limit(1)
+    )
+    if gia_registrato is not None:
+        logger.error(
+            f"[WA] {masked}: esiste gia' un messaggio '{gia_registrato.value}' per "
+            f"questo step -- NON rimando. Il contatto va in skipped: se e' "
+            "'sending' lo stato reale dell'invio e' ignoto e va verificato a mano.")
+        await _marca_contatto(db, cc, WaContactStatus.skipped,
+                              errore=f"invio gia' registrato ({gia_registrato.value}) "
+                                     "per questo step: possibile guasto DB a invio "
+                                     "avvenuto, verificare se il messaggio e' arrivato")
+        return EsitoInvio("skipped", "invio_gia_registrato")
+
     # --- guardia pre-invio -------------------------------------------------
     gia_scritto = bool(await db.scalar(
         select(func.count(WaMessage.id)).where(
