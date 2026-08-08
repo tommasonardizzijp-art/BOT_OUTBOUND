@@ -31,8 +31,17 @@ def test_conteggio_non_parsabile_non_invia():
 @pytest.mark.parametrize("signal,atteso", [
     ("nessuna-cronologia:sezione-chat-vuota:nessuna-conversazione-esistente", "skipped"),
     ("nessuna-cronologia:nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione", "skipped"),
+    ("nessuna-cronologia:nessun-messaggio-nel-pannello", "skipped"),
 ])
 def test_chat_inesistente_e_colpa_del_contatto_non_nostra(signal, atteso):
+    """'nessun-messaggio-nel-pannello' e' qui, non piu' fra i guasti nostri
+    (drift SDD/contratto vs codice, sessione 08/08): SDD-whatsapp-channel.md
+    §guardia V2 e contratto-M2-M3.md §7 dicono da sempre che questo segnale
+    e' la guardia V2 (skipped/no_existing_chat), non un guasto nostro. Il
+    codice diceva l'opposto (round1 precedente l'aveva messo fra i guasti
+    nostri, vedi git blame): decisione di Tommaso, vincono i documenti.
+    Rete di sicurezza per non perdere il campanello d'allarme su un DOM
+    rotto proprio qui: test_worker.py::test_g_fm2_no_existing_chat_*."""
     esito = wa_sender.valuta_apertura(OpenResult(False, 1.0, signal))
     assert esito.puo_inviare is False
     assert esito.esito_contatto == atteso
@@ -44,20 +53,10 @@ def test_chat_inesistente_e_colpa_del_contatto_non_nostra(signal, atteso):
     "nessuna-cronologia:casella-ricerca-non-trovata",
     "nessuna-cronologia:ricerca-non-svuotata",
     "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio",
-    "nessuna-cronologia:nessun-messaggio-nel-pannello",
 ])
 def test_guasti_nostri_non_bruciano_il_contatto(signal):
     """Un selettore rotto non deve bruciare una lista (SDD 11): il contatto
-    resta queued, e' il NUMERO che si ferma.
-
-    'nessun-messaggio-nel-pannello' e' qui (decisione Tommaso round1,
-    escalation whole-branch review item (c)): il POM lo emette SOLO dopo
-    aver gia' trovato e cliccato una chat esistente nei risultati di
-    ricerca, quindi il segnale dice "nessun messaggio renderizzato in 5s"
-    (pannello lento, possibile su cronologie vecchie), non "la chat non
-    esiste". Un contatto gia' presente a DB e' evidenza che dovrebbe avere
-    storico vero (l'ingest di M2 l'ha validato) -- non si scarta per un
-    rendering lento."""
+    resta queued, e' il NUMERO che si ferma."""
     esito = wa_sender.valuta_apertura(OpenResult(False, 1.0, signal))
     assert esito.puo_inviare is False
     assert esito.esito_contatto is None      # nessuna transizione di stato
@@ -673,6 +672,39 @@ async def test_i35_chat_title_mai_salvato_come_numero(db_session, monkeypatch):
         contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
     await db_session.refresh(ctx["contact"])
     assert ctx["contact"].chat_title is None
+
+
+@pytest.mark.asyncio
+async def test_impara_chat_title_esclude_riga_te_stesso(db_session, monkeypatch):
+    """Bug trovato dal vivo 08/08: la riga 'messaggi a te stesso' e' inclusa
+    apposta nello scan (altri chiamanti la usano) ma il suo titolo e' il
+    nome del TITOLARE del numero mittente, non del contatto appena scritto.
+    Se resta in testa alla sidebar (es. pinnata), righe[0] la prendeva per
+    buona -- riprodotto 4/4 su un invio reale in un test manuale lo stesso
+    giorno. PASS = la riga is_yourself viene saltata, si impara la riga
+    successiva vera."""
+    from app.browser.whatsapp_page import ChatRow
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+
+    class _PomTeStesso(_PomInvio):
+        async def scan_chat_list(self):
+            return [
+                ChatRow(position=0, title="Tommaso Nardizzi", title_is_number=False,
+                        unread_count=0, preview="", last_is_outbound=True,
+                        outgoing_state="wds-ic-sent", muted=False, is_yourself=True),
+                ChatRow(position=1, title="James", title_is_number=False,
+                        unread_count=0, preview="", last_is_outbound=True,
+                        outgoing_state="wds-ic-sent", muted=False, is_yourself=False),
+            ]
+
+    pom = _PomTeStesso([])
+    await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    await db_session.refresh(ctx["contact"])
+    assert ctx["contact"].chat_title == "James"
 
 
 @pytest.mark.asyncio

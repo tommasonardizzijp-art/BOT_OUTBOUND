@@ -125,7 +125,7 @@ e in quali stati va mostrato il bottone.
 ### 3.1 G5 — la recovery all'avvio non deve declassare chi è già stato servito
 
 **Problema.** All'avvio, `recover_wa_sending_on_startup()`
-(`backend/app/services/wa_worker.py:765-811`) chiude i messaggi rimasti in `sending` come
+(`backend/app/workers/wa_worker.py:765-811`) chiude i messaggi rimasti in `sending` come
 `failed` e mette il contatto in `skipped`. L'`UPDATE` sul contatto (righe 794-797) **non
 filtra per lo stato attuale del contatto**: un contatto che ha lasciato un messaggio
 orfano ma è poi stato servito bene torna da `completed` (o `replied`) a `skipped`. Non
@@ -172,9 +172,30 @@ codice. Conseguenze, tutte volute:
 - i gradini maturati a vuoto **si azzerano da soli**: riaccendendo la rampa in futuro si
   riparte da 1. Nessuna mina lasciata indietro.
 
-**Da verificare nel piano**: dove viene invocata `advance_wa_warmup_if_needed()`. Il giro
-di verifica non l'ha trovata né nel worker né in `main.py`. Se non la chiama nessuno, la
-rampa è già inerte e l'unica azione che resta è `warmup_day = 0` sui numeri.
+**Verificato in Fase 2 — la premessa iniziale era sbagliata.** `advance_wa_warmup_if_needed()`
+**è chiamata in due punti**: `backend/app/main.py:52-53` (lifespan di boot, a ogni avvio del
+processo) e `backend/app/workers/task_queue.py:138-139` (dentro `daily_reset`, il cron
+giornaliero). La rampa **non è dormiente**, avanza davvero. La disattivazione via dati resta
+comunque corretta: la query di `advance_wa_warmup_if_needed` filtra già `warmup_day > 0`,
+quindi un numero a 0 ne resta fuori.
+
+**Buco scoperto in Fase 2, corretto nella stessa PR.** `POST /wa/numbers/{id}/riattiva`
+(`backend/app/api/wa_numbers.py:306`) rimette `warmup_day = 1`. È comportamento voluto e
+documentato (`contratto-M2-M3.md:66`: un numero fermo da settimane riparte dalla rampa, non
+dal cap a cui era arrivato) — ma **riaccendeva in silenzio una rampa spenta apposta**. La
+causa di fondo è che la colonna `warmup_day` porta due significati che si scrivono addosso: "a
+che gradino sono" e "la rampa è spenta". **Corretto** con un flag di configurazione
+`settings.wa_warmup_enabled` (default `True`, `backend/app/config.py`, nessuna migrazione) che
+`wa_number_manager.effective_wa_daily_cap()` e `advance_wa_warmup_if_needed()` controllano **in
+AND** con `warmup_day` (`backend/app/services/wa_number_manager.py`). `riattiva` continua a
+scrivere `warmup_day = 1` come prima, senza modifiche — con il flag a `false` quel valore resta
+ignorato. Scartata l'alternativa "far leggere a `riattiva` il valore 0 prima di
+sovrascriverlo": `warmup_day == 0` è ambiguo (può voler dire "mai partita" o "spenta apposta"),
+ed è esattamente il problema che un flag separato risolve. Test in
+`backend/tests/test_wa_number_manager.py` (cap ignora il gradino a flag `false`; `advance_wa_
+warmup_if_needed` non avanza nessun numero a flag `false`; flag `true` di default invariato) e
+`backend/tests/test_wa_api_numbers.py` (il caso end-to-end: rampa spenta col flag →
+`riattiva` → cap effettivo non limitato dal gradino).
 
 **Decisione futura, già presa, da non ri-discutere.** Quando la rampa verrà riaccesa,
 la politica è: **avanza solo nei giorni con almeno un invio reale, e decade di un gradino

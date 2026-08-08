@@ -339,6 +339,18 @@ class Settings(BaseSettings):
     # lista si trova un numero. Per cambiare la velocita' della rampa si
     # cambia QUESTA lista, non il passo qui sotto.
     wa_warmup_steps: str = "20,20,30,40,60,80,100"
+    # Interruttore globale della rampa (G4, 08/08): a False il gradino di
+    # warmup NON entra piu' nel min() di effective_wa_daily_cap() e
+    # advance_wa_warmup_if_needed() non avanza NESSUN numero, QUALUNQUE sia
+    # il valore di warmup_day sulla riga. Serve perche' warmup_day da solo
+    # e' ambiguo: 0 poteva voler dire "rampa mai partita" o "spenta apposta",
+    # e riattiva() (wa_numbers.py) scrive warmup_day=1 incondizionatamente
+    # ad ogni riattivazione (decisione precedente e tuttora valida: un
+    # numero sospeso non deve ripartire dal cap alto a cui era arrivato) --
+    # senza questo flag separato, riattivare un numero con la rampa spenta
+    # la riaccendeva in silenzio. Default True: chi non tocca questo flag
+    # vede lo stesso comportamento di sempre.
+    wa_warmup_enabled: bool = True
     # GRADINI DELLA LISTA QUI SOPRA AL GIORNO -- **NON** messaggi al giorno.
     # Deve restare 1: alzarlo significa SALTARE gradini, non mandare piu'
     # messaggi. Con 10 su una lista di 7 voci un numero nuovo passava da 20 a
@@ -348,7 +360,15 @@ class Settings(BaseSettings):
     # lungo. Il nome del campo dice "steps" apposta: era l'ambiguita' del nome
     # precedente ("per_day") ad aver prodotto l'errore.
     wa_warmup_advance_steps_per_day: int = 1
-    wa_send_delay_median_s: int = 90            # SDD 10.3
+    # Deciso con Tommaso 08/08 pomeriggio, sostituisce la proposta iniziale
+    # (mediana 90s, SDD 10.3 -- "proposta, da tarare sulla rampa M5"): a
+    # sigma invariata, mediana 15s tiene il tipico dentro 5-30s (coda
+    # lognormale, non un range uniforme -- vedi wa_timing.wa_send_delay_seconds,
+    # ogni tanto un delay piu' lungo di 30s o piu' corto di 5s e' voluto,
+    # e' la stessa firma non-piatta di prima con un centro piu' basso).
+    # SDD-whatsapp-channel.md §10.3 va allineato quando l'altra sessione in
+    # corso sugli stessi file la lascia libera (non toccato qui apposta).
+    wa_send_delay_median_s: int = 15
     wa_send_delay_sigma: float = 0.7            # SDD 10.3
     wa_session_min_msg: int = 8                 # SDD 10.3
     wa_session_max_msg: int = 15                # SDD 10.3
@@ -360,8 +380,12 @@ class Settings(BaseSettings):
     wa_active_hours: str = "09:00-20:00"
     # STIMATO, non misurato: finestra in cui la sincronizzazione post
     # riconnessione rende cieca la guardia (A9/FM16). Da rimisurare quando
-    # SYNC_INDICATOR sara' catalogato.
-    wa_resync_quarantine_min: int = 15
+    # SYNC_INDICATOR sara' catalogato. Abbassato da 15 a 2 (decisione
+    # Tommaso 08/08, dopo aver visto 15 min morti a ogni riavvio del
+    # browser nel collaudo dal vivo): resta una stima, non una misura --
+    # se la guardia mostra falsi "vuoto" dopo la riconnessione, il primo
+    # sospettato e' questo valore troppo basso, non un bug altrove.
+    wa_resync_quarantine_min: int = 2
     wa_guard_tail_n: int = 40                   # default del POM
     wa_guard_history_min: int = 80              # default del POM
     # Stesso valore di campaign_orchestrator.LOCK_TIMEOUT_MINUTES.

@@ -70,10 +70,23 @@ async def advance_wa_warmup_if_needed() -> None:
     - avanza SOLO i numeri 'active' (un WaNumber resta 'active' per tutta
       la rampa, non esiste un secondo stato da cui "uscire");
     - si ferma (no-op) quando warmup_day >= len(steps) invece di azzerare:
-      il warmup 'plateau-a' sull'ultimo gradino, non termina."""
+      il warmup 'plateau-a' sull'ultimo gradino, non termina.
+
+    G4 (flag, 08/08): se `settings.wa_warmup_enabled` e' False, la funzione
+    e' un no-op TOTALE -- nessun numero avanza, nessun warmup_advanced_date
+    viene toccato, QUALUNQUE sia warmup_day sulla riga. Stesso principio del
+    guard esistente sotto su `passo <= 0`, ma sul flag di prodotto invece
+    che sulla configurazione del passo: un flag spento durante un boot o un
+    giro di cron non deve avanzare la rampa "di nascosto" mentre e'
+    disattivata."""
     from sqlalchemy import select
     from app.database import AsyncSessionLocal
     from app.models.wa import WaNumber, WaNumberStatus
+
+    if not settings.wa_warmup_enabled:
+        logger.info("[WaWarmup] wa_warmup_enabled=False: rampa disattivata, "
+                    "nessun numero avanzato.")
+        return
 
     steps = _parse_wa_warmup_steps(settings.wa_warmup_steps)
     passo = settings.wa_warmup_advance_steps_per_day
@@ -128,13 +141,20 @@ async def advance_wa_warmup_if_needed() -> None:
 
 def effective_wa_daily_cap(number, campaign) -> int:
     """Minimo tra: daily_cap del numero (override admin), daily_limit della
-    campagna (se impostato), e il gradino di warmup (se warmup_day>0).
-    Nessuno di questi e' opzionale da solo -- e' la composizione ad
-    AND che conta (SDD 10.3)."""
+    campagna (se impostato), e il gradino di warmup (se warmup_day>0 E la
+    rampa e' abilitata). Nessuno di questi e' opzionale da solo -- e' la
+    composizione ad AND che conta (SDD 10.3).
+
+    G4 (flag, 08/08): `settings.wa_warmup_enabled=False` esclude il gradino
+    dal min() QUALUNQUE sia warmup_day sulla riga -- non solo quando vale 0.
+    Serve perche' warmup_day da solo e' ambiguo (0 = "mai partita" o "spenta
+    apposta"?) e riattiva() (wa_numbers.py) scrive warmup_day=1 ad ogni
+    riattivazione a prescindere: senza questo flag separato, riattivare un
+    numero con la rampa spenta la riaccendeva in silenzio."""
     candidates = [number.daily_cap]
     if getattr(campaign, "daily_limit", None) is not None:
         candidates.append(campaign.daily_limit)
-    if (number.warmup_day or 0) > 0:
+    if settings.wa_warmup_enabled and (number.warmup_day or 0) > 0:
         candidates.append(get_wa_warmup_cap(number.warmup_day))
     return max(0, min(candidates))
 

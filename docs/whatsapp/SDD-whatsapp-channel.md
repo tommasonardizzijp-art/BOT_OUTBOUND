@@ -250,7 +250,7 @@ MVP: solo vista admin → il tenant è un'etichetta di scoping dati, non un logi
 | `browser_profile` | str | path profilo Chromium persistente (convenzione `data/browser_profiles/wa_<id>`) |
 | `proxy_url` | str | proxy mobile assegnato (vincolo V9 applicato a livello applicativo: max 2 numeri per proxy, stesso tenant) |
 | `daily_cap` | int | cap messaggi/giorno per numero (default basso, modificabile a mano) |
-| `warmup_day` | int | riuso semantica IG: rampa graduale del cap |
+| `warmup_day` | int | riuso semantica IG: rampa graduale del cap. **Nota (08/08, G4)**: il gradino corrispondente conta nel cap effettivo solo se `settings.wa_warmup_enabled` (flag di configurazione, default `True`) è vero — `warmup_day` da solo non basta più a dire "rampa spenta", perché `riattiva()` lo riporta sempre a `1` a ogni riattivazione. Vedi §10.3. |
 | `sent_today` / `sent_date` | int / str | contatore date-aware (stesso pattern lazy-reset di `scrape_lookups_date`, migrazione 018) |
 | `session_checked_at` | ts | ultimo health-check sessione |
 | `notes` | text | |
@@ -521,7 +521,7 @@ cron/API      wa_sequence_engine     ARQ        wa_sender      WhatsAppWebPage  
 
 Punti fermi:
 - **Guardia opt-out/reply pre-invio (review 23/07) — la garanzia strutturale del canale.** A chat aperta, PRIMA del typing, il POM legge gli inbound successivi all'ultimo messaggio del bot (`wa_messages.sent_at` noto → il bot riconosce il proprio ultimo messaggio e legge da lì in giù). Budget fisso: messaggi già renderizzati all'apertura (~20-30) + max 1-2 scroll — costo stimato 1-2s per invio, **misura esplicita in PoC-2** (se molto più caro, rivedere strategia). Esiti: (a) STOP-like trovato → opt-out, salva il messaggio come prova (audit legale), niente invio; (b) risposta trovata → rivaluta la condizione dello step (un `if_no_reply` non parte, contatto → `replied`); (c) cronologia intermedia più lunga del budget → rinvio conservativo dello step (conversazione evidentemente attiva, il bot non si intromette). Con questa guardia uno STOP non è mai scavalcabile, anche tra campagne distanti mesi e anche se lo scan lista (§7.3) lo ha perso — lo scan resta solo come rete veloce durante le campagne attive.
-- **Guardia "chat esistente" (V2):** se all'apertura la chat non ha cronologia (contatto mai sentito), il contatto va in `skipped` con motivo `no_existing_chat` — il canale non crea conversazioni nuove. Questo è un check bloccante nel POM, non una convenzione.
+- **Guardia "chat esistente" (V2):** se all'apertura la chat non ha cronologia (contatto mai sentito), il contatto va in `skipped` con motivo `no_existing_chat` — il canale non crea conversazioni nuove. Questo è un check bloccante nel POM, non una convenzione. **Nota (08/08):** il codice aveva un drift qui, non lo schema — un round di lavoro precedente aveva classificato uno dei tre segnali del POM che alimentano questa guardia (`nessun-messaggio-nel-pannello`) come guasto nostro invece che come V2, facendolo armare FM2 invece di produrre `skipped`. Corretto, allineato allo schema qui sopra. Rete di sicurezza per non perdere il campanello d'allarme che quel drift comunque intercettava: vedi FM2 sotto, "contatore gemello".
 - **Cap in AND**: cap numero (warmup/daily) ∧ cap campagna ∧ finestra oraria ∧ kill-switch. Tutti con query live, non contatori stale (lezione IG).
 - **Worker short-lived**: mai sleep lunghi in-job; sessione finita → `Retry(defer)`; micro-yield se la sessione è lunga (lezione `job_timeout` della Fase Bio).
 - **Opt-out CTA**: se `optout_enabled`, la CTA è appesa al **primo** messaggio della sequenza (step 0), non a tutti.
@@ -771,6 +771,12 @@ I contatti sono caldi: chat esistenti, relazione reale col business. I vettori d
 | Frequency cap contatto | ≥ 14 giorni tra due campagne marketing | cross-campagna, per tenant |
 | Soglia allarme opt-out | > 5% opt-out su una campagna → pausa + review | KPI §15 |
 
+**Interruttore globale della rampa (08/08, decisione di prodotto G4).** `settings.wa_warmup_enabled` (default `True`, flag di configurazione — `.env`/env var, nessuna colonna a DB) decide se il gradino di warmup entra nel calcolo del cap effettivo. A `False`: `wa_number_manager.effective_wa_daily_cap()` ignora il gradino qualunque sia `warmup_day` sulla riga (il tetto resta il solo `daily_cap` del numero), e `advance_wa_warmup_if_needed()` non avanza nessun numero, qualunque sia il loro `warmup_day`.
+
+Perché non basta `warmup_day = 0`: `POST /wa/numbers/{id}/riattiva` (contratto §2.2) scrive `warmup_day = 1` **incondizionatamente** ad ogni riattivazione — comportamento voluto (un numero sospeso non deve ripartire dal cap alto a cui era arrivato) e non toccato da questa decisione. Prima del flag, un numero con `warmup_day = 0` (rampa "spenta" a mano) che passava per sospensione e riattivazione la riaccendeva in silenzio, perché la colonna non distingueva "rampa mai partita" da "rampa spenta apposta". Il flag risolve l'ambiguità spostando la decisione fuori dalla colonna: `riattiva` continua a scrivere `warmup_day = 1` esattamente come prima, ma quel valore resta innocuo finché `wa_warmup_enabled` è `False`.
+
+Script di supporto: `backend/scripts/wa_disable_warmup.py` (dry-run di default) azzera `warmup_day` sui numeri a scopo di igiene dei dati, ma stampa sempre un promemoria che la disattivazione robusta richiede ANCHE il flag — quella parte è configurazione di processo, fuori dalla portata di uno script sul DB.
+
 ---
 
 ## 11. Failure mode analysis
@@ -779,6 +785,7 @@ I contatti sono caldi: chat esistenti, relazione reale col business. I vettori d
 |---|---|---|---|---|
 | FM1 | Sessione WhatsApp Web scaduta / logout remoto | POM: assert sessione a inizio job; health-check cron | numero → `qr_required`; campagne del numero in pausa; alert Telegram | flusso QR §7.6 (cliente riscansiona); resume manuale |
 | FM2 | DOM cambiato → selettori rotti | Selettore chiave non trovato N volte consecutive su chat diverse | stop invii del numero (NON marcare i contatti failed: è colpa nostra); campagna → `error`; alert + screenshot diagnostico | fix selettori (manutenzione POM); ripartenza: i `queued` restano queued |
+| FM2-bis | DOM cambiato **sul selettore della guardia V2** (`nessun-messaggio-nel-pannello`, §7.2), mascherato da `skipped/no_existing_chat` (guasto del contatto, non del numero) | contatore gemello e separato da FM2, stessa mini-sessione: **5** `no_existing_chat` consecutivi su chat diverse (`wa_worker.MAX_NO_EXISTING_CHAT_CONSECUTIVI`); soglia più alta di FM2 perché il segnale singolo è ambiguo per costruzione (un pannello lento è un evento reale) | stesso trattamento di FM2 (stop numero, campagna `error`, alert dedicato); **i contatti restano `skipped`** (non tornano `queued`: la guardia V2 sul singolo contatto resta valida anche quando la sequenza arma l'escalation) | fix selettori; contatore azzerato **solo** da un invio riuscito nella stessa sessione, non da altri esiti di mezzo |
 | FM3 | Chat non trovata per numero (contatto non su WhatsApp / numero errato) | apertura chat fallisce in modo pulito (PoC-2 definisce il segnale) | contatto → `skipped` + `do_not_contact('invalid_number')`; catalogato per report cliente | nessuna (by design, decisione 4.4) |
 | FM4 | Chat trovata ma **senza cronologia** (contatto freddo infiltrato nel CSV) | guardia V2 nel POM | `skipped('no_existing_chat')`, nessun invio | il cliente rivede la lista |
 | FM5 | Invio non confermato (niente spunta / messaggio non in chat) | check post-invio best-effort | retry 1 volta nella stessa sessione; poi `failed` + retry backoff a sessione successiva | oltre soglia → `unreachable` |
