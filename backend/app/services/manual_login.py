@@ -39,6 +39,29 @@ ESSENTIAL_COOKIES = (
 
 
 async def manual_browser_login(account_id: str, username: str, proxy_url: str | None = None) -> dict:
+    """Thin wrapper: acquires the cross-process Redis profile lock (C.2) before
+    doing anything else, then delegates to `_manual_browser_login_impl` (the
+    original implementation, unchanged, just renamed).
+
+    This is the ONE browser-launch path in the codebase that does NOT go through
+    `context_manager.get_browser_context`/`BrowserSession` (it opens Patchright
+    directly — see module docstring). It's also the path with a human sitting in
+    front of the screen: opening a login window on a profile a campaign is
+    actively using is exactly the scenario that corrupts a profile, so it gets
+    the same lock as every other browser-launch path, not a lesser one.
+
+    Raises:
+        AccountBrowserBusy: the profile is already in use by another session, or
+            Redis didn't respond (fail-closed) — see app/browser/profile_lock.py.
+        TimeoutError / RuntimeError: see `_manual_browser_login_impl`.
+    """
+    from app.browser.profile_lock import held_with_renew
+
+    async with held_with_renew(account_id):
+        return await _manual_browser_login_impl(account_id, username, proxy_url)
+
+
+async def _manual_browser_login_impl(account_id: str, username: str, proxy_url: str | None = None) -> dict:
     """
     Opens a visible browser to instagram.com/accounts/login/.
     Waits for the user to complete login manually.

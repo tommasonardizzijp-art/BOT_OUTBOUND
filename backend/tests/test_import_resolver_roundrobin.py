@@ -131,7 +131,9 @@ class TestResolveImportsLoopRoundRobin:
         monkeypatch.setattr(ir, "AsyncSessionLocal", lambda: _FakeCtx(db))
         monkeypatch.setattr(ir, "is_halted", AsyncMock(return_value=False))
         monkeypatch.setattr(ir, "increment_scrape_lookup", AsyncMock())
-        monkeypatch.setattr(ir, "extract_contacts", lambda info: ContactData())
+        # includi_campi_dedicati e' un kwarg del call-site reale (passo 4, A.5): il
+        # loop non e' sotto test qui, quindi il fake lo accetta e lo ignora.
+        monkeypatch.setattr(ir, "extract_contacts", lambda info, includi_campi_dedicati=True: ContactData())
         monkeypatch.setattr(ir, "upsert_lead", AsyncMock())
         monkeypatch.setattr(ir.asyncio, "sleep", AsyncMock())
         monkeypatch.setattr(ir.ScrapingPool, "build", AsyncMock(return_value=pool))

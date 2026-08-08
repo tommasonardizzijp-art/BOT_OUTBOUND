@@ -101,7 +101,12 @@ class TestStoreFollowersRoundRobin:
         # stub delle dipendenze esterne
         monkeypatch.setattr(scraper, "is_halted", AsyncMock(return_value=False))
         monkeypatch.setattr(scraper, "increment_scrape_lookup", AsyncMock())
-        monkeypatch.setattr(scraper, "extract_contacts", lambda info: scraper.ContactData())
+        # includi_campi_dedicati e' un kwarg del call-site reale (passo 4, A.5): il
+        # round-robin non e' sotto test qui, quindi il fake lo accetta e lo ignora.
+        monkeypatch.setattr(
+            scraper, "extract_contacts",
+            lambda info, includi_campi_dedicati=True: scraper.ContactData(),
+        )
         monkeypatch.setattr(scraper, "upsert_lead", AsyncMock())
 
         stored = await scraper._store_followers_batch(shorts, camp, db, pool, "followers")

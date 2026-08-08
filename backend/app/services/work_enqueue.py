@@ -455,6 +455,67 @@ async def enqueue_resolve(campaign_id: str) -> bool:
         await redis.aclose()
 
 
+def organic_session_job_id(account_id: str) -> str:
+    return f"organic-session:{account_id}"
+
+
+async def enqueue_organic_session(account_id: str, username: str | None = None) -> bool:
+    """Accoda la sessione di navigazione organica (C.1, pulsante 'attivita organica')
+    per UN account. Job_id deterministico per account: e' quello che rende leggibile
+    lo stato dalla UI (Job(job_id, redis).status()) SENZA una tabella dedicata, e
+    quello che fa da guardia contro i click ripetuti.
+
+    A differenza di `_enqueue_resolve_with_redis`/`_reenqueue_phase` (che guardano
+    solo `arq:in-progress:`, perche' quei job si ri-accodano da un Retry(defer)
+    interno e non vengono mai ri-cliccati mentre sono solo 'queued'), qui si guarda
+    lo STATO COMPLETO via `Job.status()`: questo job puo' essere ri-cliccato
+    dall'utente in qualunque momento, quindi 'queued'/'deferred' contano come
+    occupato esattamente come 'in_progress' -- e' quello che garantisce "cinque
+    click di fila -> una sola sessione parte" anche PRIMA che un worker abbia
+    iniziato a consumare la coda (in-progress da solo non basterebbe: due job
+    identici potrebbero restare accodati fianco a fianco). La vera rete di
+    sicurezza cross-processo resta comunque il lock Redis sul profilo in
+    app/browser/profile_lock.py, che copre anche la collisione con percorsi che
+    non passano da QUESTO job_id (es. il pulsante manuale esistente o una
+    campagna DM sullo stesso account).
+
+    Solo se lo stato e' 'complete' (sessione precedente finita) o 'not_found'
+    (mai lanciata) si ripuliscono le chiavi residue — INCLUSA `arq:result:`, che
+    `_enqueue_resolve_with_redis` non tocca: `enqueue_job` rifiuta (ritorna None)
+    se esiste anche solo la result key di un run precedente, non solo la job key.
+    Senza questa pulizia un secondo click legittimo, ore dopo il primo, fallirebbe
+    silenziosamente finche' la result key non scade da sola."""
+    import arq
+    from arq.jobs import Job, JobStatus
+
+    job_id = organic_session_job_id(account_id)
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        job = Job(job_id, redis, _queue_name=ARQ_MAIN_QUEUE)
+        current_status = await job.status()
+        if current_status in (JobStatus.queued, JobStatus.deferred, JobStatus.in_progress):
+            logger.info(f"[Enqueue] {job_id} status={current_status.value} — skip (account occupato)")
+            return False
+
+        await redis.delete(f"arq:job:{job_id}", f"arq:retry:{job_id}", f"arq:result:{job_id}")
+        new_job = await redis.enqueue_job(
+            "run_organic_session_task",
+            account_id,
+            username,
+            _job_id=job_id,
+            _queue_name=ARQ_MAIN_QUEUE,
+        )
+        if new_job is None:
+            # Race stretta fra lo status() sopra e questo enqueue_job (nessuna
+            # transazione a cavallo dei due comandi) — trattala come "occupato",
+            # non come errore: qualcun altro ha vinto la corsa.
+            logger.info(f"[Enqueue] {job_id}: enqueue_job rifiutato (collisione job_id) — skip")
+            return False
+        return True
+    finally:
+        await redis.aclose()
+
+
 async def enqueue_lead_qualification(run_id: str) -> bool:
     """Enqueue a lead qualification batch run."""
     import arq

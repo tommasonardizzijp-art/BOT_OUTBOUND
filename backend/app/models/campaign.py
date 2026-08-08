@@ -42,12 +42,33 @@ def bio_done_status(current: "CampaignStatus") -> "CampaignStatus":
     )
 
 
-# Livello di arricchimento: decide SE si aprono i profili per raccogliere dati.
-# Ortogonale a `bio_engine`, che decide COME (instagrapi o browser).
+# Livello di arricchimento: decide quali RICHIESTE si fanno a Instagram, non se si
+# salvano i dati che arrivano gratis (decisione Tommaso, passo 4 A.5). Ortogonale a
+# `bio_engine`, che decide COME (instagrapi o browser) — i due motori pagano il
+# livello 'contacts' con richieste diverse, ma a parita' di livello raccolgono lo
+# STESSO tipo di dato:
 #   none     = nessuna visita dedicata. I dati arrivano solo dalla Fase Lista, piu'
 #              l'harvest passivo durante la visita che il DM fa comunque.
-#   bio      = visita dedicata, bio/follower/link. Nessuna chiamata ai contatti.
-#   contacts = come 'bio' + /info/ sui profili professional (email/telefono).
+#   bio      = visita dedicata: bio/follower/link, PIU' i contatti che si trovano
+#              gratis nel testo della bio (email/telefono via regex) o in un link
+#              whatsapp — non costano nessuna richiesta oltre alla bio stessa.
+#              Nessuna richiesta DEDICATA ai contatti.
+#              - canale BROWSER: qui si vede la differenza — /info/ non parte,
+#                quindi i campi business (public_email/public_phone_number) restano
+#                vuoti; solo il testo della bio puo' dare un contatto.
+#              - canale API: user_info_v1/fetch_profile_app_like porta SEMPRE quei
+#                campi business nello stesso payload della bio (zero richieste in
+#                piu' del browser a questo livello), ma a 'bio' NON si salvano —
+#                sono l'equivalente di cio' che sul browser costerebbe la richiesta
+#                dedicata. Si salva solo cio' che arriverebbe gratis anche li' (bio-
+#                testo, link, whatsapp). Vedi `extract_contacts(includi_campi_dedicati=)`
+#                in contact_extract.py.
+#   contacts = come 'bio' + i campi business dedicati (public_email/public_phone_number).
+#              - canale BROWSER: costano la richiesta /info/, quindi partono solo se
+#                il profilo e' anche professional (gate separato, vedi
+#                `contatti_richiesti` in browser_bio.py).
+#              - canale API: sono gia' nel payload; il livello decide solo se
+#                includerli (vedi `contatti_richiesti_dal_livello` sotto).
 ENRICHMENT_NONE = "none"
 ENRICHMENT_BIO = "bio"
 ENRICHMENT_CONTACTS = "contacts"
@@ -55,6 +76,39 @@ ENRICHMENT_LEVELS = (ENRICHMENT_NONE, ENRICHMENT_BIO, ENRICHMENT_CONTACTS)
 
 # Livelli che prevedono una visita dedicata al profilo (Fase Bio o risoluzione import).
 ENRICHMENT_WITH_VISIT = (ENRICHMENT_BIO, ENRICHMENT_CONTACTS)
+
+
+def contatti_richiesti_dal_livello(campaign) -> bool:
+    """True se il livello scelto in UI e' 'contacts'.
+
+    E' il pezzo comune ai due canali (valuta SOLO `enrichment_level == 'contacts'`,
+    nient'altro), ma i due canali lo usano in due modi diversi (passo 4, A.5 —
+    decisione Tommaso: il livello governa le RICHIESTE, non i dati gia' arrivati
+    gratis):
+      - canale BROWSER: se False blocca la richiesta `/info/` (combinata con
+        kill-switch operativo + gate professional, vedi `contatti_richiesti` in
+        browser_bio.py) — a livello 'bio' quella richiesta non parte, quindi i
+        campi business restano vuoti e basta.
+      - canale API: i campi business sono GIA' nel payload scaricato per la bio
+        (zero richieste in piu'), quindi qui il risultato diventa il flag
+        `includi_campi_dedicati` di `extract_contacts()` — se False quei DUE campi
+        (public_email, public_phone_number/contact_phone_number) non si salvano,
+        ma tutto il resto (bio-testo, link, whatsapp) si salva comunque: e' dato
+        gratuito, non e' governato dal livello.
+
+    Retrocompatibilita': campo assente o None => procede (comportamento pre-livelli).
+    Questo ramo NON e' raggiungibile da una vera riga Campaign: la colonna e'
+    `NOT NULL` con `server_default='none'` (migration 029), quindi ogni riga nel DB
+    ha sempre un valore concreto ('none'/'bio'/'contacts'), mai None — un
+    `Campaign(enrichment_level=None)` diventa 'none' gia' al commit (default
+    Python-side di SQLAlchemy che scatta su qualunque None, esplicito o no). Il
+    ramo serve solo per oggetti costruiti in memoria (test, SimpleNamespace, o
+    payload che non passano dal modello ORM): non toglierlo pensando sia morto,
+    e non contarci per la retrocompatibilita' di righe DB reali — quella la
+    garantisce gia' il default della colonna.
+    """
+    livello = getattr(campaign, "enrichment_level", None)
+    return livello is None or livello == ENRICHMENT_CONTACTS
 
 
 class Campaign(Base):

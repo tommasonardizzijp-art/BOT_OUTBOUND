@@ -6,13 +6,19 @@ web-born su device sintetico -> firma da automazione (vedi memory
 molto piu' tollerato: la richiesta ai dati profilo viaggia dentro una sessione
 Chromium legittima (cookie reali, header, TLS, referer della navigazione).
 
-Come funziona (correzione al modello "nessuna chiamata API"): Instagram web e' una
-SPA React. Navigando su /<username>/ i dati profilo arrivano comunque da una
-chiamata interna `web_profile_info` (o embedded nell'HTML) — la fa il JS di IG, non
-noi. Noi la INTERCETTIAMO passivamente (nessuna chiamata extra); solo se non la
-cogliamo entro il timeout facciamo un fetch in-page (dentro il contesto della
-pagina, con x-ig-app-id come l'app). Niente API instagrapi -> NON consuma il cap
-scrape_daily_limit.
+Come funziona: Instagram web e' una SPA React. Navigando su /<username>/ i dati
+profilo arrivano comunque da chiamate interne che fa il JS di IG, non noi, e che
+noi INTERCETTIAMO passivamente (nessuna richiesta aggiunta). Niente API instagrapi
+-> NON consuma il cap scrape_daily_limit.
+
+QUALE sorgente passiva (passo 4, misurato — la v1 aveva l'ordine sbagliato): la
+sorgente e' la query GraphQL `PolarisProfilePageContentQuery`, disponibile 65/65 e
+senza campi mancanti. `web_profile_info` NON e' mai stato colto passivamente
+(0/65): attenderlo significava consumare l'attesa intera e poi fare una fetch
+in-page, cioe' UNA RICHIESTA ATTRIBUIBILE PER PROFILO che la pagina non avrebbe
+fatto. Ora la fetch esplicita e' solo il ripiego, ed e' contata
+(`contatore_ripieghi`) perche' una regressione la rimetterebbe in mezzo in
+silenzio. Vedi lo spec dei livelli di arricchimento §3 e §4.5.
 
 Anti-divergenza: i campi del JSON web sono mappati su uno shim con gli STESSI nomi
 attributo dell'oggetto instagrapi, poi passati allo stesso `extract_contacts` e
@@ -22,6 +28,7 @@ import asyncio
 import json as _json
 import random
 import time
+import weakref
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -32,6 +39,7 @@ from sqlalchemy import update
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.follower import FollowerStatus
+from app.services import account_manager
 from app.services.bot_state_service import is_halted
 from app.services.scrape_bios import bio_should_continue, pick_session_cap
 from app.services.work_enqueue import arq_redis_settings, ARQ_MAIN_QUEUE
@@ -46,12 +54,59 @@ WEB_APP_ID = "936619743392459"
 _WEB_PROFILE_PATH = "/api/v1/users/web_profile_info/"
 
 # Endpoint interno del client web IG: il browser lo chiama da solo navigando il
-# profilo (query `PolarisProfilePageContentQuery`). Lo INTERCETTIAMO passivamente
-# come fallback quando web_profile_info fallisce col bug 400 "asset ...subvertical
-# deleted". VIETATO fare fetch attivo di questo endpoint (replicherebbe fb_dtsg/
-# lsd/doc_id = pattern anomalo + fragile): solo lettura passiva. Vedi
+# profilo (query `PolarisProfilePageContentQuery`). Lo INTERCETTIAMO passivamente.
+# Dal passo 4 e' la sorgente PRIMARIA, non piu' il ripiego: misurato disponibile
+# 65/65 e senza campi mancanti, mentre web_profile_info non e' mai stato colto
+# passivamente (0/65). VIETATO fare fetch attivo di questo endpoint (replicherebbe
+# fb_dtsg/lsd/doc_id = pattern anomalo + fragile): solo lettura passiva. Vedi
 # docs/audits/GRAPHQL_FALLBACK_BIO_BROWSER.md.
 _GRAPHQL_PATH = "/api/graphql"
+
+# Quante volte in questo processo si e' dovuto CHIEDERE web_profile_info invece di
+# leggere una sorgente passiva. Dopo l'inversione deve restare a zero o quasi: se
+# cresce, una regressione ha rimesso una richiesta attribuibile per profilo. Non
+# persistito: e' un termometro di processo, non un dato di dominio.
+_ripieghi_espliciti = 0
+
+
+def contatore_ripieghi() -> int:
+    """Numero di fetch esplicite di web_profile_info fatte da questo processo."""
+    return _ripieghi_espliciti
+
+
+def reset_contatore_ripieghi() -> None:
+    """Azzera il contatore (usato dai test; in produzione non serve chiamarla)."""
+    global _ripieghi_espliciti
+    _ripieghi_espliciti = 0
+
+
+def _conta_ripiego(username: str) -> None:
+    global _ripieghi_espliciti
+    _ripieghi_espliciti += 1
+    logger.warning(
+        f"[BioBrowser] @{username}: nessuna sorgente passiva entro l'attesa -> fetch "
+        f"esplicita di web_profile_info (ripieghi in questo processo: {_ripieghi_espliciti})"
+    )
+
+
+# Chiamate a /info/ risparmiate dal gate professional. E' il numero che dice se il
+# gate sta lavorando: se resta a zero su una lista lunga, il segnale non arriva.
+_gate_risparmi = 0
+
+
+def contatore_gate() -> int:
+    """Chiamate /info/ evitate dal gate professional in questo processo."""
+    return _gate_risparmi
+
+
+def reset_contatore_gate() -> None:
+    global _gate_risparmi
+    _gate_risparmi = 0
+
+
+def _conta_gate() -> None:
+    global _gate_risparmi
+    _gate_risparmi += 1
 
 # Backstop iterazioni per mini-sessione: `cap` conta solo gli outcome 'done'. Un pool
 # di pending prevalentemente private/not_found/error potrebbe non raggiungere mai
@@ -84,6 +139,15 @@ def web_user_to_shim(user: dict) -> SimpleNamespace:
         if isinstance(bl, dict) and bl.get("url"):
             bio_links.append({"url": bl.get("url"), "title": bl.get("title") or bl.get("link_type")})
 
+    # Conteggio post (task B.2): il web_profile_info nativo lo espone qui.
+    # Nella forma GraphQL normalizzata (graphql_user_to_web_shape) il campo e'
+    # QUASI SEMPRE ASSENTE (verificato sul payload reale osservato in audit,
+    # vedi test_graphql_fallback_mapping.py: PolarisProfilePageContentQuery
+    # non porta un conteggio media) -- _to_int(None) ritorna None in quel
+    # caso, che e' il segnale corretto per "non disponibile, ripiega sul DOM"
+    # in maybe_micro_scroll.
+    media = user.get("edge_owner_to_timeline_media") or {}
+
     return SimpleNamespace(
         pk=user.get("id"),
         username=user.get("username"),
@@ -93,6 +157,7 @@ def web_user_to_shim(user: dict) -> SimpleNamespace:
         is_private=bool(user.get("is_private", False)),
         follower_count=_to_int(followed_by.get("count")),
         following_count=_to_int(follows.get("count")),
+        media_count=_to_int(media.get("count")),
         external_url=user.get("external_url"),
         # Campi business: il web li espone come business_email/business_phone_number.
         public_email=user.get("business_email"),
@@ -115,6 +180,13 @@ def graphql_user_to_web_shape(gql_user: dict) -> dict:
       - following_count -> edge_follow.count
     Gli altri campi (username, full_name, biography, is_private, is_verified,
     external_url, bio_links) hanno gia' gli stessi nomi e passano invariati.
+    NON esiste un delta per il conteggio post: verificato sul payload reale
+    (audit 2026-07-29, vedi test_graphql_fallback_mapping.py) che
+    `PolarisProfilePageContentQuery` non porta NESSUN campo media/post-count
+    -- restera' assente dopo `dict(g)` (nessuna chiave da normalizzare), e
+    `web_user_to_shim` lo legge come `media_count=None`. E' il comportamento
+    voluto: per il grosso dei profili (sorgente passiva GraphQL, 65/65) il
+    segnale primario di maybe_micro_scroll non c'e', si ripiega sul DOM.
     Pura e testabile: nessun IO. Robusta a chiavi mancanti/None.
     """
     g = gql_user or {}
@@ -125,22 +197,31 @@ def graphql_user_to_web_shape(gql_user: dict) -> dict:
     return shaped
 
 
-async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 8.0) -> dict | None:
-    """Naviga al profilo e cattura il JSON di web_profile_info.
+async def _capture_web_profile_info(
+    raw_page, username: str, timeout_s: float | None = None
+) -> dict | None:
+    """Naviga al profilo e ottiene i dati profilo nella forma di web_profile_info.
 
-    Strategia (dalla piu' "umana" alla piu' esplicita):
-      1. Listener passivo sulle response: se il JS di IG spara web_profile_info lo
-         intercettiamo (nessuna chiamata extra). In PARALLELO ascoltiamo anche le
-         response /api/graphql (PolarisProfilePageContentQuery), che il browser
-         genera comunque, come FALLBACK.
-      2. Se non colto entro timeout, fetch IN-PAGE di web_profile_info (cookie
-         reali, x-ig-app-id web).
-      3. FALLBACK: se web_profile_info fallisce con un errore NON-rate-limit
+    ORDINE DELLE SORGENTI (passo 4 — invertito rispetto alla v1):
+      1. **Sorgenti passive**, entrambe a costo zero, ascoltate in parallelo mentre
+         la pagina carica: la GraphQL che il JS di IG spara da se' (misurata
+         disponibile 65/65) e web_profile_info (misurata 0/65: praticamente mai).
+         Si esce APPENA una delle due e' pronta — l'attesa e' guidata dall'arrivo,
+         non dal timeout. A parita', web_profile_info vince: stesso costo ma piu'
+         ricco, espone `is_professional_account` in modo affidabile mentre nel
+         GraphQL e' sempre null (serve al gate professional).
+      2. **Ripiego esplicito**: fetch IN-PAGE di web_profile_info (cookie reali,
+         x-ig-app-id web) solo se nessuna sorgente passiva e' arrivata entro
+         `timeout_s`. NON e' invisibile — dove la pagina fa una richiesta dati,
+         questa ne fa due — quindi viene CONTATA (`contatore_ripieghi`).
+      3. **Ultima spiaggia**: se la fetch fallisce con un errore NON-rate-limit
          (tipicamente il bug 400 "asset ...subvertical deleted" su certi account
-         business) oppure non da' dati, e durante la navigazione abbiamo catturato
-         passivamente una risposta GraphQL del profilo giusto, la normalizziamo
-         nella forma di web_profile_info e la usiamo. NON facciamo MAI un fetch
-         attivo di /api/graphql (solo lettura passiva).
+         business) e nel frattempo e' arrivata una GraphQL del profilo giusto, la
+         normalizziamo e la usiamo. NON facciamo MAI un fetch attivo di
+         /api/graphql (solo lettura passiva).
+
+    `timeout_s` None => `settings.bio_browser_source_wait_s`. Non abbassarlo a
+    pochi secondi: la GraphQL arriva a mediana ~4s, con 2s le catture sono zero.
 
     Ritorna il dict `data.user` (forma web_profile_info, eventualmente da GraphQL
     gia' normalizzata), oppure {"__status": st} su fail rate-limit, oppure
@@ -148,10 +229,23 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
     (scraping_warning/challenge/checkpoint/suspended), oppure None.
     Non solleva su errori di parsing.
     """
+    if timeout_s is None:
+        timeout_s = settings.bio_browser_source_wait_s
     captured: dict = {}
 
     async def _on_response(resp):
         try:
+            # Rate-limit/soft-block visto PASSIVAMENTE. Va catturato e ha priorita'
+            # sui dati: prima dell'inversione il 429 lo scoprivamo solo perche' la
+            # fetch esplicita lo riceveva in faccia, e non mascherarlo era
+            # un'invariante dichiarata. Senza piu' fetch quel segnale sparirebbe.
+            # Cosi' e' anche meglio di prima: vediamo il throttle che IG serve al
+            # SUO stesso codice, che la vecchia strada non poteva vedere.
+            if resp.status in (429, 401, 403) and (
+                _WEB_PROFILE_PATH in resp.url or _GRAPHQL_PATH in resp.url
+            ):
+                captured.setdefault("blocco_passivo", resp.status)
+                return
             if _WEB_PROFILE_PATH in resp.url and resp.status == 200:
                 body = await resp.json()
                 u = (((body or {}).get("data") or {}).get("user"))
@@ -171,11 +265,11 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
         except Exception:
             pass  # response non-JSON o gia' consumata: ignora
 
-    def _graphql_fallback():
+    def _graphql_fallback(motivo: str = "web_profile_info non utilizzabile"):
         """Ritorna il user GraphQL normalizzato se catturato, altrimenti None."""
         g = captured.get("graphql_user")
         if g:
-            logger.info(f"[BioBrowser] @{username}: uso fallback GraphQL passivo (web_profile_info non utilizzabile)")
+            logger.info(f"[BioBrowser] @{username}: uso GraphQL passivo ({motivo})")
             return graphql_user_to_web_shape(g)
         return None
 
@@ -192,16 +286,40 @@ async def _capture_web_profile_info(raw_page, username: str, timeout_s: float = 
             logger.error(f"[BioBrowser] @{username}: interstiziale IG '{blocco}' ({raw_page.url})")
             return {"__blocked": blocco}
 
-        # Attendi l'intercettazione passiva (polling breve).
+        # Attesa guidata dall'ARRIVO, non dal timeout: si esce appena UNA delle due
+        # sorgenti passive e' pronta. Prima dell'inversione si attendeva solo
+        # web_profile_info, che sul campo non arriva mai (0/65): otto secondi buttati
+        # e poi una fetch esplicita per ogni profilo. Passo 0,1s (non 0,4) per non
+        # regalare fino a mezzo secondo dopo che il dato e' gia' in mano.
         waited = 0.0
-        while waited < timeout_s and "user" not in captured:
-            await asyncio.sleep(0.4)
-            waited += 0.4
+        while waited < timeout_s and not (
+            "user" in captured or "graphql_user" in captured or "blocco_passivo" in captured
+        ):
+            await asyncio.sleep(0.1)
+            waited += 0.1
 
+        # PRIORITA', decisa esplicitamente: i dati passivi, se ci sono, si usano.
+        # Sono gia' in mano e non sono costati nessuna richiesta -- rifiutarli non
+        # protegge da niente e perde il lead. Il 429 passivo serve a decidere di NON
+        # chiedere (sotto), non a buttare dati gratuiti.
         if "user" in captured:
             return captured["user"]
+        gql_passivo = _graphql_fallback("sorgente primaria, nessuna richiesta aggiunta")
+        if gql_passivo is not None:
+            return gql_passivo
 
-        # Fallback esplicito: fetch in-page di web_profile_info.
+        # Niente dati passivi. Se abbiamo visto un throttle, NON si chiede: insistere
+        # da dentro un rate-limit e' esattamente il modo di trasformarlo in blocco.
+        st_passivo = captured.get("blocco_passivo")
+        if st_passivo:
+            logger.warning(
+                f"[BioBrowser] @{username}: HTTP {st_passivo} visto passivamente e nessun "
+                f"dato -> soft-block, nessuna richiesta aggiunta"
+            )
+            return {"__status": st_passivo}
+
+        # Nessuna sorgente passiva entro l'attesa: ripiego esplicito, contato.
+        _conta_ripiego(username)
         try:
             result = await raw_page.evaluate(
                 """async (args) => {
@@ -298,22 +416,64 @@ async def _fetch_public_contact_inpage(raw_page, pk) -> dict | None:
         return None
 
 
-def contatti_richiesti(campaign) -> bool:
-    """True se questa campagna vuole email/telefono, cioe' se `/info/` puo' partire.
+def profilo_professional(profilo) -> bool | None:
+    """True / False / None (nessun segnale leggibile) dal payload GIA' scaricato.
 
-    Due condizioni in AND:
-      - l'interruttore globale e' acceso (kill-switch operativo, vince su tutto);
-      - il livello della campagna e' 'contacts'.
+    Zero richieste in piu' per decidere: e' la ragione per cui il gate non e'
+    circolare. Regola misurata su tre probe (44 casi, 07/08): ogni profilo che ha
+    reso un contatto reale era marcato professional.
+
+    Si guardano TRE campi e non solo `is_professional_account` perche' quel flag e'
+    affidabile in `web_profile_info` ma e' SEMPRE null nella GraphQL, che dal passo 4
+    e' la sorgente primaria: la' il segnale sta su `account_type` / `is_business`.
+
+    I positivi vengono valutati prima dei negativi (stesso ordine del probe), e
+    qualunque forma inattesa cade su None -- che il chiamante tratta come "procedi".
+    Un tipo strano (`account_type` stringa) quindi NON chiude il gate: fallire da
+    questo lato costa footprint, dall'altro costa un contatto che non si recupera."""
+    if not isinstance(profilo, dict):
+        return None
+    if profilo.get("is_professional_account") is True:
+        return True
+    if profilo.get("account_type") in (2, 3):
+        return True
+    if profilo.get("is_business") is True:
+        return True
+    if (profilo.get("is_professional_account") is False
+            or profilo.get("account_type") == 1
+            or profilo.get("is_business") is False):
+        return False
+    return None
+
+
+def contatti_richiesti(campaign, profilo=None) -> bool:
+    """True se `/info/` puo' partire per QUESTO profilo di QUESTA campagna.
+
+    Tre condizioni in AND, e sono TUTTE necessarie solo qui (canale browser),
+    perche' `/info/` e' una richiesta reale che nessuna pagina web produce mai:
+      - l'interruttore globale e' acceso (kill-switch operativo, vince su tutto) —
+        e' un interruttore del canale browser, non tocca il ramo API;
+      - il livello della campagna e' 'contacts' (`contatti_richiesti_dal_livello`,
+        condivisa col ramo API — vedi il suo docstring per la differenza);
+      - il profilo non e' esplicitamente non-professional (gate, §4.3 dello spec) —
+        esiste solo per evitare QUESTA richiesta, quindi non si applica al ramo API
+        dove i contatti arrivano gia' col payload della bio.
 
     Difensivo sulla retrocompatibilita': una campagna senza il campo si comporta
     come prima dell'introduzione dei livelli (chiama /info/), altrimenti la
     migrazione spegnerebbe in silenzio la raccolta contatti su campagne che la
-    volevano."""
-    from app.models.campaign import ENRICHMENT_CONTACTS
+    volevano. `profilo` None => gate non applicabile => si procede."""
+    from app.models.campaign import contatti_richiesti_dal_livello
     if not settings.bio_browser_contact_info_enabled:
         return False
-    livello = getattr(campaign, "enrichment_level", None)
-    return livello is None or livello == ENRICHMENT_CONTACTS
+    if not contatti_richiesti_dal_livello(campaign):
+        return False
+    if not settings.bio_browser_professional_gate_enabled:
+        return True
+    if profilo_professional(profilo) is False:
+        _conta_gate()
+        return False
+    return True
 
 
 async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -> tuple[str, Exception | None]:
@@ -358,7 +518,9 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     # (business_email=null). Li prendiamo da /api/v1/users/{pk}/info/ (public_email/
     # public_phone_number) con un in-page fetch web-autenticato. Senza questo, il
     # motore browser perde ~95% delle email (verificato sul campo il 08/07).
-    if contatti_richiesti(campaign):
+    # `user` e' il payload GIA' scaricato: serve al gate professional, che decide
+    # senza aggiungere nessuna richiesta.
+    if contatti_richiesti(campaign, user):
         info = await _fetch_public_contact_inpage(raw_page, shim.pk)
         if isinstance(info, dict) and info.get("__rate_limited"):
             # /info/ rate-limitato: NON ingoiare (era il bug INFO-1/PR-01). Propaga
@@ -383,6 +545,14 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     follower.is_private = bool(shim.is_private)
     follower.follower_count = shim.follower_count
     follower.following_count = shim.following_count
+    # Attributo Python ad-hoc, NON una colonna mappata: nessuna migration,
+    # nessun impatto sul commit/flush sotto. Serve solo a passare il
+    # conteggio post GIA' scaricato fino a maybe_micro_scroll (task B.2)
+    # senza cambiare la firma/arieta' del return di questa funzione (che ha
+    # ~20 call site di test con fake_fetch a 2-tuple). Letto dal chiamante
+    # con lo stesso pattern sicuro di `follower.is_private` piu' sotto: solo
+    # nel ramo outcome == 'done', dopo il commit riuscito.
+    follower._scraped_post_count = shim.media_count
     ext = shim.external_url
     follower.external_url = contacts.external_url or (str(ext) if ext else None)
     follower.phone = contacts.phone
@@ -410,25 +580,197 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     return "done", None
 
 
+# ── Costanti condivise dei ritardi hardcoded (Fase Bio via browser) ──
+# Usate SIA dal codice che dorme davvero (human_profile_pause, maybe_micro_scroll)
+# SIA dal budget CALCOLATO qui sotto (expected_delay_budget_s, worst_case_delay_budget_s):
+# un'unica fonte, cosi' chi taglia una pausa per "recuperare i secondi liberati
+# dall'inversione A.1" la taglia anche nella guardia, invece di lasciarla verde
+# per una costante duplicata e dimenticata in due punti del file.
+HUMAN_PAUSE_MIN_S = 5.0
+HUMAN_PAUSE_MAX_S = 10.0
+PUBLIC_SCROLL_MIN_S = 6.0   # ramo pubblico di maybe_micro_scroll -- non e' un settings
+PUBLIC_SCROLL_MAX_S = 10.0
+OPEN_POST_MIN_S = 3.0       # apertura di un post pubblico dentro maybe_micro_scroll
+OPEN_POST_MAX_S = 9.0
+# Pubblico ma griglia vuota (task B.2): una persona che apre un profilo senza
+# post se ne va subito, non scorre 6-10s sul nulla -- scrollare il vuoto e'
+# PIU' artificiale che non scrollare. Solo un'occhiata breve.
+EMPTY_GRID_GLANCE_MIN_S = 1.0
+EMPTY_GRID_GLANCE_MAX_S = 2.0
+# Tetto di attesa per distinguere "griglia vuota" da "griglia non ancora
+# caricata": a questo punto della sessione (dopo fetch_and_store_bio_browser,
+# che ha gia' atteso la sorgente passiva fino a bio_browser_source_wait_s) la
+# pagina e' aperta da parecchi secondi, quindi la griglia ha quasi certamente
+# gia' avuto il tempo di dipingere -- questo e' solo un margine di sicurezza
+# breve, non il vero tempo di caricamento atteso.
+EMPTY_GRID_WAIT_MS = 2500
+
+# Baseline dello spec (Passo 4, S4.6): tempo TOTALE per profilo misurato PRIMA
+# dell'inversione sorgenti (A.1). Dentro quel numero c'era anche l'attesa della
+# sorgente dati: prima dell'inversione web_profile_info non arrivava MAI in
+# modo passivo (0/65 misurato), quindi si consumava sempre l'intero tetto
+# bio_browser_source_wait_s (~8s); il comportamento (pause/scroll/reel) valeva
+# il resto, ~7.5s. 8 + 7.5 = 15.5.
+BIO_PROFILE_TOTAL_BASELINE_S = 15.5
+# Dopo l'inversione A.1 la sorgente giusta (GraphQL passivo) arriva quasi
+# subito: mediana di attesa residua ~4s (misurata). Il totale per profilo non
+# deve calare -- e' il vincolo dello spec -- quindi il comportamento deve
+# SALIRE per compensare i secondi liberati dall'attesa: 15.5 - 4.0 = 11.5.
+# Confrontare un budget di solo comportamento contro il baseline TOTALE (15.5)
+# sarebbe scorretto: chiederebbe al comportamento di crescere di 8s invece dei
+# ~4s che l'inversione ha davvero liberato.
+BIO_SOURCE_WAIT_AFTER_INVERSION_S = 4.0
+BIO_BEHAVIOUR_FLOOR_S = BIO_PROFILE_TOTAL_BASELINE_S - BIO_SOURCE_WAIT_AFTER_INVERSION_S  # 11.5
+
+
+def expected_delay_budget_s(cfg=None) -> float:
+    """Valore atteso del ritardo comportamentale per profilo nella Fase Bio
+    via browser, sommando i contributi configurati in app.config.Settings.
+    Pura: nessun I/O, nessun sleep, nessun random -- serve a verificare CHE il
+    budget di ritardo configurato non scenda sotto BIO_BEHAVIOUR_FLOOR_S,
+    non a misurare un tempo reale di sessione (per quello serve un log su prod).
+
+    ATTENZIONE alla struttura reale del ciclo (righe ~1020-1048): la pausa reel
+    e human_profile_pause() sono in un if/else, cioe' ALTERNATIVE, non additive
+    -- sul profilo in cui scatta la pausa reel, la pausa umana NON viene
+    eseguita. Il micro-scroll invece e' FUORI dall'if/else e si somma sempre.
+    Stesso identico blocco if/else in browser_import.py (righe ~502-515): questa
+    funzione legge solo i settings condivisi, quindi la stima vale per entrambi
+    i motori anche se qui e' usata solo per la Fase Bio.
+
+    NON include bio_browser_source_wait_s: quello e' un TETTO (si esce appena
+    arriva la sorgente GraphQL passiva, mediana ~4s dopo l'inversione A.1), non
+    un'attesa garantita -- contarlo gonfierebbe il budget con tempo che nella
+    pratica non viene speso.
+
+    QUESTA E' UNA SOGLIA DI GUARDIA, NON UNA STIMA DI CAPACITY PLANNING: il
+    tempo reale e' SISTEMATICAMENTE MAGGIORE di quello modellato qui, mai
+    minore. Il ramo reel in particolare sottostima apposta (sottostima =
+    conservativo per una guardia-minimo): questa funzione conta solo
+    avg_n_reels * avg_dwell_s, ma InstagramPage.browse_reels() reale spende
+    anche ~1.5-3.0s (click sul link nav) o ~1.8-3.2s (goto diretto) di
+    navigazione verso /reels/ UNA VOLTA per pausa (instagram_page.py:1302 e
+    :1308), piu' ~0.2-0.6s di assestamento scroll per OGNI reel guardato
+    (instagram_page.py:1345). Chi riusa questo numero per stimare quanto dura
+    una sessione (non per la guardia sul budget minimo) deve sommarci questi
+    contributi a parte, o sottostimera' la durata reale.
+
+    cfg: oggetto settings da usare al posto del default globale (per iniettare
+    valori finti nei test). Deve esporre gli stessi attributi di app.config
+    usati qui sotto.
+    """
+    s = cfg if cfg is not None else settings
+
+    def _mid(lo: float, hi: float) -> float:
+        return (lo + hi) / 2.0
+
+    # 1) Pausa umana tra profili quando NON scatta la pausa reel: uniform(5,10)s.
+    pause_s = _mid(HUMAN_PAUSE_MIN_S, HUMAN_PAUSE_MAX_S)
+
+    # 2) Micro-scroll, su ~scroll_ratio dei profili -- fuori dall'if/else pausa
+    #    umana/reel, quindi additivo indipendentemente da quale delle due scatta.
+    #    Il ramo privato (solo header, ~4-5s) e il ramo pubblico (griglia post,
+    #    ~6-10s) hanno durate diverse: prendiamo il ramo PIU' BASSO come
+    #    garanzia inferiore. Il budget deve essere una soglia che il
+    #    comportamento reale supera sempre, non una media pesata sul mix
+    #    privato/pubblico (che qui non e' nota a priori).
+    private_scroll_s = _mid(s.bio_browser_scroll_min_s, s.bio_browser_scroll_max_s)
+    public_scroll_s = _mid(PUBLIC_SCROLL_MIN_S, PUBLIC_SCROLL_MAX_S)
+    conservative_scroll_s = min(private_scroll_s, public_scroll_s)
+    scroll_contrib_s = s.bio_browser_scroll_ratio * conservative_scroll_s
+
+    # 3) Apertura di un post pubblico: capita solo dentro il ramo scroll pubblico,
+    #    quindi la probabilita' e' composta (scroll_ratio * open_post_ratio).
+    open_post_s = _mid(OPEN_POST_MIN_S, OPEN_POST_MAX_S)
+    open_post_contrib_s = s.bio_browser_scroll_ratio * s.bio_browser_open_post_ratio * open_post_s
+
+    # 4) Pausa reel VS pausa umana: sono ALTERNATIVE (if/else), non additive.
+    #    Il profilo su cui scatta la pausa reel non fa human_profile_pause().
+    #    P(reel) ~= 1/E[every]: piu' la cadenza e' rada, meno spesso la pausa
+    #    reel sostituisce quella umana. Con every_min/max settati a 0 (non piu'
+    #    il default dopo B.1, ma resta un input legittimo da testare) la cadenza
+    #    campionata puo' uscire 0 o 1, cioe' la pausa reel puo' scattare A OGNI
+    #    profilo (worst case, non un'ipotesi remota). Con E[every] <= 1 il
+    #    complemento (E[every]-1)/E[every] diventerebbe <= 0 (o la formula
+    #    esploderebbe a every=0): trattiamo esplicitamente E[every] <= 1 come
+    #    "reel sempre" (P(reel)=1, P(pausa umana)=0) invece di nasconderlo
+    #    dietro una media. E con count_min=0/dwell_min_s=0.0 (anche questi non
+    #    piu' il default, ma input testabili) la pausa reel puo' valere PROPRIO
+    #    0 secondi: il budget deve renderlo visibile (contributo -> 0), non
+    #    compensarlo con la pausa umana che in quel caso non scatta.
+    avg_n_reels = _mid(s.bio_browser_reels_count_min, s.bio_browser_reels_count_max)
+    avg_dwell_s = _mid(s.bio_browser_reels_dwell_min_s, s.bio_browser_reels_dwell_max_s)
+    avg_every = _mid(s.bio_browser_reels_every_min, s.bio_browser_reels_every_max)
+    if avg_every <= 1.0:
+        p_reel = 1.0
+    else:
+        p_reel = 1.0 / avg_every
+    p_human = 1.0 - p_reel
+    reel_or_pause_contrib_s = p_human * pause_s + p_reel * (avg_n_reels * avg_dwell_s)
+
+    return reel_or_pause_contrib_s + scroll_contrib_s + open_post_contrib_s
+
+
+def worst_case_delay_budget_s(cfg=None) -> float:
+    """Caso peggiore (NON un valore atteso): ogni sorteggio esce al suo
+    estremo piu' sfavorevole -- pausa umana al minimo, cadenza/conteggio/dwell
+    reel ai minimi configurati, micro-scroll che non scatta mai (possibile con
+    qualunque scroll_ratio < 1, quindi lo escludiamo a prescindere dal suo
+    valore). Non entra in nessuna asserzione di budget: serve a documentare
+    quanto puo' scendere il ritardo reale con i minimi configurati -- e' stato
+    l'argomento per alzare i minimi nel task B.1 (il caso peggiore con i
+    minimi pre-B.1 era 0.0s). Pura, stessa firma/uso di expected_delay_budget_s.
+    """
+    s = cfg if cfg is not None else settings
+
+    n_reels_min = s.bio_browser_reels_count_min
+    dwell_min_s = s.bio_browser_reels_dwell_min_s
+    every_min = s.bio_browser_reels_every_min
+    reel_block_s = n_reels_min * dwell_min_s
+
+    if every_min <= 1:
+        # Cadenza al minimo puo' essere 0 o 1: la pausa reel scatta ad OGNI
+        # profilo, la pausa umana non viene mai eseguita in questo scenario
+        # deterministico (stesso caso limite di expected_delay_budget_s).
+        return reel_block_s
+
+    pause_block_s = (every_min - 1) * HUMAN_PAUSE_MIN_S
+    return (pause_block_s + reel_block_s) / every_min
+
+
 async def human_profile_pause() -> None:
     """Pausa tra un profilo e l'altro: 5-10s. La vecchia sosta stazionaria
     occasionale (12% di probabilita', 15-45s "distrazione") e' stata rimossa:
     stare fermi ripetutamente e' proprio il pattern da evitare. Al suo posto,
-    dopo un numero random di profili (0-10), `scrape_bios_browser_session`
+    dopo un numero random di profili (3-10), `scrape_bios_browser_session`
     intercala una pausa ATTIVA sui reel (`InstagramPage.browse_reels`) — qualcosa
     che un account vero farebbe davvero, non uno stallo."""
-    await asyncio.sleep(random.uniform(5.0, 10.0))
+    await asyncio.sleep(random.uniform(HUMAN_PAUSE_MIN_S, HUMAN_PAUSE_MAX_S))
 
 
-async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> bool:
+async def maybe_micro_scroll(
+    session, *, is_private: bool = False, post_count: int | None = None, rng=None
+) -> bool:
     """Scroll sul profilo aperto, ~bio_browser_scroll_ratio dei profili.
 
     PRIVATO: scroll breve (~4-5s, solo l'header) — non c'e' una griglia di post
-    da guardare. PUBBLICO: scroll piu' lungo e deciso (~6-10s) e, con
+    da guardare. PUBBLICO CON POST: scroll piu' lungo e deciso (~6-10s) e, con
     probabilita' `bio_browser_open_post_ratio`, apre UN post (mai un reel o una
-    storia qui) e lo guarda un attimo prima di tornare indietro.
+    storia qui) e lo guarda un attimo prima di tornare indietro. PUBBLICO SENZA
+    POST (griglia vuota, task B.2): scrollare 6-10s sul nulla e' PIU' artificiale
+    che non scrollare -- una persona vera guarda la griglia vuota e se ne va
+    subito, quindi solo un'occhiata breve (~1-2s), niente scroll lungo, niente
+    tentativo di aprire un post.
 
-    Difensivo: non solleva. Ritorna True se ha scrollato."""
+    `post_count`: conteggio post GIA' scaricato da fetch_and_store_bio_browser
+    (`edge_owner_to_timeline_media.count` del payload web_profile_info/GraphQL,
+    vedi web_user_to_shim) -- segnale PRIMARIO e deterministico quando presente,
+    zero attesa. `None` quando il payload non lo porta (tipico della sorgente
+    GraphQL passiva, la piu' comune dopo l'inversione A.1: vedi commento in
+    graphql_user_to_web_shape) -- in quel caso si ripiega sul `wait_for` DOM
+    sotto, che resta il fallback corretto, non uno scarto.
+
+    Difensivo: non solleva. Ritorna True se ha scrollato/guardato."""
     r = rng or random
     if r.random() >= settings.bio_browser_scroll_ratio:
         return False
@@ -443,8 +785,39 @@ async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> 
                 await asyncio.sleep(1.0)
             return True
 
-        # Pubblico: scroll piu' lungo/deciso (c'e' davvero una griglia di post).
-        dur = r.uniform(6.0, 10.0)
+        # Griglia dei post -- STESSO locator riusato sotto per l'apertura post,
+        # non inventarne uno diverso per la decisione griglia-vuota/piena.
+        post_grid = raw_page.locator('article a[href*="/p/"]')
+
+        if post_count is not None:
+            # Segnale primario: dato deterministico, gia' pagato dalla request
+            # che ha scaricato il profilo -- zero attesa, zero race sul DOM.
+            has_posts = post_count > 0
+        else:
+            # Ripiego: nessun conteggio nel payload (sorgente GraphQL passiva,
+            # il caso comune). Distingue "griglia vuota" da "griglia non ancora
+            # caricata": wait_for fa polling fino a EMPTY_GRID_WAIT_MS, quindi
+            # una griglia lenta (ma non vuota) ha comunque la finestra per
+            # dipingere -- solo se NESSUN link post appare entro il tetto la
+            # trattiamo come davvero vuota. A questo punto della sessione la
+            # pagina e' gia' aperta da parecchi secondi (vedi EMPTY_GRID_WAIT_MS
+            # sopra), quindi il tetto e' un margine di sicurezza, non l'attesa
+            # principale.
+            try:
+                await post_grid.first.wait_for(state="attached", timeout=EMPTY_GRID_WAIT_MS)
+                has_posts = True
+            except Exception as e:
+                has_posts = False
+                logger.debug(f"[BioBrowser] griglia post vuota o irraggiungibile ({type(e).__name__}: {e})")
+
+        if not has_posts:
+            # Pubblico ma senza post: uscita rapida, niente scroll lungo, niente
+            # apertura post -- vedi docstring sopra.
+            await asyncio.sleep(r.uniform(EMPTY_GRID_GLANCE_MIN_S, EMPTY_GRID_GLANCE_MAX_S))
+            return True
+
+        # Pubblico con post: scroll piu' lungo/deciso (c'e' davvero una griglia).
+        dur = r.uniform(PUBLIC_SCROLL_MIN_S, PUBLIC_SCROLL_MAX_S)
         steps = max(1, int(dur / 1.5))
         for _ in range(steps):
             await raw_page.evaluate("window.scrollBy({top: 400, behavior: 'smooth'})")
@@ -452,10 +825,10 @@ async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> 
 
         if r.random() < settings.bio_browser_open_post_ratio:
             try:
-                post_link = raw_page.locator('article a[href*="/p/"]').first
+                post_link = post_grid.first
                 if await post_link.count() > 0:
                     await post_link.click(timeout=3000)
-                    await asyncio.sleep(r.uniform(3.0, 9.0))
+                    await asyncio.sleep(r.uniform(OPEN_POST_MIN_S, OPEN_POST_MAX_S))
                     try:
                         await raw_page.go_back()
                     except Exception:
@@ -756,9 +1129,11 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
     iterations = 0
     target_reached = False
     session = None
-    # Cadenza pausa attiva sui reel: dopo un numero random di profili (default 0-10),
-    # rimpiazza lo standing-still rimosso da `human_profile_pause`. Ripescata dopo
-    # ogni pausa reel cosi' la cadenza non e' sempre identica tra una pausa e l'altra.
+    # Cadenza pausa attiva sui reel: dopo un numero random di profili (default 3-10,
+    # mai 0/1/2: task B.1 -- una cadenza troppo rada rende la pausa reel rara quanto
+    # quella vecchia, troppo fitta la fa scattare quasi sempre), rimpiazza lo
+    # standing-still rimosso da `human_profile_pause`. Ripescata dopo ogni pausa reel
+    # cosi' la cadenza non e' sempre identica tra una pausa e l'altra.
     reels_cadence_target = random.randint(
         settings.bio_browser_reels_every_min, settings.bio_browser_reels_every_max
     )
@@ -772,6 +1147,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
 
         while done_count < cap and iterations < max_iterations:
             follower_is_private = False
+            follower_post_count = None  # task B.2: segnale primario per maybe_micro_scroll
             async with AsyncSessionLocal() as db:
                 if await is_halted(db):
                     return None
@@ -827,6 +1203,12 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     # avvelenata e l'oggetto non e' expired (expire_on_commit=False).
                     # Serve a decidere lo scroll pubblico/privato piu' sotto.
                     follower_is_private = bool(follower.is_private)
+                    # `_scraped_post_count`: attributo ad-hoc (non mappato, non
+                    # persistito) stashato da fetch_and_store_bio_browser sopra
+                    # -- stesso accesso sicuro di `follower.is_private` un rigo
+                    # sopra, stessa motivazione. None se il payload non portava
+                    # il conteggio (tipico della sorgente GraphQL passiva).
+                    follower_post_count = getattr(follower, "_scraped_post_count", None)
                     emit_event(campaign_id, "scrape_progress", f"@{uname} bio via browser")
                 elif outcome == "blocked":
                     # NON marcare il follower: resta 'pending' e verra' ripreso quando
@@ -875,7 +1257,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
             # e' raggiunto solo dagli outcome che continuano la mini-sessione
             # (done/not_found/private/error/unknown), quindi la pausa reel non gira
             # mai su quei due path di stop.
-            await maybe_micro_scroll(session, is_private=follower_is_private)
+            await maybe_micro_scroll(session, is_private=follower_is_private, post_count=follower_post_count)
 
             profiles_since_reels_break += 1
             if profiles_since_reels_break >= reels_cadence_target:
@@ -1123,7 +1505,16 @@ async def run_pause_browser_activity(campaign_id: str, account_id: str, username
                 settings.warmup_browse_min_minutes, settings.warmup_browse_max_minutes
             ) * 60)
             logger.info(f"[BioBrowser] {tag}: scroll organico ~{scroll_s}s")
-            await session.page.browse_feed(scroll_s)
+
+            # like_gate: tetto giornaliero PERSISTITO (scrittura, vettore di
+            # blocco proprio). Nessuna db session aperta qui ancora (quella del
+            # batch sotto arriva dopo) -- sessione breve per ogni prenotazione,
+            # come warmup_browse.run_warmup.
+            async def _like_gate() -> bool:
+                async with AsyncSessionLocal() as like_db:
+                    return await account_manager.reserve_daily_like(like_db, account_id)
+
+            await session.page.browse_feed(scroll_s, like_gate=_like_gate)
 
         # 2) Blocco di profili scrapati nella STESSA sessione (piu' umano di 1 sporadico).
         if do_batch:
@@ -1153,10 +1544,47 @@ async def run_pause_browser_activity(campaign_id: str, account_id: str, username
                 logger.debug(f"[BioBrowser] {tag}: close fallita ({e})")
 
 
+# Cap sui browser concorrenti aperti da run_pause_browser_all_accounts: deve essere
+# GLOBALE AL PROCESSO, non per-chiamata. Un semaforo creato dentro la funzione e'
+# un tetto per-chiamata: se due campagne entrano in pausa bio nello stesso momento,
+# ognuna avrebbe il proprio semaforo pieno -> tetto reale 3xN campagne invece di 3
+# totali (bug corretto qui: prima il semaforo era locale alla funzione).
+#
+# Non basta pero' un semplice `asyncio.Semaphore(...)` a livello di modulo: e' un
+# oggetto che crea i Future dei suoi waiter sul loop corrente alla prima attesa
+# contesa, quindi se due `asyncio.run()` distinti lo contendono (tipicamente nei
+# test, che aprono un loop nuovo per ogni chiamata) i waiter restano legati a un
+# loop poi chiuso -- stessa famiglia di problema gia' documentato per il lock
+# per-account in app/browser/context_manager.py (`_get_account_lock`). In
+# PRODUZIONE questa funzione gira sempre nell'unico worker ARQ del processo
+# (`arq app.workers.task_queue.WorkerSettings`, un solo processo, un solo event
+# loop per tutta la vita del worker -- vedi start.bat e task_queue.WorkerSettings),
+# quindi in pratica un solo semaforo per tutta la vita del processo basterebbe gia'.
+# Per restare corretti anche fuori da quell'assunzione (test, refactor futuro),
+# il semaforo e' tenuto in una WeakKeyDictionary keyata sul loop corrente:
+# get-or-create per loop, MAI ricreato o sovrascritto una volta esistente per
+# quel loop -- a differenza di `_get_account_lock` (che e' per-account e
+# SOSTITUISCE silenziosamente il lock quando cambia loop, perdendo chi lo tiene
+# gia'), qui non c'e' nulla da perdere: tutte le chiamate concorrenti sullo
+# STESSO loop condividono SEMPRE la STESSA istanza, quindi il tetto resta
+# davvero globale finche' il loop e' lo stesso -- cioe' sempre, in produzione.
+_pause_browser_sems: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _get_pause_browser_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _pause_browser_sems.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(max(1, settings.max_concurrent_browsers))
+        _pause_browser_sems[loop] = sem
+    return sem
+
+
 async def run_pause_browser_all_accounts(campaign_id: str) -> int:
     """Ogni account scraping della campagna fa la sua sessione scroll+batch in pausa.
     Parallelo con partenze SCAGLIONATE (offset random 1-3 min tra account, mai tutti
-    nello stesso istante) e cap sui browser concorrenti (max_concurrent_browsers).
+    nello stesso istante) e cap sui browser concorrenti (max_concurrent_browsers),
+    GLOBALE al processo -- non solo a questa chiamata, vedi _get_pause_browser_semaphore.
     Ritorna i secondi totali spesi (0 se disabilitato / nessun account). Difensivo."""
     if not (settings.warmup_browse_enabled or settings.bio_browser_batch_enabled):
         return 0
@@ -1165,7 +1593,7 @@ async def run_pause_browser_all_accounts(campaign_id: str) -> int:
         return 0
 
     start = time.monotonic()
-    sem = asyncio.Semaphore(max(1, settings.max_concurrent_browsers))
+    sem = _get_pause_browser_semaphore()
 
     async def _one(account_id, username, idx):
         # Stagger: parte dopo idx * (1-3 min), cosi' non tutti nello stesso istante.

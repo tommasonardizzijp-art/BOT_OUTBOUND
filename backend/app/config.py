@@ -106,6 +106,17 @@ class Settings(BaseSettings):
     # Max user_info lookups/day/account for scraping (anti-ban). Per-campaign override on campaigns.scrape_daily_limit.
     scrape_daily_limit: int = 300
 
+    # Tetto giornaliero PERSISTITO ai like ambientali (browse_feed). Un like e'
+    # una SCRITTURA, con vettore di blocco proprio, peggiore dello scrape in
+    # lettura sopra: oggi il limite in browse_feed e' solo locale alla sessione
+    # (0-2, azzerato a ogni chiamata) -- questo e' il tetto vero, per account,
+    # persistito (migrazione 030). Default conservativo: browse_feed limita
+    # gia' 0-2 like/sessione e viene chiamato poche volte/giorno (warmup + tra
+    # i batch DM), quindi 10 e' vicino al comportamento attuale non ancora
+    # vincolato -- si alza in scaglioni osservando gli account, mai in un
+    # colpo solo (vedi memory botoutbound-checkpoint-pattern-api).
+    daily_like_cap: int = 10
+
     # Cap random della mini-sessione bio prima della pausa lunga (era 250 fisso = firma).
     # Pescato per-sessione in [min,max] e persistito su campaigns.current_session_cap.
     bio_session_cap_min: int = 150
@@ -168,7 +179,12 @@ class Settings(BaseSettings):
     # ogni fase di scraping e DURANTE le pause lunghe. Riusa InstagramPage.browse_feed.
     # Migliora il rapporto organico:automatico che il risk-scoring notturno IG misura.
     # NON cura il mismatch web->mobile dell'API: e' mitigazione trust, non una cura.
-    warmup_browse_enabled: bool = False           # OFF di default: attivare per campagna/test
+    # ON di default (task B.4): la sessione organica e' collaudata dentro il
+    # flusso DM e prima restava spenta di default, quindi non partiva mai in
+    # produzione. bio_browser_batch_enabled resta OFF (Step 3, sotto): cambia
+    # la FORMA della sessione (blocco di N profili scrapati dentro la pausa) e
+    # va osservato prima di attivarlo, non e' lo stesso rischio del warmup.
+    warmup_browse_enabled: bool = True
     warmup_browse_min_minutes: float = 4.0        # durata min sessione organica
     warmup_browse_max_minutes: float = 9.0        # durata max sessione organica
     warmup_browse_headless: bool = True           # headless in produzione worker
@@ -187,6 +203,11 @@ class Settings(BaseSettings):
 
     # --- Motore Fase Bio via browser (bio_engine='browser') ---
     bio_browser_headless: bool = False          # test: finestra visibile; prod: True
+    # Attesa delle sorgenti PASSIVE dei dati profilo (passo 4). Si esce appena una
+    # arriva: questo e' il tetto, non il tempo speso. Non abbassarlo a pochi secondi
+    # -- la GraphQL arriva a mediana ~4s, con 2s le catture misurate sono ZERO e si
+    # ricadrebbe sulla fetch esplicita, cioe' una richiesta attribuibile per profilo.
+    bio_browser_source_wait_s: float = 8.0
     bio_browser_scroll_ratio: float = 0.35      # frazione profili con micro-scroll
     bio_browser_scroll_min_s: float = 4.0
     bio_browser_scroll_max_s: float = 5.0
@@ -209,11 +230,20 @@ class Settings(BaseSettings):
     # storie/highlights: guardare una storia lascia una "visualizzazione" visibile al
     # target, quindi restano fuori da qualunque attivita' ambient (browse_feed,
     # browse_reels, micro-scroll).
-    bio_browser_reels_every_min: int = 0          # dopo quanti profili scatta la pausa reel (random)
+    # every_min/count_min/dwell_min_s NON possono essere 0 (task B.1): erano
+    # minimi di un sorteggio, quindi "pausa disattivata" e "pausa di durata
+    # zero uscita a caso" erano lo stesso stato osservabile, e la pausa reel
+    # SOSTITUISCE quella umana (if/else in browser_bio.py/browser_import.py)
+    # -- una pausa reel da 0s toglieva anche la pausa che ci sarebbe stata.
+    # Caso peggiore misurato con i vecchi minimi: 0.0s di pausa per profilo
+    # (vedi worst_case_delay_budget_s in browser_bio.py). Con questi minimi
+    # il caso peggiore sale a ~5.3s (every_min=3, count_min=2, dwell_min_s=3:
+    # ((3-1)*5.0 + 2*3.0) / 3 = 16/3).
+    bio_browser_reels_every_min: int = 3          # dopo quanti profili scatta la pausa reel (random)
     bio_browser_reels_every_max: int = 10
-    bio_browser_reels_count_min: int = 0          # quanti reel scorrere nella pausa (random)
+    bio_browser_reels_count_min: int = 2          # quanti reel scorrere nella pausa (random)
     bio_browser_reels_count_max: int = 10
-    bio_browser_reels_dwell_min_s: float = 0.0    # sosta su ciascun reel prima di scorrere
+    bio_browser_reels_dwell_min_s: float = 3.0    # sosta su ciascun reel prima di scorrere
     bio_browser_reels_dwell_max_s: float = 10.0
     bio_browser_open_post_ratio: float = 0.25     # prob. di aprire 1 post su profilo pubblico
     # Arricchimento contatti via /api/v1/users/{pk}/info/ (in-page fetch web-autenticato):
@@ -222,6 +252,13 @@ class Settings(BaseSettings):
     # browser perde ~95% delle email. ON di default (e' lo scopo). Kill-switch se un giorno
     # /info/ dal browser venisse rate-limitato a volume.
     bio_browser_contact_info_enabled: bool = True
+    # Gate professional (passo 4, §4.3): /info/ parte solo sui profili professional,
+    # letti dal payload GIA' scaricato -> zero richieste in piu' per decidere. Misurato
+    # su tre probe (44 casi): ogni profilo con un contatto reale era professional, zero
+    # persi; risparmio atteso ~34% delle chiamate. ON di default (e' lo scopo del
+    # passo 4). Spegnerlo se sul campo si vedessero contatti persi: la raccolta
+    # contatti resta accesa, cade solo la selezione.
+    bio_browser_professional_gate_enabled: bool = True
     # Breaker soft-block sul canale browser (mirror del guard consecutivi del path API):
     # dopo N mini-sessioni CONSECUTIVE di UN account chiuse in soft-block (429), invece
     # di ritentare all'infinito ogni 15-30min, la campagna va in pausa e l'operatore
@@ -451,6 +488,25 @@ class Settings(BaseSettings):
     # arrivera' piu' o non e' piu' rilevante operativamente -- un'inclusione
     # senza limite dei 'completed' farebbe crescere la lista per sempre.
     wa_reply_scan_window_days: int = 3
+
+    # Lock Redis cross-processo sul profilo browser IG (C.2, passo 4): TTL
+    # CORTO + rinnovo automatico dentro il chokepoint (context_manager),
+    # non lungo per prudenza come il lock WA sopra (90min, gia' causa di un
+    # orfano risolto a mano — vedi app/browser/profile_lock.py). Un crash a
+    # meta' sessione si autolibera in pochi minuti invece di bloccare
+    # l'account per un'ora e mezza. Rapporto renew:TTL circa 1:3, cosi' un
+    # singolo rinnovo mancato (blip Redis) lascia comunque margine prima
+    # della scadenza.
+    browser_profile_lock_ttl_s: int = 180
+    browser_profile_lock_renew_s: int = 60
+    # Rilievo review C.1-C.3: un blip Redis singolo durante il rinnovo resta
+    # fail-open (non abbatte una sessione viva per un hiccup), ma oltre N
+    # fallimenti CONSECUTIVI il lock e' trattato come perso (fail-closed).
+    # N=2 = almeno un ciclo di rinnovo intero (60s, vedi sopra) di Redis
+    # confermata irraggiungibile, non un singolo blip isolato; con TTL 180s
+    # questo lascia comunque margine di reazione prima della scadenza
+    # naturale, invece di aspettarla e basta.
+    browser_profile_lock_max_renew_errors: int = 2
 
 
 settings = Settings()

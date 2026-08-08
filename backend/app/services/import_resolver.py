@@ -14,7 +14,7 @@ from instagrapi.exceptions import UserNotFound
 
 from app.database import AsyncSessionLocal
 from app.models.imported_profile import ImportedProfile
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, contatti_richiesti_dal_livello
 from app.models.follower import Follower, FollowerStatus
 from app.models.activity_log import ActivityLog
 from app.utils.ig_username import parse_lines
@@ -231,7 +231,18 @@ async def resolve_imports(campaign_id: str) -> None:
                         Follower.campaign_id == campaign_id, Follower.ig_user_id == ig_pk,
                     ))).scalar_one_or_none()
                     if dup is None:
-                        contacts = extract_contacts(info)
+                        # Ramo API: `info` porta SEMPRE i campi business (stesso
+                        # payload della bio, zero richieste in piu'), ma il livello
+                        # decide se salvarli (passo 4, A.5 — decisione Tommaso: il
+                        # livello governa le RICHIESTE, non i dati gia' arrivati
+                        # gratis). A 'bio' restano fuori SOLO public_email e
+                        # public_phone_number/contact_phone_number: sono l'equivalente
+                        # di cio' che sul browser costerebbe la richiesta /info/.
+                        # Bio-testo, link, whatsapp ed external_url si salvano SEMPRE,
+                        # a qualunque livello — non "ottimizzare" gatandoli anche loro.
+                        contacts = extract_contacts(
+                            info, includi_campi_dedicati=contatti_richiesti_dal_livello(campaign)
+                        )
                         biography = getattr(info, "biography", None) or None
                         db.add(Follower(
                             campaign_id=campaign_id,

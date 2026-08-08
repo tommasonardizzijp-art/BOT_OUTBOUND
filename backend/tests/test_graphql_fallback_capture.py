@@ -68,8 +68,12 @@ def _gql_response(username):
 
 
 @pytest.mark.asyncio
-async def test_fallback_used_when_web_profile_info_400():
-    # web_profile_info non intercettato passivamente + fetch in-page = 400 (bug asset).
+async def test_graphql_passivo_usato_come_sorgente_primaria():
+    # AGGIORNATO col passo 4 (inversione delle sorgenti). Prima questo test
+    # asseriva `evaluate_calls == 1`: il GraphQL era il RIPIEGO, quindi la fetch
+    # esplicita partiva sempre e il GraphQL entrava solo dopo il suo 400. Ora il
+    # GraphQL e' la sorgente PRIMARIA: stessi dati, ZERO richieste aggiunte.
+    # Il ripiego esplicito resta coperto da tests/test_source_inversion.py.
     page = FakePage(
         responses=[_gql_response("betshop")],
         evaluate_result={"__status": 400},
@@ -79,7 +83,7 @@ async def test_fallback_used_when_web_profile_info_400():
     assert not user.get("__status")             # NON e' propagato come errore
     assert user["id"] == "999"                  # forma web_profile_info (normalizzata)
     assert user["edge_followed_by"]["count"] == 100
-    assert len(page.evaluate_calls) == 1        # UN solo fetch (web_profile_info), NESSUN fetch GraphQL
+    assert page.evaluate_calls == []            # nessuna fetch: e' il punto del passo 4
 
 
 @pytest.mark.asyncio
@@ -99,10 +103,18 @@ async def test_web_profile_info_success_ignores_graphql():
 
 @pytest.mark.asyncio
 async def test_rate_limit_not_masked_by_graphql():
-    # 429 su web_profile_info: DEVE propagarsi come __status (soft_block), NON usare GraphQL.
-    page = FakePage(responses=[_gql_response("betshop")], evaluate_result={"__status": 429})
+    # Invariante INVARIATA, strada cambiata dal passo 4: un rate-limit non deve mai
+    # essere mascherato dai dati. Prima lo scoprivamo solo perche' la fetch esplicita
+    # se lo prendeva in faccia; senza piu' fetch il segnale arriva dall'ascolto
+    # passivo degli stati 429/401/403 (anche quelli che IG serve al suo stesso JS).
+    # Scenario che conta: throttle visto e NESSUN dato passivo. Il codice non deve
+    # insistere con una fetch esplicita da dentro un rate-limit. (Se invece i dati
+    # passivi ci sono, vincono loro: sono gratis. Vedi test_source_inversion.py.)
+    rl = FakeResponse("https://www.instagram.com/api/graphql", 429, {})
+    page = FakePage(responses=[rl], evaluate_result=None)
     user = await _capture_web_profile_info(page, "betshop", timeout_s=0.5)
     assert user == {"__status": 429}
+    assert page.evaluate_calls == []            # e non si insiste con una richiesta
 
 
 @pytest.mark.asyncio

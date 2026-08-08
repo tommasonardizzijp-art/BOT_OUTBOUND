@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import useSWR from 'swr'
 import { api } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
@@ -14,9 +14,9 @@ import { toast } from 'sonner'
 import {
   Plus, Trash2, Loader2, ShieldAlert, Clock, Ban, CheckCircle,
   LogIn, Globe, Pencil, Power, PowerOff, BarChart2, ChevronDown, ChevronUp,
-  Inbox, RefreshCw, Eraser, AlertTriangle, Wifi, Smartphone
+  Inbox, RefreshCw, Eraser, AlertTriangle, Wifi, Smartphone, Sparkles
 } from 'lucide-react'
-import type { Account, AccountStatus, AccountMetrics, DMCount, ProxyTestResult } from '@/lib/types'
+import type { Account, AccountStatus, AccountMetrics, DMCount, ProxyTestResult, OrganicSessionStatus } from '@/lib/types'
 import { formatDistanceToNow, formatTime } from '@/lib/dateUtils'
 import { Skeleton } from '@/components/ui/skeleton'
 
@@ -325,6 +325,9 @@ export default function AccountsPage() {
                   {acc.status === 'active' && acc.last_login_at && (
                     <BrowseSessionButton accountId={acc.id} username={acc.username} />
                   )}
+                  {acc.status === 'active' && acc.last_login_at && (
+                    <OrganicSessionButton accountId={acc.id} username={acc.username} />
+                  )}
 
                   {/* Testa connessione: IP/egress reale via proxy (o WiFi se nessun proxy) */}
                   <Button size="sm" variant="outline" className="border-cyan-800 text-cyan-400 hover:bg-cyan-900/20"
@@ -557,6 +560,93 @@ function BrowseSessionButton({ accountId, username }: { accountId: string; usern
       {loading
         ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" />Browser aperto...</>
         : <><Globe className="w-4 h-4 mr-1" />Apri browser</>
+      }
+    </Button>
+  )
+}
+
+// Traduce le "reason" tecniche del motore di warm-up in un testo leggibile;
+// se non riconosciuta mostra comunque la reason grezza — mai un messaggio muto.
+function describeOrganicReason(reason: string): string {
+  if (reason === 'disabled') return 'funzione disattivata lato server'
+  if (reason.startsWith('error:AccountBrowserBusy')) return 'account occupato da un\'altra sessione browser (campagna o login in corso)'
+  if (reason.startsWith('error:')) return `errore: ${reason.slice('error:'.length)}`
+  if (reason.startsWith('import_error:')) return 'browser non disponibile lato server'
+  return reason
+}
+
+function OrganicSessionButton({ accountId, username }: { accountId: string; username: string }) {
+  const [starting, setStarting] = useState(false)
+  const { data: status, mutate: refreshStatus } = useSWR<OrganicSessionStatus>(
+    `organic-session-${accountId}`,
+    () => api.accounts.organicSessionStatus(accountId),
+    {
+      // FAIL-CLOSED: continua a pollare finché lo stato non è ESPLICITAMENTE
+      // concluso (complete/not_found, gli unici due terminali di arq.JobStatus
+      // — verificato in venv/Lib/site-packages/arq/jobs.py). Un valore non
+      // riconosciuto conta come "ancora in corso", mai come "libero": il caso
+      // peggiore è un bottone disabilitato un po' più a lungo, non una seconda
+      // sessione lanciata sul profilo occupato. Stessa regola di `isActive` sotto.
+      // Pattern (funzione di refreshInterval sull'ultimo dato) già in uso in
+      // questo stesso repo — vedi lead-qualification/page.tsx:95 — non è una
+      // forma nuova per questa base di codice.
+      refreshInterval: (latest) =>
+        latest && latest.status !== 'complete' && latest.status !== 'not_found' ? 10_000 : 0,
+    }
+  )
+  // Stessa regola fail-closed del refreshInterval sopra: "attivo" è il default,
+  // "libero" è l'eccezione che va dimostrata.
+  const isActive = !!status && status.status !== 'complete' && status.status !== 'not_found'
+  const wasActiveRef = useRef(false)
+
+  // Notifica UNA sola volta la transizione "in corso" -> "completata".
+  useEffect(() => {
+    if (wasActiveRef.current && status?.status === 'complete') {
+      const result = status.result
+      if (result && typeof result === 'object') {
+        const mins = Math.floor(result.duration_seconds / 60)
+        const secs = result.duration_seconds % 60
+        if (result.ran) {
+          toast.success(`Attività organica @${username} completata: ${mins}m ${secs}s`)
+        } else {
+          toast.info(`Attività organica @${username} non eseguita (${describeOrganicReason(result.reason)})`)
+        }
+      } else if (typeof result === 'string') {
+        // Il job ARQ è crashato prima di ritornare {ran, reason} — errore non
+        // ingoiato da run_warmup (che è difensivo di suo). Non deve restare muto.
+        toast.error(`Attività organica @${username} fallita: ${result.slice(0, 160)}`)
+      }
+    }
+    wasActiveRef.current = isActive
+  }, [status, isActive, username])
+
+  const handleStart = async () => {
+    if (!confirm(
+      `Avvia una sessione AUTOMATICA su @${username}: il bot apre da solo il browser, scorre il feed, ` +
+      `apre qualche post o reel, a volte mette un like, e chiude da solo quando ha finito — non devi navigare tu.\n\n` +
+      `(Diverso da "Apri browser": quello apre e lascia navigare a te.)\n\n` +
+      `Dura alcuni minuti. Continuare?`
+    )) return
+    setStarting(true)
+    try {
+      await api.accounts.organicSessionStart(accountId)
+      toast.info(`Sessione automatica avviata per @${username}. Durerà alcuni minuti.`)
+      await refreshStatus()
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Avvio fallito'
+      toast.error(msg)
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  return (
+    <Button size="sm" variant="outline" className="border-pink-800 text-pink-400 hover:bg-pink-900/20"
+      onClick={handleStart} disabled={starting || isActive}
+      title="Sessione AUTOMATICA: il bot naviga da solo (feed, post, reel, qualche like) e chiude da solo — a differenza di 'Apri browser', non devi navigare tu">
+      {starting || isActive
+        ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" />Attività in corso...</>
+        : <><Sparkles className="w-4 h-4 mr-1" />Attività organica</>
       }
     </Button>
   )

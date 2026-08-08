@@ -82,3 +82,21 @@ def test_empty_and_missing_keys_are_safe():
         assert c.email is None
         assert c.phone is None
         assert shim.follower_count is None
+
+
+def test_shim_maps_media_count_when_present():
+    # Task B.2 (review): web_profile_info nativo espone il conteggio post in
+    # edge_owner_to_timeline_media.count -- segnale primario per maybe_micro_scroll.
+    user = _sample_business_user()
+    user["edge_owner_to_timeline_media"] = {"count": 7}
+    shim = web_user_to_shim(user)
+    assert shim.media_count == 7
+
+
+def test_shim_media_count_none_when_absent():
+    # Nessun edge_owner_to_timeline_media nel payload (caso comune, vedi
+    # test_graphql_fallback_mapping.py per il ramo GraphQL): media_count deve
+    # restare None, non 0 -- None e' "non disponibile" (ripiego DOM), 0 e'
+    # "griglia vuota confermata" (nessuna attesa). Sono segnali diversi.
+    shim = web_user_to_shim(_sample_business_user())
+    assert shim.media_count is None

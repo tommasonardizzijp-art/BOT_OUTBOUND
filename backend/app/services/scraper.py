@@ -21,7 +21,7 @@ from loguru import logger
 
 from app.database import AsyncSessionLocal
 from app.models.account import InstagramAccount, AccountStatus
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, contatti_richiesti_dal_livello
 from app.models.follower import Follower, FollowerStatus
 from app.models.activity_log import ActivityLog
 from app.utils.crypto import decrypt
@@ -329,7 +329,17 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
         return "error", current_account, e
 
     from app.utils.contact_extract import extract_contacts
-    contacts = extract_contacts(user_info)
+    # Ramo API: `user_info` porta SEMPRE i campi business (stesso payload della
+    # bio, zero richieste in piu'), ma il livello decide se salvarli (passo 4, A.5
+    # — decisione Tommaso: il livello governa le RICHIESTE, non i dati gia'
+    # arrivati gratis). A 'bio' restano fuori SOLO public_email e
+    # public_phone_number/contact_phone_number: sono l'equivalente di cio' che sul
+    # browser costerebbe la richiesta /info/. Bio-testo, link, whatsapp ed
+    # external_url si salvano SEMPRE, a qualunque livello — non "ottimizzare"
+    # gatandoli anche loro.
+    contacts = extract_contacts(
+        user_info, includi_campi_dedicati=contatti_richiesti_dal_livello(campaign)
+    )
     # Una sola sorgente per il contatore cap: bump in-memory, persistito dal
     # db.commit() sotto. NON usare anche increment_scrape_lookup (UPDATE atomico
     # che committa subito): con expire_on_commit=False i due incrementi si
@@ -742,7 +752,17 @@ async def _store_followers_batch(
                 following_count = getattr(user_info, 'following_count', None)
                 ext = getattr(user_info, 'external_url', None)
                 external_url = str(ext) if ext else None
-                contacts = extract_contacts(user_info)
+                # Ramo API: `user_info` porta SEMPRE i campi business (stesso
+                # payload della bio, zero richieste in piu'), ma il livello decide
+                # se salvarli (passo 4, A.5 — decisione Tommaso: il livello governa
+                # le RICHIESTE, non i dati gia' arrivati gratis). A 'bio' restano
+                # fuori SOLO public_email e public_phone_number/contact_phone_number:
+                # sono l'equivalente di cio' che sul browser costerebbe la richiesta
+                # /info/. Bio-testo, link, whatsapp ed external_url si salvano
+                # SEMPRE, a qualunque livello — non "ottimizzare" gatandoli anche loro.
+                contacts = extract_contacts(
+                    user_info, includi_campi_dedicati=contatti_richiesti_dal_livello(campaign)
+                )
                 # Un solo conteggio: bump in-memory date-aware, persistito dal commit
                 # del batch. (Prima sommava anche increment_scrape_lookup -> doppio.)
                 from app.services.account_manager import bump_scrape_lookup
@@ -750,6 +770,8 @@ async def _store_followers_batch(
                 consecutive_soft_blocks = 0
                 break
             except Exception as e:
+                if isinstance(e, TypeError):
+                    raise  # bug di programmazione (es. firma sbagliata), non un fallimento IG: non va scambiato per "bio non recuperabile"
                 error_str = str(e).lower()
                 is_rate_limit = "429" in error_str or "too many" in error_str or "rate" in error_str
                 is_soft_block = "protect" in error_str or "restrict" in error_str or "community" in error_str

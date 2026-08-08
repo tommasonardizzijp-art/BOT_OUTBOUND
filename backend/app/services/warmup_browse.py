@@ -26,6 +26,8 @@ import random
 from loguru import logger
 
 from app.config import settings
+from app.database import AsyncSessionLocal
+from app.services import account_manager
 
 
 async def run_warmup(
@@ -71,9 +73,18 @@ async def run_warmup(
         page_obj = session.page  # InstagramPage
         # Verifica login (naviga a instagram.com e controlla la sessione del profilo).
         await page_obj.ensure_logged_in(account_id)
+        # like_gate: tetto giornaliero PERSISTITO (scrittura, vettore di
+        # blocco proprio). Qui non c'e' una `db` gia' aperta come nel worker
+        # DM (run_warmup e' invocato fuori da un ciclo con sessione viva) —
+        # apriamo una sessione breve per ogni prenotazione (al piu' 0-2 per
+        # chiamata, come il ramo like di browse_feed).
+        async def _like_gate() -> bool:
+            async with AsyncSessionLocal() as like_db:
+                return await account_manager.reserve_daily_like(like_db, account_id)
+
         # Browsing ambientale sul feed: scroll variato, pause lettura, 0-2 post aperti,
         # like raro. Non solleva mai (difensivo di suo).
-        await page_obj.browse_feed(duration_s)
+        await page_obj.browse_feed(duration_s, like_gate=_like_gate)
         logger.info(f"[Warmup] {tag}: sessione organica completata ({duration_s}s)")
         return {"ran": True, "duration_seconds": duration_s, "reason": "ok"}
     except Exception as e:

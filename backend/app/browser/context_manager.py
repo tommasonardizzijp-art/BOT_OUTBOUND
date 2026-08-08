@@ -20,12 +20,29 @@ from app.browser.fingerprint import get_fingerprint
 # on the main loop and passed down into a thread-private loop, e.g. manual login).
 _UNSET = object()
 
-# Per-account mutex: prevents two concurrent browser launches for the same
-# Chromium profile directory, which causes about:blank pages and session corruption.
-# Keyed by (account_id) -> (loop, Lock). An asyncio.Lock binds to the loop on which
-# it is first awaited; the manual-login/browse sync wrappers spin a NEW loop in a
-# thread, so a lock created on the main loop would raise "attached to a different
-# loop" there. Storing the owning loop lets us hand out a fresh lock per loop.
+# Per-account mutex: cheap defense-in-depth WITHIN a single event loop only.
+# It does NOT protect against the two cases that actually matter in production:
+#
+# 1. Cross-process: the FastAPI backend and the ARQ worker are two separate OS
+#    processes, each with its own Python memory — `_account_locks` is a module-level
+#    dict, invisible across processes. A manual browse-session in the backend and a
+#    campaign DM job in the worker can open two Chromium instances on the same
+#    profile directory at the same time; this lock cannot see it happen. THIS is
+#    the case that matters for profile corruption — it's covered by the Redis lock
+#    in `app/browser/profile_lock.py` (`held_with_renew`), not by this mutex.
+#
+# 2. Cross-loop within the SAME process: an asyncio.Lock is bound to the loop it
+#    was first awaited on. manual_browse_session_sync spins a brand NEW event loop
+#    per call (in a fresh thread). Two rapid clicks on the manual browse button run
+#    on two different loops: the second call's `_get_account_lock` sees
+#    `entry[0] is not loop`, so it silently creates a FRESH Lock and OVERWRITES the
+#    dict entry — the lock the first call is holding is never consulted. This mutex
+#    does not serialize even two clicks on the same button in the same process.
+#    Not fixable cleanly (an asyncio.Lock can't span loops); left as-is and
+#    documented rather than pretending otherwise. The Redis lock is what actually
+#    prevents the double-Chromium here too.
+#
+# Keyed by (account_id) -> (loop, Lock).
 _account_locks: dict[str, tuple] = {}
 
 
@@ -153,36 +170,45 @@ async def get_browser_context(account_id: str, headless: bool | None = None, pro
     Context manager that provides a Patchright browser context for the given account.
     The browser profile is stored persistently at {BROWSER_PROFILES_DIR}/{account_id}/
 
-    Acquires a per-account asyncio lock so only one browser instance per account
-    can be open at any time (defense-in-depth against duplicate ARQ jobs).
+    Acquires a per-account asyncio lock (same-loop defense-in-depth, see the
+    `_account_locks` docstring above) PLUS a cross-process Redis lock (the one that
+    actually matters — see `app/browser/profile_lock.py`) so only one browser
+    instance per account can be open at any time, anywhere.
 
     Pass headless=False to override default for manual browse sessions.
+
+    Raises:
+        AccountBrowserBusy: the profile is already in use by another session
+            (another process, another job), or Redis didn't respond (fail-closed).
 
     Usage:
         async with get_browser_context(account_id) as context:
             page = await context.new_page()
             ...
     """
+    from app.browser.profile_lock import held_with_renew
+
     async_playwright = _import_async_playwright()
 
     lock = _get_account_lock(account_id)
     async with lock:
-        launch_kwargs, fingerprint = await _prepare_launch(account_id, headless, proxy_url)
+        async with held_with_renew(account_id):
+            launch_kwargs, fingerprint = await _prepare_launch(account_id, headless, proxy_url)
 
-        async with async_playwright() as pw:
-            context = await pw.chromium.launch_persistent_context(**launch_kwargs)
-            await context.add_init_script(_build_fingerprint_script(fingerprint))
+            async with async_playwright() as pw:
+                context = await pw.chromium.launch_persistent_context(**launch_kwargs)
+                await context.add_init_script(_build_fingerprint_script(fingerprint))
 
-            logger.debug(
-                f"Browser context opened for account {account_id} | "
-                f"viewport={fingerprint['viewport']} | "
-                f"webgl={fingerprint['webgl_renderer'][:40]}..."
-            )
-            try:
-                yield context
-            finally:
-                await context.close()
-                logger.debug(f"Browser context closed for account {account_id}")
+                logger.debug(
+                    f"Browser context opened for account {account_id} | "
+                    f"viewport={fingerprint['viewport']} | "
+                    f"webgl={fingerprint['webgl_renderer'][:40]}..."
+                )
+                try:
+                    yield context
+                finally:
+                    await context.close()
+                    logger.debug(f"Browser context closed for account {account_id}")
 
 
 class BrowserSession:
@@ -207,6 +233,10 @@ class BrowserSession:
             await session.close()
 
     Cleanup is idempotent and safe to call from `finally` blocks even if open() raised.
+
+    Raises (from `open()`):
+        AccountBrowserBusy: the profile is already in use by another session
+            (another process, another job), or Redis didn't respond (fail-closed).
     """
 
     def __init__(self, account_id: str, headless: bool | None = None):
@@ -214,14 +244,17 @@ class BrowserSession:
         self.headless = headless
         self._lock: asyncio.Lock | None = None
         self._lock_acquired = False
+        self._redis_lock_stack = None  # AsyncExitStack holding the held_with_renew() CM
         self._pw_cm = None  # async_playwright() context manager instance
         self._pw = None
         self._context = None
         self._page_obj = None  # InstagramPage instance
 
     async def open(self) -> "BrowserSession":
+        from contextlib import AsyncExitStack
         from app.browser.fingerprint import get_fingerprint
         from app.browser.instagram_page import InstagramPage
+        from app.browser.profile_lock import held_with_renew
         from app.database import AsyncSessionLocal
         from app.models.account import InstagramAccount
         from sqlalchemy import select
@@ -245,6 +278,15 @@ class BrowserSession:
         self._lock_acquired = True
 
         try:
+            # Cross-process Redis lock — see `_account_locks` docstring above for why
+            # the in-process lock alone isn't enough. Entered via an AsyncExitStack
+            # because open()/close() are separate methods (not a single `async with`);
+            # the stack is what lets close() exit the CM (and run its release logic)
+            # later. Created empty BEFORE entering so close()'s cleanup is always safe
+            # to call even if the lock acquisition below raises AccountBrowserBusy.
+            self._redis_lock_stack = AsyncExitStack()
+            await self._redis_lock_stack.enter_async_context(held_with_renew(self.account_id))
+
             launch_kwargs, fingerprint = await _prepare_launch(self.account_id, self.headless)
             self._pw_cm = async_playwright()
             self._pw = await self._pw_cm.__aenter__()
@@ -276,6 +318,8 @@ class BrowserSession:
 
     async def close(self) -> None:
         """Idempotent cleanup. Safe to call even after a failed open()."""
+        from app.browser.profile_lock import AccountBrowserBusy
+
         # 1. Close browser context
         if self._context is not None:
             try:
@@ -295,7 +339,26 @@ class BrowserSession:
 
         self._page_obj = None
 
-        # 3. Release account lock (always last)
+        # 3. Release the cross-process Redis lock (before the in-process one, so a
+        # process crash right here still leaves the in-process lock as the last
+        # thing held — matches acquisition order: redis lock taken AFTER in-process).
+        # AccountBrowserBusy here is NOT a cleanup failure to log-and-swallow like
+        # the others in this method: it's held_with_renew's deliberate signal that
+        # the lock's possession was lost mid-session (repeated renew failures, or
+        # another process legitimately reacquired) — the caller needs to see it,
+        # so it's captured and re-raised AFTER the rest of cleanup below runs,
+        # not caught here.
+        lock_lost_exc: AccountBrowserBusy | None = None
+        if self._redis_lock_stack is not None:
+            try:
+                await self._redis_lock_stack.aclose()
+            except AccountBrowserBusy as e:
+                lock_lost_exc = e
+            except Exception as e:
+                logger.warning(f"[BrowserSession] redis profile lock release failed: {e}")
+            self._redis_lock_stack = None
+
+        # 4. Release account lock (always last)
         if self._lock is not None and self._lock_acquired:
             try:
                 self._lock.release()
@@ -303,6 +366,9 @@ class BrowserSession:
                 pass  # already released
             self._lock_acquired = False
             logger.debug(f"[BrowserSession] Closed for account {self.account_id[:8]}…")
+
+        if lock_lost_exc is not None:
+            raise lock_lost_exc
 
 
 def _build_fingerprint_script(fp: dict) -> str:

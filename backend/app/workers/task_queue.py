@@ -371,6 +371,39 @@ async def browser_import_account_task(ctx: dict, campaign_id: str, account_id: s
         raise
 
 
+async def run_organic_session_task(ctx: dict, account_id: str, username: str | None = None) -> dict:
+    """ARQ task (C.1): sessione di navigazione organica manuale ("pulsante attivita
+    organica"). Wrapper sottile su warmup_browse.run_warmup -- il motore, gia' in
+    produzione altrove (browser_bio.py durante le pause Fase Bio), qui semplicemente
+    collegato a un punto di ingresso che l'utente puo' premere a mano.
+
+    run_warmup e' GIA' completamente difensivo (non solleva mai, vedi il suo
+    docstring) e GIA' inietta il like_gate del tetto giornaliero B.3
+    (account_manager.reserve_daily_like) -- niente da aggiungere qui su quel fronte.
+    Se l'account e' occupato (lock Redis del profilo, C.2), run_warmup lo assorbe e
+    ritorna {"ran": False, "reason": "error:AccountBrowserBusy"}: non serve un
+    Retry(defer) qui, e' un'azione discrettiva a singolo colpo, non una campagna
+    viva -- se occupato, l'utente puo' semplicemente ricliccare piu' tardi."""
+    import json
+    from loguru import logger
+    from app.database import AsyncSessionLocal
+    from app.models.activity_log import ActivityLog
+    from app.services.warmup_browse import run_warmup
+
+    tag = f"@{username}" if username else account_id[:8] + "…"
+    logger.info(f"[ARQ] run_organic_session_task start {tag}")
+    result = await run_warmup(account_id, username)
+    async with AsyncSessionLocal() as db:
+        db.add(ActivityLog(
+            account_id=account_id,
+            action="organic_session_completed" if result.get("ran") else "organic_session_skipped",
+            details=json.dumps(result),
+        ))
+        await db.commit()
+    logger.info(f"[ARQ] run_organic_session_task done {tag}: {result}")
+    return result
+
+
 class WorkerSettings:
     functions = [
         scrape_followers_task,
@@ -394,6 +427,9 @@ class WorkerSettings:
         # review finale round 2): ogni break e' un "try" agli occhi di ARQ,
         # il default 5 fermerebbe un numero attivo dopo poche ore.
         func(wa_send_task, max_tries=10000),
+        # Job discrezionale a singolo colpo (C.1): nessun Retry(defer) interno,
+        # max_tries di default basta.
+        run_organic_session_task,
     ]
     cron_jobs = []
     queue_name = ARQ_MAIN_QUEUE

@@ -62,3 +62,16 @@ def test_id_falls_back_to_id_key_if_no_pk():
     # Difesa: se un giorno GraphQL usasse 'id' invece di 'pk', non perdiamo il pk.
     web_shaped = graphql_user_to_web_shape({"id": "42", "username": "z"})
     assert web_shaped["id"] == "42"
+
+
+def test_graphql_shape_does_not_carry_media_count():
+    # Task B.2 (review): il payload GraphQL reale osservato (audit 2026-07-29,
+    # _sample_graphql_user sopra) non porta NESSUN campo media/post-count --
+    # graphql_user_to_web_shape fa `dict(g)` puro (nessuna chiave da
+    # normalizzare per questo campo, a differenza di follower/following), quindi
+    # dopo lo shim il segnale primario di maybe_micro_scroll resta assente e si
+    # ripiega sul DOM. Se IG dovesse iniziare a esporlo nella GraphQL, questo
+    # test smette di essere vero e va aggiornato consapevolmente (non e' un
+    #'deve restare cosi' per sempre', e' 'e' cosi' oggi, verificato').
+    shim = web_user_to_shim(graphql_user_to_web_shape(_sample_graphql_user()))
+    assert shim.media_count is None

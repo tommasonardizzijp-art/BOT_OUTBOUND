@@ -1104,7 +1104,11 @@ class InstagramPage:
 
     # ── Feed browsing (ambient activity) ───────────────────────────────────────
 
-    async def browse_feed(self, duration_seconds: float) -> None:
+    async def browse_feed(
+        self,
+        duration_seconds: float,
+        like_gate: Optional[Callable[[], Awaitable[bool]]] = None,
+    ) -> None:
         """
         Ambient activity on the home feed: scroll, occasional like (~3%),
         open 0-2 posts and view them 1-30s, mouse idle. Used to dilute the
@@ -1112,6 +1116,19 @@ class InstagramPage:
 
         Defensive: any failure in like / open-post is swallowed and logged at
         debug level — never raises (must not break the surrounding DM flow).
+
+        `like_gate`: coroutine function iniettata dal chiamante, interpellata
+        PRIMA di ogni click "Mi piace" per prenotare il tetto giornaliero
+        PERSISTITO (account_manager.reserve_daily_like) — un like e' una
+        SCRITTURA con vettore di blocco proprio, diverso e piu' rigido del
+        `max_likes` locale qui sotto (che resta solo il limite DI SESSIONE:
+        il click parte solo se ENTRAMBI lo consentono). Questa funzione non sa
+        nulla di DB/account_id apposta: il chiamante costruisce il gate con
+        `db`/`account_id` gia' in scope, cosi' resta testabile con una finta.
+        Senza `like_gate` (None) il ramo like resta SEMPRE disattivato — fail
+        SAFE: un chiamante che dimentica di iniettarla non mette mai like
+        invece di metterne senza limite. Al tetto raggiunto: nessun click,
+        nessuna eccezione, nessun return anticipato — la sessione prosegue.
         """
         try:
             page = await self._get_page()
@@ -1120,7 +1137,15 @@ class InstagramPage:
             await asyncio.sleep(duration_seconds)
             return
 
-        # Navigate to home feed if not already there
+        # Navigate to home feed if not already there. Se il tentativo di
+        # navigazione (home_nav.click O il goto di ripiego) solleva, la pagina
+        # resta ferma dove si trovava PRIMA -- nei percorsi reali quasi sempre
+        # l'home o un thread /direct/, ma nel caso peggiore il profilo di un
+        # target appena scrapato. Un like e' un'azione CORRELABILE (spec: mai
+        # su un profilo della lista scrapata): se la navigazione non e'
+        # confermata, i like restano SPENTI per tutta la sessione -- il resto
+        # del browsing (scroll, pause, post) prosegue normale.
+        likes_allowed = True
         try:
             cur = page.url or ""
             if "/direct/" in cur or not cur.startswith(self.BASE_URL) or cur.rstrip("/") != self.BASE_URL:
@@ -1141,6 +1166,7 @@ class InstagramPage:
                     await asyncio.sleep(random.uniform(1.8, 3.2))
         except Exception as e:
             logger.debug(f"browse_feed: navigation issue ({e}) — continuing on current page")
+            likes_allowed = False
 
         # Dismiss any popup that may appear on home (sleep mode, notifications opt-in)
         try:
@@ -1180,7 +1206,7 @@ class InstagramPage:
                 # Reading pause
                 await asyncio.sleep(random.uniform(2.0, 6.0))
 
-            elif r < 0.78 and likes_in_session < max_likes and remaining > 4:
+            elif r < 0.78 and likes_in_session < max_likes and remaining > 4 and likes_allowed:
                 # Like a visible post (rare)
                 try:
                     like_btn = page.locator(
@@ -1189,14 +1215,25 @@ class InstagramPage:
                     if await like_btn.count() > 0:
                         box = await like_btn.bounding_box()
                         if box and 100 < box["y"] < 700:
-                            cx = box["x"] + box["width"] / 2
-                            cy = box["y"] + box["height"] / 2
-                            await page.mouse.move(cx, cy, steps=random.randint(5, 12))
-                            await asyncio.sleep(random.uniform(0.3, 0.8))
-                            await page.mouse.click(cx, cy)
-                            likes_in_session += 1
-                            logger.info(f"[Ambient] Liked a feed post ({likes_in_session}/{max_likes})")
-                            await asyncio.sleep(random.uniform(0.8, 2.0))
+                            # Tetto giornaliero persistito: la prenotazione va
+                            # SEMPRE prima del click, mai dopo. Se il click poi
+                            # fallisce il like resta comunque contato — meglio
+                            # contarne uno in piu' che uno in meno: non c'e' modo
+                            # di sapere lato client se e' arrivato davvero a IG.
+                            granted = await like_gate() if like_gate is not None else False
+                            if granted:
+                                cx = box["x"] + box["width"] / 2
+                                cy = box["y"] + box["height"] / 2
+                                await page.mouse.move(cx, cy, steps=random.randint(5, 12))
+                                await asyncio.sleep(random.uniform(0.3, 0.8))
+                                await page.mouse.click(cx, cy)
+                                likes_in_session += 1
+                                logger.info(f"[Ambient] Liked a feed post ({likes_in_session}/{max_likes})")
+                                await asyncio.sleep(random.uniform(0.8, 2.0))
+                            else:
+                                logger.debug(
+                                    "[Ambient] like skipped: daily cap reached (or no gate wired)"
+                                )
                 except Exception as e:
                     logger.debug(f"[Ambient] like skipped ({type(e).__name__})")
 

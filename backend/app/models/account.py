@@ -32,6 +32,12 @@ class InstagramAccount(Base):
     # il contatore e' stale → vale 0 (reset lazy, vedi account_manager). Rende il
     # cap auto-guarente anche se il cron daily_reset non gira.
     scrape_lookups_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Tetto giornaliero PERSISTITO ai like ambientali (browse_feed). Un like e'
+    # una SCRITTURA (vettore di blocco proprio, peggiore dello scrape in
+    # lettura sopra): stesso schema date-aware, stesso reset lazy (vedi
+    # account_manager.reserve_daily_like), migrazione 030.
+    daily_likes_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    daily_likes_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
     daily_message_limit: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
     total_messages_sent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     warmup_day: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

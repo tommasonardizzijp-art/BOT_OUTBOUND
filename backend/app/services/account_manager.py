@@ -286,3 +286,49 @@ async def increment_scrape_lookup(db, account_id: str) -> None:
         )
     )
     await db.commit()
+
+
+async def reserve_daily_like(db, account_id: str) -> bool:
+    """Prenota ATOMICAMENTE un like sul tetto giornaliero persistito
+    (settings.daily_like_cap), stesso schema date-aware di
+    increment_scrape_lookup ma CONDIZIONATO: a differenza dello scrape (sola
+    lettura), un like e' una scrittura -- serve un tetto vero, non solo un
+    contatore.
+
+    Una SOLA UPDATE che incrementa E controlla il tetto nella stessa
+    statement (il conteggio "effettivo" usato nel WHERE e' calcolato con lo
+    stesso CASE del reset lazy, cosi' un contatore di ieri conta come 0 anche
+    nel controllo, non solo nell'incremento): niente finestra fra "leggo il
+    contatore" e "scrivo" in cui due sessioni concorrenti potrebbero
+    leggere entrambe sotto il tetto e superarlo insieme (lo stesso principio
+    del claim ottimistico dei follower in campaign_orchestrator, che usa
+    rowcount sulla stessa classe di UPDATE condizionata).
+
+    Ritorna True se la prenotazione e' andata a buon fine (rowcount == 1: il
+    chiamante puo' procedere col click), False se il tetto era gia' pieno
+    (rowcount == 0: nessuna scrittura avvenuta, il chiamante salta il like
+    ma la sessione prosegue)."""
+    from sqlalchemy import update, case
+    from app.models.account import InstagramAccount
+    today = _utc_today_str()
+    effective_today = case(
+        (InstagramAccount.daily_likes_date == today, InstagramAccount.daily_likes_today),
+        else_=0,
+    )
+    result = await db.execute(
+        update(InstagramAccount)
+        .where(
+            InstagramAccount.id == account_id,
+            effective_today < settings.daily_like_cap,
+        )
+        .values(
+            daily_likes_today=case(
+                (InstagramAccount.daily_likes_date == today,
+                 InstagramAccount.daily_likes_today + 1),
+                else_=1,
+            ),
+            daily_likes_date=today,
+        )
+    )
+    await db.commit()
+    return result.rowcount == 1
