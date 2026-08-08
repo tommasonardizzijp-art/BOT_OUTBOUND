@@ -676,6 +676,39 @@ async def test_i35_chat_title_mai_salvato_come_numero(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_impara_chat_title_esclude_riga_te_stesso(db_session, monkeypatch):
+    """Bug trovato dal vivo 08/08: la riga 'messaggi a te stesso' e' inclusa
+    apposta nello scan (altri chiamanti la usano) ma il suo titolo e' il
+    nome del TITOLARE del numero mittente, non del contatto appena scritto.
+    Se resta in testa alla sidebar (es. pinnata), righe[0] la prendeva per
+    buona -- riprodotto 4/4 su un invio reale in un test manuale lo stesso
+    giorno. PASS = la riga is_yourself viene saltata, si impara la riga
+    successiva vera."""
+    from app.browser.whatsapp_page import ChatRow
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+
+    class _PomTeStesso(_PomInvio):
+        async def scan_chat_list(self):
+            return [
+                ChatRow(position=0, title="Tommaso Nardizzi", title_is_number=False,
+                        unread_count=0, preview="", last_is_outbound=True,
+                        outgoing_state="wds-ic-sent", muted=False, is_yourself=True),
+                ChatRow(position=1, title="James", title_is_number=False,
+                        unread_count=0, preview="", last_is_outbound=True,
+                        outgoing_state="wds-ic-sent", muted=False, is_yourself=False),
+            ]
+
+    pom = _PomTeStesso([])
+    await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    await db_session.refresh(ctx["contact"])
+    assert ctx["contact"].chat_title == "James"
+
+
+@pytest.mark.asyncio
 async def test_impara_chat_title_normalizza_sempre_in_nfc(db_session, monkeypatch):
     """Backlog M4: il DOM di WhatsApp puo' restituire un nome accentato in
     forma NFD (lettera base + accento combinante separato); il matching del

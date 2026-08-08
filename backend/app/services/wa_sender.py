@@ -475,6 +475,13 @@ async def _impara_chat_title(db, pom, contact) -> None:
     except Exception as exc:
         logger.debug(f"chat_title non appreso ({type(exc).__name__}): non e' un errore")
         return
+    # La riga "messaggi a te stesso" e' inclusa nello scan apposta (altri
+    # chiamanti la usano), ma il suo titolo e' il nome del TITOLARE del
+    # numero mittente, non del contatto appena scritto -- se resta in testa
+    # (es. pinnata) righe[0] la prende per buona (bug trovato dal vivo 08/08,
+    # riprodotto 4/4 su un invio reale: chat_title salvato = nome di Tommaso
+    # per ogni contatto appena contattato).
+    righe = [r for r in righe if not r.is_yourself]
     if righe and not righe[0].title_is_number and righe[0].title:
         # NFC prima del troncamento: il DOM di WhatsApp puo' restituire un
         # nome accentato in NFC o NFD a seconda del sistema che l'ha

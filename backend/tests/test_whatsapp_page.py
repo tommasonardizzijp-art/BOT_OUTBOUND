@@ -292,16 +292,25 @@ async def test_scan_chat_list_non_clicca_e_legge_i_segnali_grezzi():
             "position": 0, "title": "Mario Rossi",
             "unread_raw": "3 messaggi non letti", "preview": "ciao",
             "last_is_outbound": False, "outgoing_state": None, "muted": False,
+            "is_yourself": False,
         },
         {
             "position": 1, "title": chr(0x202a) + "393421460077" + chr(0x202c),
             "unread_raw": "", "preview": "",
             "last_is_outbound": True, "outgoing_state": "wds-ic-read", "muted": False,
+            "is_yourself": False,
         },
         {
             "position": 2, "title": "Solo Icona",
             "unread_raw": chr(0x1F514), "preview": "",
             "last_is_outbound": False, "outgoing_state": None, "muted": True,
+            "is_yourself": False,
+        },
+        {
+            "position": 3, "title": "Tommaso Nardizzi",
+            "unread_raw": "", "preview": "",
+            "last_is_outbound": True, "outgoing_state": "wds-ic-sent", "muted": False,
+            "is_yourself": True,
         },
     ]
 
@@ -320,6 +329,9 @@ async def test_scan_chat_list_non_clicca_e_legge_i_segnali_grezzi():
 
     assert rows[2].unread_count == 1         # testo senza cifre -> 1
     assert rows[2].muted is True
+
+    assert rows[3].is_yourself is True
+    assert rows[0].is_yourself is False      # una riga normale non e' "te stesso"
 
 
 @pytest.mark.parametrize("raw,atteso", [
