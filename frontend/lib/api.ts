@@ -1,5 +1,5 @@
 import type {
-  Account, AccountCreate, AccountMetrics, DMCount, Campaign, CampaignCreate, ABStats,
+  Account, AccountCreate, AccountMetrics, DMCount, OrganicSessionStatus, Campaign, CampaignCreate, ABStats,
   ApprovalQueue, WorkerEventsResponse,
   CampaignAccount, CampaignAccountAssign, CampaignAccountUpdate,
   FollowerListResponse, MessageListResponse, MessageStats, DashboardStats,
@@ -121,6 +121,10 @@ export const api = {
         { method: 'POST', signal: controller.signal },
       ).finally(() => clearTimeout(timeout))
     },
+    organicSessionStart: (id: string) =>
+      request<{ queued: boolean; job_id: string }>(`/accounts/${id}/organic-session`, { method: 'POST' }),
+    organicSessionStatus: (id: string) =>
+      request<OrganicSessionStatus>(`/accounts/${id}/organic-session`),
   },
 
   campaigns: {

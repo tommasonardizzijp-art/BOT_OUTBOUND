@@ -313,6 +313,13 @@ export interface ProxyTestResult {
   error?: string
 }
 
+// C.4: stato della sessione di navigazione organica automatica (job ARQ)
+export interface OrganicSessionStatus {
+  status: 'deferred' | 'queued' | 'in_progress' | 'complete' | 'not_found'
+  success?: boolean
+  result?: { ran: boolean; duration_seconds: number; reason: string } | string
+}
+
 // M9: Account metrics
 export interface AccountMetrics {
   today_sent: number
