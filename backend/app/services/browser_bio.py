@@ -38,6 +38,7 @@ from sqlalchemy import update
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.follower import FollowerStatus
+from app.services import account_manager
 from app.services.bot_state_service import is_halted
 from app.services.scrape_bios import bio_should_continue, pick_session_cap
 from app.services.work_enqueue import arq_redis_settings, ARQ_MAIN_QUEUE
@@ -1409,7 +1410,16 @@ async def run_pause_browser_activity(campaign_id: str, account_id: str, username
                 settings.warmup_browse_min_minutes, settings.warmup_browse_max_minutes
             ) * 60)
             logger.info(f"[BioBrowser] {tag}: scroll organico ~{scroll_s}s")
-            await session.page.browse_feed(scroll_s)
+
+            # like_gate: tetto giornaliero PERSISTITO (scrittura, vettore di
+            # blocco proprio). Nessuna db session aperta qui ancora (quella del
+            # batch sotto arriva dopo) -- sessione breve per ogni prenotazione,
+            # come warmup_browse.run_warmup.
+            async def _like_gate() -> bool:
+                async with AsyncSessionLocal() as like_db:
+                    return await account_manager.reserve_daily_like(like_db, account_id)
+
+            await session.page.browse_feed(scroll_s, like_gate=_like_gate)
 
         # 2) Blocco di profili scrapati nella STESSA sessione (piu' umano di 1 sporadico).
         if do_batch:

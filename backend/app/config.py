@@ -106,6 +106,17 @@ class Settings(BaseSettings):
     # Max user_info lookups/day/account for scraping (anti-ban). Per-campaign override on campaigns.scrape_daily_limit.
     scrape_daily_limit: int = 300
 
+    # Tetto giornaliero PERSISTITO ai like ambientali (browse_feed). Un like e'
+    # una SCRITTURA, con vettore di blocco proprio, peggiore dello scrape in
+    # lettura sopra: oggi il limite in browse_feed e' solo locale alla sessione
+    # (0-2, azzerato a ogni chiamata) -- questo e' il tetto vero, per account,
+    # persistito (migrazione 030). Default conservativo: browse_feed limita
+    # gia' 0-2 like/sessione e viene chiamato poche volte/giorno (warmup + tra
+    # i batch DM), quindi 10 e' vicino al comportamento attuale non ancora
+    # vincolato -- si alza in scaglioni osservando gli account, mai in un
+    # colpo solo (vedi memory botoutbound-checkpoint-pattern-api).
+    daily_like_cap: int = 10
+
     # Cap random della mini-sessione bio prima della pausa lunga (era 250 fisso = firma).
     # Pescato per-sessione in [min,max] e persistito su campaigns.current_session_cap.
     bio_session_cap_min: int = 150

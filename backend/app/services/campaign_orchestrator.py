@@ -523,7 +523,14 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 else:
                     ambient_dur = random_delay_seconds()
                     try:
-                        await browser_session.page.browse_feed(ambient_dur)
+                        # like_gate: tetto giornaliero PERSISTITO (scrittura,
+                        # vettore di blocco proprio) -- browse_feed non sa nulla
+                        # di db/account_id, la prenotazione atomica la fa qui il
+                        # chiamante, che li ha gia' in scope.
+                        await browser_session.page.browse_feed(
+                            ambient_dur,
+                            like_gate=lambda: account_manager.reserve_daily_like(db, account_id),
+                        )
                     except Exception as e:
                         logger.warning(f"[Worker] Ambient browse failed, falling back to sleep: {e}")
                         await asyncio.sleep(ambient_dur)
@@ -584,7 +591,10 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                         f"Browse feed iniziale {ambient_init:.0f}s prima del 1° DM",
                     )
                     try:
-                        await browser_session.page.browse_feed(ambient_init)
+                        await browser_session.page.browse_feed(
+                            ambient_init,
+                            like_gate=lambda: account_manager.reserve_daily_like(db, account_id),
+                        )
                     except Exception as e:
                         logger.warning(f"[Worker] Initial ambient browse failed (non-fatal): {e}")
 

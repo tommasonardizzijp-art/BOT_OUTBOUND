@@ -17,7 +17,7 @@ class FakeDMBrowser:
     async def ensure_logged_in(self, account_id: str) -> None:
         return None
 
-    async def browse_feed(self, duration_seconds: float) -> None:
+    async def browse_feed(self, duration_seconds: float, like_gate=None) -> None:
         return None
 
     async def send_dm(self, username: str, message: str, pre_send_callback=None, on_enter=None) -> None:
