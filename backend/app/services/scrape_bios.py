@@ -344,8 +344,9 @@ async def scrape_bios(campaign_id: str) -> int | None:
                         # scrapati via browser (piu' umano di un profilo sporadico; non
                         # consuma cap API). Gira mentre l'API mobile e' ferma (job singolo
                         # seriale, in procinto di defer): nessuna concorrenza. Self-guard sui
-                        # flag warmup_browse_enabled / bio_browser_batch_enabled (entrambi OFF
-                        # default = no-op). Difensivo: non solleva mai. Il tempo speso e'
+                        # flag warmup_browse_enabled (ON default, task B.4) / bio_browser_batch_enabled
+                        # (OFF default: cambia la forma della sessione, va osservato prima).
+                        # Difensivo: non solleva mai. Il tempo speso e'
                         # SCALATO dal defer, cosi' la pausa TOTALE resta ~minutes e il re-fire
                         # coincide con scrape_break_until (gia' fissato a now+seconds).
                         spent_seconds = 0

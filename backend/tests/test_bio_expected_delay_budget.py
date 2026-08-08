@@ -142,8 +142,9 @@ def test_expected_delay_budget_su_settings_globale_reale():
     # Acceptance test dello spec: gira sui settings VERI (app.config.settings),
     # non su un fake. Confronta contro il FLOOR comportamentale (11.5), non
     # contro il baseline totale (15.5) -- quello includeva l'attesa di rete,
-    # che qui non e' contata. Oggi e' VERDE (13.1 >= 11.5): A.4 non blocca
-    # B.1, e' una guardia per il futuro.
+    # che qui non e' contata. Dopo B.1 (minimi reel alzati) il budget e'
+    # SALITO da 13.1 a ~14.446 (avg_every=6.5, avg_n_reels=6, avg_dwell_s=6.5):
+    # ancora VERDE (14.446 >= 11.5), con margine maggiore di prima.
     assert expected_delay_budget_s() >= BIO_BEHAVIOUR_FLOOR_S
 
 
@@ -156,12 +157,15 @@ def test_worst_case_delay_budget_matches_hand_computation():
 
 
 def test_worst_case_delay_budget_su_default_odierni():
-    # Il numero che giustifica B.1: con i minimi odierni (count_min=0,
-    # dwell_min_s=0.0, every_min=0) il caso peggiore deterministico e' un
-    # profilo scrapato SENZA NESSUNA pausa comportamentale -- 0.0s. Pinnato
-    # qui: se qualcuno alza i minimi (B.1) o li abbassa ulteriormente, questo
-    # assert salta e il cambiamento va rivisto consapevolmente.
-    assert worst_case_delay_budget_s() == pytest.approx(0.0, abs=1e-9)
+    # B.1 ha alzato i minimi (every_min 0->3, count_min 0->2, dwell_min_s
+    # 0.0->3.0) proprio perche' con i vecchi il caso peggiore era un profilo
+    # scrapato SENZA NESSUNA pausa comportamentale -- 0.0s. Con i minimi
+    # nuovi il caso peggiore deterministico e': 2 profili su 3 fanno la pausa
+    # umana al minimo (5.0s ciascuno), 1 fa il reel al minimo (2*3.0=6.0s):
+    # (2*5.0 + 6.0) / 3 = 16.0/3 ~= 5.333s. Non e' piu' 0: e' questo che
+    # dimostra che B.1 ha chiuso il buco. Pinnato di nuovo: se qualcuno
+    # riabbassa i minimi, questo assert salta e va rivisto consapevolmente.
+    assert worst_case_delay_budget_s() == pytest.approx(16.0 / 3.0, abs=1e-9)
 
 
 def test_prova_del_nove_dimezzare_la_pausa_umana_fa_scendere_sotto_il_floor():
@@ -178,10 +182,16 @@ def test_prova_del_nove_dimezzare_la_pausa_umana_fa_scendere_sotto_il_floor():
     try:
         browser_bio.HUMAN_PAUSE_MIN_S = original_min / 2   # 2.5
         browser_bio.HUMAN_PAUSE_MAX_S = original_max / 2   # 5.0
-        # pause_s = mid(2.5,5.0) = 3.75; reel_or_pause = 0.8*3.75+0.2*25 = 8.0;
-        # totale = 8.0 + 1.575 + 0.525 = 10.1 < 11.5.
+        # Dopo B.1 avg_every=6.5 (p_reel=2/13, p_human=11/13), avg_n_reels=6,
+        # avg_dwell_s=6.5 -> reel contrib = 6*6.5=39 (invariato, non dipende
+        # da HUMAN_PAUSE). pause_s = mid(2.5,5.0) = 3.75.
+        # reel_or_pause = (11/13)*3.75 + (2/13)*39 = 9.173076923...
+        # totale = 9.173076923... + 1.575 + 0.525 = 11.273076923... < 11.5.
+        # Anche con i minimi reel alzati da B.1, dimezzare la pausa umana vera
+        # fa ancora scendere sotto il floor: la guardia non dipende SOLO dal
+        # margine che B.1 ha aggiunto.
         budget = expected_delay_budget_s()
-        assert budget == pytest.approx(10.1, abs=1e-9)
+        assert budget == pytest.approx(11.273076923076923, abs=1e-9)
         assert budget < BIO_BEHAVIOUR_FLOOR_S, (
             "il test NON ha rilevato il dimezzamento della pausa umana: non vale niente, va rifatto"
         )

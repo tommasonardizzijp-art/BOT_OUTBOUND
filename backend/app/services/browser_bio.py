@@ -138,6 +138,15 @@ def web_user_to_shim(user: dict) -> SimpleNamespace:
         if isinstance(bl, dict) and bl.get("url"):
             bio_links.append({"url": bl.get("url"), "title": bl.get("title") or bl.get("link_type")})
 
+    # Conteggio post (task B.2): il web_profile_info nativo lo espone qui.
+    # Nella forma GraphQL normalizzata (graphql_user_to_web_shape) il campo e'
+    # QUASI SEMPRE ASSENTE (verificato sul payload reale osservato in audit,
+    # vedi test_graphql_fallback_mapping.py: PolarisProfilePageContentQuery
+    # non porta un conteggio media) -- _to_int(None) ritorna None in quel
+    # caso, che e' il segnale corretto per "non disponibile, ripiega sul DOM"
+    # in maybe_micro_scroll.
+    media = user.get("edge_owner_to_timeline_media") or {}
+
     return SimpleNamespace(
         pk=user.get("id"),
         username=user.get("username"),
@@ -147,6 +156,7 @@ def web_user_to_shim(user: dict) -> SimpleNamespace:
         is_private=bool(user.get("is_private", False)),
         follower_count=_to_int(followed_by.get("count")),
         following_count=_to_int(follows.get("count")),
+        media_count=_to_int(media.get("count")),
         external_url=user.get("external_url"),
         # Campi business: il web li espone come business_email/business_phone_number.
         public_email=user.get("business_email"),
@@ -169,6 +179,13 @@ def graphql_user_to_web_shape(gql_user: dict) -> dict:
       - following_count -> edge_follow.count
     Gli altri campi (username, full_name, biography, is_private, is_verified,
     external_url, bio_links) hanno gia' gli stessi nomi e passano invariati.
+    NON esiste un delta per il conteggio post: verificato sul payload reale
+    (audit 2026-07-29, vedi test_graphql_fallback_mapping.py) che
+    `PolarisProfilePageContentQuery` non porta NESSUN campo media/post-count
+    -- restera' assente dopo `dict(g)` (nessuna chiave da normalizzare), e
+    `web_user_to_shim` lo legge come `media_count=None`. E' il comportamento
+    voluto: per il grosso dei profili (sorgente passiva GraphQL, 65/65) il
+    segnale primario di maybe_micro_scroll non c'e', si ripiega sul DOM.
     Pura e testabile: nessun IO. Robusta a chiavi mancanti/None.
     """
     g = gql_user or {}
@@ -527,6 +544,14 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
     follower.is_private = bool(shim.is_private)
     follower.follower_count = shim.follower_count
     follower.following_count = shim.following_count
+    # Attributo Python ad-hoc, NON una colonna mappata: nessuna migration,
+    # nessun impatto sul commit/flush sotto. Serve solo a passare il
+    # conteggio post GIA' scaricato fino a maybe_micro_scroll (task B.2)
+    # senza cambiare la firma/arieta' del return di questa funzione (che ha
+    # ~20 call site di test con fake_fetch a 2-tuple). Letto dal chiamante
+    # con lo stesso pattern sicuro di `follower.is_private` piu' sotto: solo
+    # nel ramo outcome == 'done', dopo il commit riuscito.
+    follower._scraped_post_count = shim.media_count
     ext = shim.external_url
     follower.external_url = contacts.external_url or (str(ext) if ext else None)
     follower.phone = contacts.phone
@@ -566,6 +591,18 @@ PUBLIC_SCROLL_MIN_S = 6.0   # ramo pubblico di maybe_micro_scroll -- non e' un s
 PUBLIC_SCROLL_MAX_S = 10.0
 OPEN_POST_MIN_S = 3.0       # apertura di un post pubblico dentro maybe_micro_scroll
 OPEN_POST_MAX_S = 9.0
+# Pubblico ma griglia vuota (task B.2): una persona che apre un profilo senza
+# post se ne va subito, non scorre 6-10s sul nulla -- scrollare il vuoto e'
+# PIU' artificiale che non scrollare. Solo un'occhiata breve.
+EMPTY_GRID_GLANCE_MIN_S = 1.0
+EMPTY_GRID_GLANCE_MAX_S = 2.0
+# Tetto di attesa per distinguere "griglia vuota" da "griglia non ancora
+# caricata": a questo punto della sessione (dopo fetch_and_store_bio_browser,
+# che ha gia' atteso la sorgente passiva fino a bio_browser_source_wait_s) la
+# pagina e' aperta da parecchi secondi, quindi la griglia ha quasi certamente
+# gia' avuto il tempo di dipingere -- questo e' solo un margine di sicurezza
+# breve, non il vero tempo di caricamento atteso.
+EMPTY_GRID_WAIT_MS = 2500
 
 # Baseline dello spec (Passo 4, S4.6): tempo TOTALE per profilo misurato PRIMA
 # dell'inversione sorgenti (A.1). Dentro quel numero c'era anche l'attesa della
@@ -649,15 +686,17 @@ def expected_delay_budget_s(cfg=None) -> float:
     # 4) Pausa reel VS pausa umana: sono ALTERNATIVE (if/else), non additive.
     #    Il profilo su cui scatta la pausa reel non fa human_profile_pause().
     #    P(reel) ~= 1/E[every]: piu' la cadenza e' rada, meno spesso la pausa
-    #    reel sostituisce quella umana. every_min=0 di default: la cadenza
+    #    reel sostituisce quella umana. Con every_min/max settati a 0 (non piu'
+    #    il default dopo B.1, ma resta un input legittimo da testare) la cadenza
     #    campionata puo' uscire 0 o 1, cioe' la pausa reel puo' scattare A OGNI
     #    profilo (worst case, non un'ipotesi remota). Con E[every] <= 1 il
     #    complemento (E[every]-1)/E[every] diventerebbe <= 0 (o la formula
     #    esploderebbe a every=0): trattiamo esplicitamente E[every] <= 1 come
     #    "reel sempre" (P(reel)=1, P(pausa umana)=0) invece di nasconderlo
-    #    dietro una media. E con count_min=0/dwell_min_s=0.0 la pausa reel puo'
-    #    valere PROPRIO 0 secondi: il budget deve renderlo visibile (contributo
-    #    -> 0), non compensarlo con la pausa umana che in quel caso non scatta.
+    #    dietro una media. E con count_min=0/dwell_min_s=0.0 (anche questi non
+    #    piu' il default, ma input testabili) la pausa reel puo' valere PROPRIO
+    #    0 secondi: il budget deve renderlo visibile (contributo -> 0), non
+    #    compensarlo con la pausa umana che in quel caso non scatta.
     avg_n_reels = _mid(s.bio_browser_reels_count_min, s.bio_browser_reels_count_max)
     avg_dwell_s = _mid(s.bio_browser_reels_dwell_min_s, s.bio_browser_reels_dwell_max_s)
     avg_every = _mid(s.bio_browser_reels_every_min, s.bio_browser_reels_every_max)
@@ -677,8 +716,9 @@ def worst_case_delay_budget_s(cfg=None) -> float:
     reel ai minimi configurati, micro-scroll che non scatta mai (possibile con
     qualunque scroll_ratio < 1, quindi lo escludiamo a prescindere dal suo
     valore). Non entra in nessuna asserzione di budget: serve a documentare
-    quanto puo' scendere il ritardo reale con i minimi odierni, come argomento
-    per il task B.1. Pura, stessa firma/uso di expected_delay_budget_s.
+    quanto puo' scendere il ritardo reale con i minimi configurati -- e' stato
+    l'argomento per alzare i minimi nel task B.1 (il caso peggiore con i
+    minimi pre-B.1 era 0.0s). Pura, stessa firma/uso di expected_delay_budget_s.
     """
     s = cfg if cfg is not None else settings
 
@@ -701,21 +741,35 @@ async def human_profile_pause() -> None:
     """Pausa tra un profilo e l'altro: 5-10s. La vecchia sosta stazionaria
     occasionale (12% di probabilita', 15-45s "distrazione") e' stata rimossa:
     stare fermi ripetutamente e' proprio il pattern da evitare. Al suo posto,
-    dopo un numero random di profili (0-10), `scrape_bios_browser_session`
+    dopo un numero random di profili (3-10), `scrape_bios_browser_session`
     intercala una pausa ATTIVA sui reel (`InstagramPage.browse_reels`) — qualcosa
     che un account vero farebbe davvero, non uno stallo."""
     await asyncio.sleep(random.uniform(HUMAN_PAUSE_MIN_S, HUMAN_PAUSE_MAX_S))
 
 
-async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> bool:
+async def maybe_micro_scroll(
+    session, *, is_private: bool = False, post_count: int | None = None, rng=None
+) -> bool:
     """Scroll sul profilo aperto, ~bio_browser_scroll_ratio dei profili.
 
     PRIVATO: scroll breve (~4-5s, solo l'header) — non c'e' una griglia di post
-    da guardare. PUBBLICO: scroll piu' lungo e deciso (~6-10s) e, con
+    da guardare. PUBBLICO CON POST: scroll piu' lungo e deciso (~6-10s) e, con
     probabilita' `bio_browser_open_post_ratio`, apre UN post (mai un reel o una
-    storia qui) e lo guarda un attimo prima di tornare indietro.
+    storia qui) e lo guarda un attimo prima di tornare indietro. PUBBLICO SENZA
+    POST (griglia vuota, task B.2): scrollare 6-10s sul nulla e' PIU' artificiale
+    che non scrollare -- una persona vera guarda la griglia vuota e se ne va
+    subito, quindi solo un'occhiata breve (~1-2s), niente scroll lungo, niente
+    tentativo di aprire un post.
 
-    Difensivo: non solleva. Ritorna True se ha scrollato."""
+    `post_count`: conteggio post GIA' scaricato da fetch_and_store_bio_browser
+    (`edge_owner_to_timeline_media.count` del payload web_profile_info/GraphQL,
+    vedi web_user_to_shim) -- segnale PRIMARIO e deterministico quando presente,
+    zero attesa. `None` quando il payload non lo porta (tipico della sorgente
+    GraphQL passiva, la piu' comune dopo l'inversione A.1: vedi commento in
+    graphql_user_to_web_shape) -- in quel caso si ripiega sul `wait_for` DOM
+    sotto, che resta il fallback corretto, non uno scarto.
+
+    Difensivo: non solleva. Ritorna True se ha scrollato/guardato."""
     r = rng or random
     if r.random() >= settings.bio_browser_scroll_ratio:
         return False
@@ -730,7 +784,38 @@ async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> 
                 await asyncio.sleep(1.0)
             return True
 
-        # Pubblico: scroll piu' lungo/deciso (c'e' davvero una griglia di post).
+        # Griglia dei post -- STESSO locator riusato sotto per l'apertura post,
+        # non inventarne uno diverso per la decisione griglia-vuota/piena.
+        post_grid = raw_page.locator('article a[href*="/p/"]')
+
+        if post_count is not None:
+            # Segnale primario: dato deterministico, gia' pagato dalla request
+            # che ha scaricato il profilo -- zero attesa, zero race sul DOM.
+            has_posts = post_count > 0
+        else:
+            # Ripiego: nessun conteggio nel payload (sorgente GraphQL passiva,
+            # il caso comune). Distingue "griglia vuota" da "griglia non ancora
+            # caricata": wait_for fa polling fino a EMPTY_GRID_WAIT_MS, quindi
+            # una griglia lenta (ma non vuota) ha comunque la finestra per
+            # dipingere -- solo se NESSUN link post appare entro il tetto la
+            # trattiamo come davvero vuota. A questo punto della sessione la
+            # pagina e' gia' aperta da parecchi secondi (vedi EMPTY_GRID_WAIT_MS
+            # sopra), quindi il tetto e' un margine di sicurezza, non l'attesa
+            # principale.
+            try:
+                await post_grid.first.wait_for(state="attached", timeout=EMPTY_GRID_WAIT_MS)
+                has_posts = True
+            except Exception as e:
+                has_posts = False
+                logger.debug(f"[BioBrowser] griglia post vuota o irraggiungibile ({type(e).__name__}: {e})")
+
+        if not has_posts:
+            # Pubblico ma senza post: uscita rapida, niente scroll lungo, niente
+            # apertura post -- vedi docstring sopra.
+            await asyncio.sleep(r.uniform(EMPTY_GRID_GLANCE_MIN_S, EMPTY_GRID_GLANCE_MAX_S))
+            return True
+
+        # Pubblico con post: scroll piu' lungo/deciso (c'e' davvero una griglia).
         dur = r.uniform(PUBLIC_SCROLL_MIN_S, PUBLIC_SCROLL_MAX_S)
         steps = max(1, int(dur / 1.5))
         for _ in range(steps):
@@ -739,7 +824,7 @@ async def maybe_micro_scroll(session, *, is_private: bool = False, rng=None) -> 
 
         if r.random() < settings.bio_browser_open_post_ratio:
             try:
-                post_link = raw_page.locator('article a[href*="/p/"]').first
+                post_link = post_grid.first
                 if await post_link.count() > 0:
                     await post_link.click(timeout=3000)
                     await asyncio.sleep(r.uniform(OPEN_POST_MIN_S, OPEN_POST_MAX_S))
@@ -1043,9 +1128,11 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
     iterations = 0
     target_reached = False
     session = None
-    # Cadenza pausa attiva sui reel: dopo un numero random di profili (default 0-10),
-    # rimpiazza lo standing-still rimosso da `human_profile_pause`. Ripescata dopo
-    # ogni pausa reel cosi' la cadenza non e' sempre identica tra una pausa e l'altra.
+    # Cadenza pausa attiva sui reel: dopo un numero random di profili (default 3-10,
+    # mai 0/1/2: task B.1 -- una cadenza troppo rada rende la pausa reel rara quanto
+    # quella vecchia, troppo fitta la fa scattare quasi sempre), rimpiazza lo
+    # standing-still rimosso da `human_profile_pause`. Ripescata dopo ogni pausa reel
+    # cosi' la cadenza non e' sempre identica tra una pausa e l'altra.
     reels_cadence_target = random.randint(
         settings.bio_browser_reels_every_min, settings.bio_browser_reels_every_max
     )
@@ -1059,6 +1146,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
 
         while done_count < cap and iterations < max_iterations:
             follower_is_private = False
+            follower_post_count = None  # task B.2: segnale primario per maybe_micro_scroll
             async with AsyncSessionLocal() as db:
                 if await is_halted(db):
                     return None
@@ -1114,6 +1202,12 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
                     # avvelenata e l'oggetto non e' expired (expire_on_commit=False).
                     # Serve a decidere lo scroll pubblico/privato piu' sotto.
                     follower_is_private = bool(follower.is_private)
+                    # `_scraped_post_count`: attributo ad-hoc (non mappato, non
+                    # persistito) stashato da fetch_and_store_bio_browser sopra
+                    # -- stesso accesso sicuro di `follower.is_private` un rigo
+                    # sopra, stessa motivazione. None se il payload non portava
+                    # il conteggio (tipico della sorgente GraphQL passiva).
+                    follower_post_count = getattr(follower, "_scraped_post_count", None)
                     emit_event(campaign_id, "scrape_progress", f"@{uname} bio via browser")
                 elif outcome == "blocked":
                     # NON marcare il follower: resta 'pending' e verra' ripreso quando
@@ -1162,7 +1256,7 @@ async def scrape_bios_browser_session(campaign_id: str, account_id: str) -> int 
             # e' raggiunto solo dagli outcome che continuano la mini-sessione
             # (done/not_found/private/error/unknown), quindi la pausa reel non gira
             # mai su quei due path di stop.
-            await maybe_micro_scroll(session, is_private=follower_is_private)
+            await maybe_micro_scroll(session, is_private=follower_is_private, post_count=follower_post_count)
 
             profiles_since_reels_break += 1
             if profiles_since_reels_break >= reels_cadence_target:

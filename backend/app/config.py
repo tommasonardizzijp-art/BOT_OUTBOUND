@@ -179,7 +179,12 @@ class Settings(BaseSettings):
     # ogni fase di scraping e DURANTE le pause lunghe. Riusa InstagramPage.browse_feed.
     # Migliora il rapporto organico:automatico che il risk-scoring notturno IG misura.
     # NON cura il mismatch web->mobile dell'API: e' mitigazione trust, non una cura.
-    warmup_browse_enabled: bool = False           # OFF di default: attivare per campagna/test
+    # ON di default (task B.4): la sessione organica e' collaudata dentro il
+    # flusso DM e prima restava spenta di default, quindi non partiva mai in
+    # produzione. bio_browser_batch_enabled resta OFF (Step 3, sotto): cambia
+    # la FORMA della sessione (blocco di N profili scrapati dentro la pausa) e
+    # va osservato prima di attivarlo, non e' lo stesso rischio del warmup.
+    warmup_browse_enabled: bool = True
     warmup_browse_min_minutes: float = 4.0        # durata min sessione organica
     warmup_browse_max_minutes: float = 9.0        # durata max sessione organica
     warmup_browse_headless: bool = True           # headless in produzione worker
@@ -225,11 +230,20 @@ class Settings(BaseSettings):
     # storie/highlights: guardare una storia lascia una "visualizzazione" visibile al
     # target, quindi restano fuori da qualunque attivita' ambient (browse_feed,
     # browse_reels, micro-scroll).
-    bio_browser_reels_every_min: int = 0          # dopo quanti profili scatta la pausa reel (random)
+    # every_min/count_min/dwell_min_s NON possono essere 0 (task B.1): erano
+    # minimi di un sorteggio, quindi "pausa disattivata" e "pausa di durata
+    # zero uscita a caso" erano lo stesso stato osservabile, e la pausa reel
+    # SOSTITUISCE quella umana (if/else in browser_bio.py/browser_import.py)
+    # -- una pausa reel da 0s toglieva anche la pausa che ci sarebbe stata.
+    # Caso peggiore misurato con i vecchi minimi: 0.0s di pausa per profilo
+    # (vedi worst_case_delay_budget_s in browser_bio.py). Con questi minimi
+    # il caso peggiore sale a ~5.3s (every_min=3, count_min=2, dwell_min_s=3:
+    # ((3-1)*5.0 + 2*3.0) / 3 = 16/3).
+    bio_browser_reels_every_min: int = 3          # dopo quanti profili scatta la pausa reel (random)
     bio_browser_reels_every_max: int = 10
-    bio_browser_reels_count_min: int = 0          # quanti reel scorrere nella pausa (random)
+    bio_browser_reels_count_min: int = 2          # quanti reel scorrere nella pausa (random)
     bio_browser_reels_count_max: int = 10
-    bio_browser_reels_dwell_min_s: float = 0.0    # sosta su ciascun reel prima di scorrere
+    bio_browser_reels_dwell_min_s: float = 3.0    # sosta su ciascun reel prima di scorrere
     bio_browser_reels_dwell_max_s: float = 10.0
     bio_browser_open_post_ratio: float = 0.25     # prob. di aprire 1 post su profilo pubblico
     # Arricchimento contatti via /api/v1/users/{pk}/info/ (in-page fetch web-autenticato):
