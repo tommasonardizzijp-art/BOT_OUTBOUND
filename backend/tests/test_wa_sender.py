@@ -31,8 +31,17 @@ def test_conteggio_non_parsabile_non_invia():
 @pytest.mark.parametrize("signal,atteso", [
     ("nessuna-cronologia:sezione-chat-vuota:nessuna-conversazione-esistente", "skipped"),
     ("nessuna-cronologia:nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione", "skipped"),
+    ("nessuna-cronologia:nessun-messaggio-nel-pannello", "skipped"),
 ])
 def test_chat_inesistente_e_colpa_del_contatto_non_nostra(signal, atteso):
+    """'nessun-messaggio-nel-pannello' e' qui, non piu' fra i guasti nostri
+    (drift SDD/contratto vs codice, sessione 08/08): SDD-whatsapp-channel.md
+    §guardia V2 e contratto-M2-M3.md §7 dicono da sempre che questo segnale
+    e' la guardia V2 (skipped/no_existing_chat), non un guasto nostro. Il
+    codice diceva l'opposto (round1 precedente l'aveva messo fra i guasti
+    nostri, vedi git blame): decisione di Tommaso, vincono i documenti.
+    Rete di sicurezza per non perdere il campanello d'allarme su un DOM
+    rotto proprio qui: test_worker.py::test_g_fm2_no_existing_chat_*."""
     esito = wa_sender.valuta_apertura(OpenResult(False, 1.0, signal))
     assert esito.puo_inviare is False
     assert esito.esito_contatto == atteso
@@ -44,20 +53,10 @@ def test_chat_inesistente_e_colpa_del_contatto_non_nostra(signal, atteso):
     "nessuna-cronologia:casella-ricerca-non-trovata",
     "nessuna-cronologia:ricerca-non-svuotata",
     "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio",
-    "nessuna-cronologia:nessun-messaggio-nel-pannello",
 ])
 def test_guasti_nostri_non_bruciano_il_contatto(signal):
     """Un selettore rotto non deve bruciare una lista (SDD 11): il contatto
-    resta queued, e' il NUMERO che si ferma.
-
-    'nessun-messaggio-nel-pannello' e' qui (decisione Tommaso round1,
-    escalation whole-branch review item (c)): il POM lo emette SOLO dopo
-    aver gia' trovato e cliccato una chat esistente nei risultati di
-    ricerca, quindi il segnale dice "nessun messaggio renderizzato in 5s"
-    (pannello lento, possibile su cronologie vecchie), non "la chat non
-    esiste". Un contatto gia' presente a DB e' evidenza che dovrebbe avere
-    storico vero (l'ingest di M2 l'ha validato) -- non si scarta per un
-    rendering lento."""
+    resta queued, e' il NUMERO che si ferma."""
     esito = wa_sender.valuta_apertura(OpenResult(False, 1.0, signal))
     assert esito.puo_inviare is False
     assert esito.esito_contatto is None      # nessuna transizione di stato
@@ -676,6 +675,39 @@ async def test_i35_chat_title_mai_salvato_come_numero(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_impara_chat_title_esclude_riga_te_stesso(db_session, monkeypatch):
+    """Bug trovato dal vivo 08/08: la riga 'messaggi a te stesso' e' inclusa
+    apposta nello scan (altri chiamanti la usano) ma il suo titolo e' il
+    nome del TITOLARE del numero mittente, non del contatto appena scritto.
+    Se resta in testa alla sidebar (es. pinnata), righe[0] la prendeva per
+    buona -- riprodotto 4/4 su un invio reale in un test manuale lo stesso
+    giorno. PASS = la riga is_yourself viene saltata, si impara la riga
+    successiva vera."""
+    from app.browser.whatsapp_page import ChatRow
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+
+    class _PomTeStesso(_PomInvio):
+        async def scan_chat_list(self):
+            return [
+                ChatRow(position=0, title="Tommaso Nardizzi", title_is_number=False,
+                        unread_count=0, preview="", last_is_outbound=True,
+                        outgoing_state="wds-ic-sent", muted=False, is_yourself=True),
+                ChatRow(position=1, title="James", title_is_number=False,
+                        unread_count=0, preview="", last_is_outbound=True,
+                        outgoing_state="wds-ic-sent", muted=False, is_yourself=False),
+            ]
+
+    pom = _PomTeStesso([])
+    await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+    await db_session.refresh(ctx["contact"])
+    assert ctx["contact"].chat_title == "James"
+
+
+@pytest.mark.asyncio
 async def test_impara_chat_title_normalizza_sempre_in_nfc(db_session, monkeypatch):
     """Backlog M4: il DOM di WhatsApp puo' restituire un nome accentato in
     forma NFD (lettera base + accento combinante separato); il matching del
@@ -920,3 +952,116 @@ async def test_ha_risposto_incrementa_contatore_replied_e_marca_step(db_session)
     assert ctx["cc"].replied_at_step == 2
     assert ctx["contact"].last_replied_at is not None
     assert ctx["campaign"].replied == 1
+
+
+# --- B2: idempotenza dell'invio (review indipendente 08/08) -----------------
+#
+# Fra "il messaggio e' partito" (send_text) e "il contatto esce dalla coda"
+# (_avanza_contatto) ci sono ~30 righe e cinque commit. Se una qualunque
+# solleva -- il blip del pooler Supabase :6543 e' l'incidente gia' noto su
+# questo progetto -- il worker fa rollback, il contatto resta queued con
+# next_action_at nel passato, e viene ripreso PER PRIMO (la claim ordina per
+# next_action_at). Senza una guardia, ~110 s dopo parte lo stesso testo allo
+# stesso numero: l'unico danno del canale che il destinatario vede, e il
+# segnale che WhatsApp usa per bandire.
+
+async def _messaggio_orfano(db_session, ctx, stato):
+    """Il residuo che quel guasto lascia a DB: la riga del messaggio scritta
+    prima dell'invio, mai portata a termine.
+
+    `flush` e non `commit`: il DB sqlite dei test e' condiviso fra tutti i
+    file e il rollback della fixture pulisce solo cio' che non e' stato
+    committato. Una riga 'sending' committata qui sopravvive al test e viene
+    raccolta da test_20_recovery_avvio_chiude_i_sending_appesi in
+    test_wa_worker.py, che conta quante ne chiude: il test rosso sarebbe suo
+    ma la colpa di questo file. Al flush la riga e' comunque visibile alla
+    guardia, che legge sulla stessa sessione."""
+    import uuid
+    from app.models.wa import WaMessage
+    msg = WaMessage(id=str(uuid.uuid4()), campaign_id=ctx["campaign"].id,
+                    contact_id=ctx["contact"].id, wa_number_id=ctx["number"].id,
+                    step_index=ctx["step"].step_index, template_variant="A",
+                    rendered_text="Ciao Marco, promo attiva.", status=stato)
+    db_session.add(msg)
+    await db_session.flush()
+    return msg
+
+
+async def _senza_messaggi(db_session, ctx):
+    """Toglie dal DB condiviso i messaggi di questa campagna.
+
+    Serve perche' la guardia chiama `_marca_contatto`, che committa: quel
+    commit porta a DB anche la riga solo flushata qui sopra."""
+    from sqlalchemy import delete
+    from app.models.wa import WaMessage
+    await db_session.execute(
+        delete(WaMessage).where(WaMessage.campaign_id == ctx["campaign"].id))
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_messaggio_gia_in_volo_non_viene_rimandato(db_session, monkeypatch):
+    """Un WaMessage in 'sending' per (campagna, contatto, step) significa
+    'il messaggio potrebbe essere gia' partito, lo stato reale e' ignoto'.
+    In dubbio non si rimanda: meglio un messaggio che non parte di uno che
+    parte due volte (e' il principio che la recovery FM14 dichiara gia')."""
+    from app.config import settings
+    from app.models.wa import WaMessageStatus
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    await _messaggio_orfano(db_session, ctx, WaMessageStatus.sending)
+    pom = _PomInvio([])
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert pom.inviato is None, "ha rimandato lo stesso messaggio allo stesso contatto"
+    assert esito.stato == "skipped"
+    assert esito.motivo == "invio_gia_registrato"
+    await _senza_messaggi(db_session, ctx)
+
+
+@pytest.mark.asyncio
+async def test_messaggio_gia_inviato_non_viene_rimandato(db_session, monkeypatch):
+    """Variante col commit riuscito e il guasto arrivato dopo (record_wa_sent,
+    _avanza_contatto): il messaggio risulta 'sent' e il contatto e' ancora
+    queued. La guardia esistente contava solo i 'sent' del CONTATTO senza
+    guardare campagna e step, e serviva ad altro (la guardia reply)."""
+    from app.config import settings
+    from app.models.wa import WaMessageStatus
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    await _messaggio_orfano(db_session, ctx, WaMessageStatus.sent)
+    pom = _PomInvio([])
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert pom.inviato is None, "ha rimandato un messaggio gia' registrato come inviato"
+    assert esito.stato == "skipped"
+    await _senza_messaggi(db_session, ctx)
+
+
+@pytest.mark.asyncio
+async def test_un_tentativo_fallito_non_blocca_il_reinvio(db_session, monkeypatch):
+    """Il contrario: 'failed' vuol dire che il messaggio NON e' partito
+    (send_text ha sollevato prima di scrivere nel composer). Quella riga non
+    deve bloccare il tentativo successivo, o un errore transitorio brucerebbe
+    il contatto per sempre."""
+    from app.config import settings
+    from app.models.wa import WaMessageStatus
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    await _messaggio_orfano(db_session, ctx, WaMessageStatus.failed)
+    pom = _PomInvio([])
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert pom.inviato is not None
+    assert esito.stato == "sent"
+
+    await _senza_messaggi(db_session, ctx)

@@ -15,7 +15,7 @@ import Link from 'next/link'
 import useSWR from 'swr'
 import { toast } from 'sonner'
 import {
-  ArrowLeft, AlertTriangle, Lock, Play, Pause, Square, RotateCcw,
+  ArrowLeft, AlertTriangle, Lock, Play, Pause, Square, RotateCcw, Wrench,
   ChevronLeft, ChevronRight, Trash2,
 } from 'lucide-react'
 import {
@@ -23,6 +23,7 @@ import {
 } from '@/lib/waApi'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { ModaleMotivo } from '@/components/wa/ModaleMotivo'
 
 const STATO_CAMPAGNA_LABEL: Record<WaCampaignStatus, string> = {
   draft: 'Bozza',
@@ -157,6 +158,30 @@ export default function DettaglioCampagnaPage({ params }: { params: Promise<{ id
     }
   }
 
+  // ---- Recupero da errore (G2) -----------------------------------------------
+  // error -> paused, MAI -> running: due click consapevoli, e' voluto (design
+  // doc §2.1). Percorso a parte da eseguiAzione perche' il modale (tendina +
+  // testo libero) resta aperto se la chiamata fallisce, cosi' non si perde il
+  // motivo gia' scritto.
+  const [recuperaOpen, setRecuperaOpen] = useState(false)
+
+  async function handleRecupera(motivo: string) {
+    setErroreAzione(null)
+    setAzioneInCorso('recupera')
+    try {
+      await waApi.campagne.recover(campaignId, motivo)
+      await refreshTutto()
+      toast.success('Campagna recuperata: e\' in pausa. Riprendila con il bottone "Riprendi" quando sei pronto.')
+      setRecuperaOpen(false)
+    } catch (err: unknown) {
+      const messaggio = err instanceof Error ? err.message : 'Errore imprevisto.'
+      setErroreAzione(messaggio)
+      toast.error(messaggio)
+    } finally {
+      setAzioneInCorso(null)
+    }
+  }
+
   // ---- Rimozione contatto (Q18) ---------------------------------------------
   const [confermaRimozioneId, setConfermaRimozioneId] = useState<string | null>(null)
   const [rimuovendoId, setRimuovendoId] = useState<string | null>(null)
@@ -221,6 +246,7 @@ export default function DettaglioCampagnaPage({ params }: { params: Promise<{ id
   const puoPausare = campagna.status === 'running'
   const puoRiprendere = campagna.status === 'paused'
   const puoFermare = campagna.status !== 'completed' && campagna.status !== 'stopped'
+  const puoRecuperare = campagna.status === 'error'
 
   return (
     <div className="space-y-6">
@@ -325,6 +351,18 @@ export default function DettaglioCampagnaPage({ params }: { params: Promise<{ id
                 onConfirm={() => eseguiAzione('riprendi', () => waApi.campagne.resume(campaignId), 'Campagna ripresa.')}
               />
             )}
+            {puoRecuperare && (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={azioneInCorso === 'recupera'}
+                onClick={() => setRecuperaOpen(true)}
+                style={{ borderColor: '#5b9dd9', color: '#5b9dd9' }}
+              >
+                <Wrench className="h-4 w-4" />
+                {azioneInCorso === 'recupera' ? 'Recupero...' : 'Recupera'}
+              </Button>
+            )}
             {puoFermare && (
               <AzioneButton
                 icona={<Square className="h-4 w-4" />}
@@ -339,6 +377,15 @@ export default function DettaglioCampagnaPage({ params }: { params: Promise<{ id
               />
             )}
           </div>
+          <ModaleMotivo
+            open={recuperaOpen}
+            onOpenChange={setRecuperaOpen}
+            title="Recupera campagna da errore"
+            description="La campagna torna in 'In pausa': resta da riprendere a mano col bottone 'Riprendi', qui sotto, quando sei pronto. Il motivo finisce nel log e nell'evento della campagna, non in una colonna visibile."
+            confirmLabel="Recupera"
+            loading={azioneInCorso === 'recupera'}
+            onConfirm={handleRecupera}
+          />
         </div>
       </Riquadro>
 

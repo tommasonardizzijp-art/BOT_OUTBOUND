@@ -65,6 +65,8 @@ M1 ha chiuso di proposito la resurrezione automatica: `_persist_status` non fa p
 2. La riattivazione richiede un **motivo scritto** (campo obbligatorio) che finisce in `wa_numbers.notes` in append, con data. Uno stato che un umano ha messo a mano si toglie a mano, lasciando traccia.
 3. Riattivare **azzera** `sent_today` e `sent_date`, e riporta `warmup_day = 1`. Un numero fermo da settimane riparte dalla rampa, non dal cap a cui era arrivato.
 
+   > **Emendamento (08/08) — `warmup_day = 1` qui non riaccende la rampa se è stata spenta a livello di prodotto.** La regola sopra resta com'è (`riattiva` scrive sempre `warmup_day = 1`, comportamento voluto e non toccato). Ma la rampa può essere disattivata GLOBALMENTE col flag `settings.wa_warmup_enabled` (default `True`, G4): a `wa_warmup_enabled = False`, `effective_wa_daily_cap()` ignora il gradino qualunque sia `warmup_day` sulla riga, quindi un `warmup_day = 1` scritto da una riattivazione resta innocuo — e `advance_wa_warmup_if_needed()` non avanza nessun numero, a prescindere dal loro `warmup_day`. Prima di questo flag, `warmup_day = 0` era l'unico modo di "spegnere" la rampa per un numero, ed era ambiguo con "rampa mai partita" — e una riattivazione lo sovrascriveva in silenzio, riaccendendola. Non più: la disattivazione vive nel flag di configurazione (`.env`/env var, non una colonna — nessuna migrazione), non nel valore di `warmup_day`. Dettaglio del meccanismo nella SDD, §11 (riga FM2 e nota su FM2-bis).
+
 **Vincolante per M3:** M3 può portare un numero **in** `suspended` (segnale di ban/limitazione, FM8) e in `cooldown`, mai **fuori** da `suspended`/`retired`.
 
 ### 2.3 Mascheramento nei log dell'ingest — è M2
@@ -149,6 +151,19 @@ La distinzione che conta: **colpa del contatto** (→ terminale, il contatto esc
 | `nessuna-cronologia:focus-non-sulla-ricerca-pre-invio` | **nostra** (focus perso) | resta `queued` | contatore FM2 +1 |
 
 Il contatore FM2 è per-numero e per-sessione: **3 fallimenti consecutivi "nostri" su chat diverse** ⇒ stop invii del numero, campagna → `error`, screenshot diagnostico, alert Telegram. Nessun contatto marcato `failed` in quel giro.
+
+> **Emendamento (08/08) — drift codice vs contratto su `nessun-messaggio-nel-pannello`, e il contatore gemello che lo copre.**
+>
+> Questa tabella ha sempre detto che `nessun-messaggio-nel-pannello` è guardia V2 (riga 143, sopra). Il **codice** (`wa_sender._SEGNALI_COLPA_NOSTRA`) diceva l'opposto da un round di lavoro precedente: lo trattava come guasto nostro e lo faceva armare FM2 come le tre righe "nostra" qui sopra. Verificato e corretto (decisione di Tommaso): vince il contratto, il codice è stato allineato.
+>
+> Da solo, questo allineamento toglierebbe un campanello d'allarme reale: se il DOM si rompe **proprio** su questo selettore, un ramo `skipped` silenzioso brucerebbe un'intera lista segnando tutti come "chat inesistente" senza che nessuno se ne accorga. Per questo esiste un **secondo contatore, gemello di FM2 ma separato**: `wa_worker.MAX_NO_EXISTING_CHAT_CONSECUTIVI` (valore **5**, più alto dei 3 di FM2 perché qui il segnale singolo è ambiguo per costruzione — un pannello lento su una cronologia vecchia è un evento reale, solo una sequenza lunga tradisce un DOM cambiato).
+>
+> Regole del contatore (in `wa_worker.esegui_mini_sessione`, stesso punto del loop di FM2):
+> - conta solo i contatti che escono `skipped` con motivo `no_existing_chat` **generato da `nessun-messaggio-nel-pannello`** (le altre due righe "V2" della tabella sopra sono chat davvero inesistenti, non un sintomo di DOM rotto, ma producono lo stesso `esito.motivo`, quindi il contatore le conta tutte insieme — è una scelta conservativa: costa qualche falso positivo raro, mai un falso negativo);
+> - **è consecutivo**: un **invio riuscito** (`sent`) lo azzera; gli altri esiti che nel frattempo capitano (`failed`, altri `skipped`, `opted_out`, `replied`, `queued` non-FM2) **non lo toccano** — non è un secondo `guasti_consecutivi` generico, è dedicato a questa sequenza;
+> - a **5 di fila**: stesso trattamento di FM2 (`_ferma_numero_per_guasto`) — numero in `cooldown` 4h, campagna in `error`, alert Telegram con causa dedicata (non il generico "probabile DOM cambiato" di FM2 classico), contatti **non** ritoccati (restano `skipped`/`no_existing_chat`, non tornano `queued`: la guardia V2 sul singolo contatto resta valida anche quando la sequenza arma l'escalation).
+>
+> Nessuna migrazione: il contatore è una variabile locale del loop della mini-sessione (`esegui_mini_sessione`), esattamente come `guasti_consecutivi` — non persiste a DB, riparte da zero a ogni mini-sessione nuova.
 
 > **Emendamento M5.1 (07/08) — "nostri" è una proprietà dell'esito, non del motivo.**
 >

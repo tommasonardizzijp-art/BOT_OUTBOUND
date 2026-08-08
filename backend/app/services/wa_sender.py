@@ -19,27 +19,38 @@ from app.browser.whatsapp_page import OpenResult
 # _apri_chat_da_risultati / _history_signal: se cambiano li', questo modulo
 # smette di riconoscerli e cade nel ramo fail-closed (colpa nostra), che e'
 # il fallimento giusto.
+#
+# 'nessun-messaggio-nel-pannello' e' qui (drift SDD/contratto vs codice,
+# sessione 08/08 -- decisione di Tommaso: vincono i documenti). Il round1
+# precedente lo aveva messo fra i guasti nostri sotto, col ragionamento che
+# whatsapp_page.py lo emette SOLO dopo aver gia' trovato e cliccato una chat
+# esistente nei risultati di ricerca, quindi "nessun messaggio renderizzato
+# in 5s" sembrava un pannello lento (cronologia vecchia) e non "la chat non
+# esiste". SDD-whatsapp-channel.md § guardia V2 e contratto-M2-M3.md §7
+# dicono da sempre l'opposto, e sono la fonte usata per progettare il resto
+# del canale: il codice andava allineato a loro, non il contrario.
+#
+# Rete di sicurezza per non perdere il campanello d'allarme che questo
+# spostamento toglie (se il DOM si rompe PROPRIO in questo punto, un ramo
+# 'skipped' silenzioso brucerebbe una lista intera segnando tutti come
+# freddi): il worker (wa_worker.esegui_mini_sessione) conta i
+# 'no_existing_chat' CONSECUTIVI su questo segnale specifico e arma FM2
+# comunque a MAX_NO_EXISTING_CHAT_CONSECUTIVI, azzerato solo da un invio
+# riuscito -- non dagli altri 'skipped'/'failed' di mezzo, di proposito:
+# e' un contatore dedicato a QUESTO segnale, non un secondo guasti_
+# consecutivi. Vedi wa_worker.py e docs/whatsapp/SDD-whatsapp-channel.md.
 _SEGNALI_CHAT_INESISTENTE = (
     "nessuna-cronologia:sezione-chat-vuota:nessuna-conversazione-esistente",
     "nessuna-cronologia:nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione",
+    "nessuna-cronologia:nessun-messaggio-nel-pannello",
 )
 
 # Segnali che dicono "la pagina non era nello stato che ci aspettavamo":
 # infrastruttura nostra. Il contatto NON si tocca.
-#
-# 'nessun-messaggio-nel-pannello' e' qui, non sopra (decisione Tommaso
-# round1, escalation whole-branch review item (c)): whatsapp_page.py lo
-# emette SOLO dopo aver gia' trovato e cliccato una chat esistente nei
-# risultati di ricerca -- il segnale dice "nessun messaggio renderizzato in
-# 5s" (un pannello lento su cronologie vecchie e' un evento reale), non
-# "questa chat non esiste". Un contatto presente a DB e' gia' evidenza che
-# dovrebbe avere storico vero (l'ingest di M2 lo ha validato): non si
-# scarta il contatto per un rendering lento, si ritenta.
 _SEGNALI_COLPA_NOSTRA = (
     "nessuna-cronologia:casella-ricerca-non-trovata",
     "nessuna-cronologia:ricerca-non-svuotata",
     "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio",
-    "nessuna-cronologia:nessun-messaggio-nel-pannello",
 )
 
 _SEGNALE_RICERCA_VUOTA = "nessuna-cronologia:nessun-risultato-di-ricerca"
@@ -114,7 +125,8 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
 
     # 1. Quarantena post-riconnessione (contratto sez. 3.4.2). Costo zero, e
     #    copre la finestra in cui QUALUNQUE lettura sarebbe inaffidabile.
-    #    ATTENZIONE: 15 minuti e' un valore STIMATO, non misurato -- si
+    #    ATTENZIONE: il default (config.wa_resync_quarantine_min, 2 min
+    #    dall'08/08 -- prima 15) e' un valore STIMATO, non misurato -- si
     #    rimisura quando il selettore SYNC_INDICATOR verra' catturato.
     quarantena_s = float(settings.wa_resync_quarantine_min) * 60
     if browser_avviato_da_s < quarantena_s:
@@ -314,6 +326,43 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
         await _incrementa_fallimento(db, cc, apertura.motivo)
         return EsitoInvio("queued", apertura.motivo, arma_fm2=False)
 
+    # --- idempotenza: questo step e' gia' stato mandato? -------------------
+    # Fra send_text e _avanza_contatto ci sono cinque commit: se uno solleva
+    # (il blip del pooler :6543 e' l'incidente noto), il worker fa rollback e
+    # il contatto resta queued con next_action_at nel passato -- quindi viene
+    # ripreso PER PRIMO, e ~110 s dopo lo stesso testo ripartirebbe allo
+    # stesso numero. E' l'unico danno del canale che il destinatario vede.
+    #
+    # 'sending' vale quanto 'sent': vuol dire "potrebbe essere gia' partito,
+    # lo stato reale e' ignoto", e in dubbio non si rimanda -- lo stesso
+    # principio che la recovery FM14 dichiara nel suo docstring. 'failed'
+    # invece e' un invio che NON e' partito (send_text ha sollevato prima di
+    # scrivere nel composer): quello non deve bloccare il tentativo dopo, o
+    # un errore transitorio brucerebbe il contatto per sempre.
+    #
+    # NOTA: qui la chiave e' la tripla (campagna, contatto, step). La query
+    # sotto (`gia_scritto`) somiglia ma non c'entra: guarda il solo contatto,
+    # ignora campagna e step, e alimenta la guardia reply -- non e' e non e'
+    # mai stata una difesa anti-doppione.
+    gia_registrato = await db.scalar(
+        select(WaMessage.status).where(
+            WaMessage.campaign_id == campaign.id,
+            WaMessage.contact_id == contact.id,
+            WaMessage.step_index == step.step_index,
+            WaMessage.status.in_((WaMessageStatus.sending, WaMessageStatus.sent)),
+        ).limit(1)
+    )
+    if gia_registrato is not None:
+        logger.error(
+            f"[WA] {masked}: esiste gia' un messaggio '{gia_registrato.value}' per "
+            f"questo step -- NON rimando. Il contatto va in skipped: se e' "
+            "'sending' lo stato reale dell'invio e' ignoto e va verificato a mano.")
+        await _marca_contatto(db, cc, WaContactStatus.skipped,
+                              errore=f"invio gia' registrato ({gia_registrato.value}) "
+                                     "per questo step: possibile guasto DB a invio "
+                                     "avvenuto, verificare se il messaggio e' arrivato")
+        return EsitoInvio("skipped", "invio_gia_registrato")
+
     # --- guardia pre-invio -------------------------------------------------
     gia_scritto = bool(await db.scalar(
         select(func.count(WaMessage.id)).where(
@@ -438,6 +487,13 @@ async def _impara_chat_title(db, pom, contact) -> None:
     except Exception as exc:
         logger.debug(f"chat_title non appreso ({type(exc).__name__}): non e' un errore")
         return
+    # La riga "messaggi a te stesso" e' inclusa nello scan apposta (altri
+    # chiamanti la usano), ma il suo titolo e' il nome del TITOLARE del
+    # numero mittente, non del contatto appena scritto -- se resta in testa
+    # (es. pinnata) righe[0] la prende per buona (bug trovato dal vivo 08/08,
+    # riprodotto 4/4 su un invio reale: chat_title salvato = nome di Tommaso
+    # per ogni contatto appena contattato).
+    righe = [r for r in righe if not r.is_yourself]
     if righe and not righe[0].title_is_number and righe[0].title:
         # NFC prima del troncamento: il DOM di WhatsApp puo' restituire un
         # nome accentato in NFC o NFD a seconda del sistema che l'ha

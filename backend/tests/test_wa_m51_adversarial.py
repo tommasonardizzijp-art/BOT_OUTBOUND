@@ -134,7 +134,7 @@ async def test_a4_quarantena_gia_scaduta_non_riaspetta(monkeypatch):
 
     assert motivo is None
     assert orologio["t"] == 10_000.0
-    assert settings.wa_resync_quarantine_min == 15   # config vera, non toccata
+    assert settings.wa_resync_quarantine_min == 2    # config vera (08/08), non toccata
 
 
 @pytest.mark.asyncio

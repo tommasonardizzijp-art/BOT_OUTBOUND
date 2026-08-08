@@ -80,6 +80,92 @@ async def test_8_status_espone_i_campi_con_dati_reali(db_session):
 
 
 @pytest.mark.asyncio
+async def test_g3_status_espone_motivo_stop_quando_il_canale_e_fermo(db_session):
+    """G3: la striscia di stato frontend deve poter mostrare PERCHE' il
+    canale si e' fermato prima di lasciar premere 'Riprendi'. Il motivo e'
+    gia' salvato a DB (bot_state.wa_halted_reason, fix B1 di PR #52): qui
+    va solo esposto in /wa/ops/status, che oggi non lo espone."""
+    from app.api import wa_ops
+    from app.services import bot_state_service as bss
+
+    await bss.halt_wa(reason="breaker: campagna X al 30% opt-out", by="test", db=db_session)
+    await db_session.commit()
+
+    body = await wa_ops.wa_ops_status(db=db_session)
+    assert body["wa_halted"] is True
+    assert body["motivo_stop"] == "breaker: campagna X al 30% opt-out"
+
+
+@pytest.mark.asyncio
+async def test_g3_status_motivo_stop_none_quando_il_canale_non_e_fermo(db_session):
+    from app.api import wa_ops
+    from app.services import bot_state_service as bss
+
+    await bss.resume_wa(by="test", db=db_session)
+    await db_session.commit()
+
+    body = await wa_ops.wa_ops_status(db=db_session)
+    assert body["wa_halted"] is False
+    assert body["motivo_stop"] is None
+
+
+async def _ritira_numeri_attivi_preesistenti(db_session) -> None:
+    """Altri test di questo file (es. test_8) committano DAVVERO a DB numeri
+    WaNumber 'active' -- db_session fa rollback in teardown, ma un commit
+    esplicito a meta' test sopravvive lo stesso (nuova transazione dopo il
+    commit, il rollback di teardown non tocca quella gia' chiusa). I test
+    'cap_effettivo' qui sotto verificano un MINIMO/None fra i numeri attivi:
+    senza questa pulizia vedrebbero anche i residui di test precedenti nello
+    stesso run e il risultato dipenderebbe dall'ordine di esecuzione."""
+    from sqlalchemy import update
+    from app.models.wa import WaNumber, WaNumberStatus
+
+    await db_session.execute(update(WaNumber).values(status=WaNumberStatus.retired))
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_g4_status_cap_effettivo_e_il_minimo_tra_i_numeri_attivi(db_session, monkeypatch):
+    """G4: la striscia deve mostrare il tetto REALE del canale, non solo se
+    e' fermo o no -- e' l'unica protezione rimasta con la rampa di warmup
+    disattivata (warmup_day=0). Semantica scelta per piu' numeri attivi:
+    il MINIMO dei loro cap effettivi (il collo di bottiglia vero)."""
+    from app.config import settings
+    from app.api import wa_ops
+
+    await _ritira_numeri_attivi_preesistenti(db_session)
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+
+    tenant = await make_tenant(db_session)
+    # Un numero fuori warmup (warmup_day=0): il tetto e' il suo daily_cap "nudo".
+    numero_a = await make_number(db_session, tenant, label="A")
+    numero_a.daily_cap = 50
+    numero_a.warmup_day = 0
+    # Un secondo numero IN warmup: il suo tetto e' il gradino, piu' basso.
+    numero_b = await make_number(db_session, tenant, label="B")
+    numero_b.daily_cap = 200
+    numero_b.warmup_day = 3   # 3o gradino della lista sopra = 30
+    await db_session.commit()
+
+    body = await wa_ops.wa_ops_status(db=db_session)
+    assert body["numeri_attivi"] == 2
+    assert body["cap_effettivo"] == 30   # il minimo, non il primo ne' la media
+
+
+@pytest.mark.asyncio
+async def test_g4_status_cap_effettivo_none_senza_numeri_attivi(db_session):
+    """Nessun numero attivo -- nessun tetto da mostrare, non uno zero che
+    si potrebbe leggere come 'canale bloccato a 0 invii/giorno'."""
+    from app.api import wa_ops
+
+    await _ritira_numeri_attivi_preesistenti(db_session)
+
+    body = await wa_ops.wa_ops_status(db=db_session)
+    assert body["cap_effettivo"] is None
+    assert body["numeri_attivi"] == 0
+
+
+@pytest.mark.asyncio
 async def test_halt_e_resume_cambiano_solo_il_canale_wa(db_session):
     from app.services import bot_state_service as bss
     await bss.halt_wa(reason="via API", by="test", db=db_session)

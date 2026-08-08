@@ -218,5 +218,86 @@ Sciolte le domande di §17 che bloccavano il PoC gate:
 
 ---
 
-## 13. Prossimo passo
-SDD scritto (v1.1 23/07) e aggiornato a **v1.2** (24/07, [T] bloccanti sciolte). Prossimo: **spec/plan di M0 (PoC gate)** — script PoC usa-e-getta, non codice di produzione. Gate duro: PoC-1/2/3 falliti ⇒ strada A rimessa in discussione prima di costruire M1+.
+## 13. Decisioni di esecuzione M0 (26-27/07)
+
+Prese durante l'avvio operativo del PoC. **Modificano** decisioni prese sopra.
+
+| Q | Decisione | Data | Impatto |
+|---|---|---|---|
+| Q98 | **Nessun proxy in M0.** `POC_WA_PROXY` resta vuota | 26/07 | M0 esce col layer proxy **non validato**: va provato in M1/M3 prima di qualunque campagna pagante |
+| Q97 | **Il PC si spegne di notte.** Heartbeat con `--nota "dopo riavvio PC"` a ogni riaccensione | 26/07 | ~14 riavvii invece dei ≥2 richiesti: criterio superato per costruzione, e in cambio si misura il caso d'uso più ostile. Se la sessione muore, **è un risultato**, non un incidente |
+| **Q60 (sostituita)** | **Mittente = numero PERSONALE di Tommaso su WhatsApp Business**, non il secondario Primero. Destinatari = suoi contatti personali **avvisati** | **27/07** | vedi sotto |
+| Q105 | Confermato nessun seed: le ≥6 chat controllate escono dalle chat reali del numero personale | 27/07 | — |
+| — | Radice artefatti da `D:\wa-poc` a **`D:\dev\wa-poc`**; numeri reali in `poc.env`, caricato da `_common.py` | 27/07 | `D:\dev` verificato **non** repo git: i numeri non possono finire in un commit |
+
+### Perché Q60 è cambiata, e cosa costa
+
+**Causa:** Tommaso non ha accesso al numero secondario di Primero, né lo avrà nei prossimi giorni. M0 è il cammino critico (PoC-1 dura 14 giorni): aspettare fermava tutto.
+
+**Cosa migliora.** Il vincolo originale *"solo messaggi reali, mai messaggi di test"* nasceva per non bruciare i contatti di un cliente vero. Su un numero personale con destinatari avvisati quel rischio **sparisce**, e con esso il vero driver dei ban WhatsApp: i report per spam dei destinatari. Un errore dello script ora colpisce chat di Tommaso, non di Primero.
+
+**Cosa costa.** Se WhatsApp banna, il numero perso è **quello personale**. Rischio valutato **basso ma non nullo**:
+- a favore: protocollo linked-device **ufficiale** (non Baileys/protocollo reimplementato — è la differenza che pesa di più), IP residenziale senza proxy, una sola sessione, nessuna iniezione di fingerprint, 20 invii in 14 giorni, destinatari consenzienti;
+- contro: l'automazione **resta contro i ToS** a prescindere dall'indistinguibilità, ed esistono vettori di detection browser (`navigator.webdriver`, artefatti CDP) che Patchright neutralizza ma che nessuno ha mai verificato *contro WhatsApp nello specifico*.
+
+Tommaso ha accettato il trade-off il 27/07 dopo averlo avuto per iscritto. La **verifica di detection a vuoto** (aprire WhatsApp Web col profilo Patchright *senza* login e leggere cosa la pagina vede dell'ambiente) è stata proposta e **declinata**: se PoC-1 mostra anomalie — logout ripetuti, re-scan richiesti, schermate insolite — è la prima cosa da riprendere prima di proseguire.
+
+**Cosa NON cambia:** allowlist fail-closed, watcher che non apre le chat, guardia pre-invio, messaggi veri. Cambia solo *quali* numeri stanno in `POC_WA_ALLOWED_NUMBERS`.
+
+**Cosa NON eredita M1:** è una deroga di M0. La produzione gira su numeri di servizio.
+
+---
+
+## 13-bis. Decisioni ed emersi dell'esecuzione (27/07, pomeriggio)
+
+| Q | Decisione | Data | Impatto |
+|---|---|---|---|
+| — | **PoC-2 si chiude a 13 invii su 20.** Criterio di volume dichiarato mancato, non aggirato | 27/07 | il verdetto su PoC-2 si argomenta sul **tasso di consegna** (13/13) e sui tempi misurati, non sul volume |
+| — | **PoC-4 bypassato** per evidenza già raccolta sul campo | 27/07 | vedi sotto: due scenari restano scoperti |
+| — | **Revoca dell'opt-out = override manuale di Tommaso**, nessun comando in M0 | 27/07 | evenienza rarissima. Diventa **requisito M1** quando l'opt-out passa a DB, non debito di M0 |
+| — | **Il messaggio che chiedeva "rispondi STOP" è stato RIMOSSO da `messages.txt`** | 27/07 | restava sorteggiabile da `poc2_send`: avrebbe messo in opt-out permanente altri contatti veri. Gli indici di `--messaggio-n` sono scalati di 1 |
+| — | **`poc4_coexist` passa da deep-link a `open_by_search`** | 27/07 | era rimasto sulla strategia scartata in PoC-2a: avrebbe misurato la coesistenza su codice che M3 non usa |
+| — | **PoC-1 dato per passato in anticipo**: la pianificazione di M1 parte senza aspettare il 10/08 | 27/07 | motivo di Tommaso: una sessione caduta si risolve facendo riscansionare il QR al cliente. **Ma** ogni riscansione riapre la finestra di risync (A9) ⇒ la quarta guardia diventa **obbligatoria**, non opzionale. La *frequenza* di caduta va misurata lo stesso: decide se M1 ha bisogno di riavvio automatico e alerting |
+| — | **Deployment: il browser gira sul PC di Tommaso.** In futuro possibile anche sui PC dei clienti, con credenziali e dati loro | 27/07 | **niente pagina admin per il QR da remoto in M1**: il login è assistito e locale (calco `manual_login.py`). Vincolo di progetto: sessione/QR **dietro un'interfaccia** e multi-tenant **nello schema fin da subito**, altrimenti il passaggio a "il cliente lo esegue in casa sua" è una riscrittura. Capienza misurata: **1 numero per volta** su questa macchina (1,2 GB per profilo su 7,4 GB) |
+
+### Il criterio "guardia ≤ 2s" va ritarato, non dichiarato fallito
+
+Misurato su 13 invii: `guardia_dom_ms` mediana **5,7 s**, p95 7,5 s, max 12,1 s. **12 invii su 13 sopra soglia.** L'unico sotto (21 ms) è il primo, mandato *prima* che la guardia venisse riscritta.
+
+Non è una regressione: la soglia fu fissata quando si credeva che la coda inbound fosse leggibile senza scroll. La conversazione è virtualizzata, caricare la cronologia costa 2-12 s e **non è aggirabile senza rinunciare alla garanzia opt-out**. La soglia giusta si scrive dai dati, non dall'intenzione.
+
+Costo pieno di un invio: mediana **47 s**, p95 60 s. È da qui che escono i cap giornalieri realistici (Q50), non da `guardia_totale_ms`.
+
+### Perché PoC-4 è stato bypassato, e cosa resta scoperto
+
+**Decisione di Tommaso, argomentata:** durante il batch di invii del 27/07 stava già scrivendo a mano dal telefono sullo stesso numero, senza alcun problema. Il multi-dispositivo è funzione **nativa** di WhatsApp Business: non è lì che si rompe. La sua diagnosi — il rischio non è la concorrenza umano/bot, è il **riconoscimento dell'automazione** — è condivisa, e sposta il lavoro vero sulla simulazione del comportamento umano.
+
+**Copre S1 e S2.** Restano due cose che quell'evidenza non tocca:
+
+- **S3 — finestra TOCTOU della guardia.** Tra la lettura della coda inbound e l'invio effettivo passano ~20 s misurati (typing umano + conferma). Uno STOP che arriva **dentro** quella finestra non viene visto: la guardia ha già deciso. Non serve un test per stabilirlo, è strutturale. Va scritto come **limite noto** e mitigato in M1 (ri-lettura della coda subito prima di premere invio, molto più economica della prima perché la cronologia è già caricata).
+- **S4 — inbound già letto dall'umano.** Se il cliente legge una risposta dal telefono, il badge "non letto" sparisce e **il watcher quella risposta non la vede più**. Se conteneva uno STOP, è perso. Non richiede invii: è osservazione pura, e resta l'unico scenario di PoC-4 che varrebbe la pena eseguire.
+
+### RISCHIO NUOVO — la sincronizzazione incompleta rende cieca la guardia opt-out
+
+Sollevato da Tommaso il 27/07. WhatsApp Web **non sincronizza tutte le chat all'istante**: su profili con molte chat (il catalogo DOM ne ha misurate **485**) le conversazioni arrivano progressivamente, e una chat può mostrare solo gli ultimi messaggi mentre i precedenti sono ancora in arrivo. Dopo uno scollegamento e un nuovo collegamento la risincronizzazione riparte da capo.
+
+**Perché è grave.** La guardia promette una cosa sola: *prima di scrivere, controllo se questo mi ha detto STOP*. Su una chat non ancora sincronizzata la guardia **non legge un silenzio: legge il vuoto** — e lo tratta da silenzio. Poi invia.
+
+**Il codice oggi non sa distinguere i due casi.** `carica_cronologia` (`_common.py`) marca `esaurita` dopo **3 giri di scroll senza nuovi messaggi**: una chat finita e una chat non ancora sincronizzata si comportano in modo identico.
+
+**La mitigazione proposta da Tommaso** — "l'operatore aspetta che WhatsApp sincronizzi" — è necessaria ma non sufficiente: è una procedura, e le procedure saltano. La difesa tecnica coerente col resto del sistema è una **quarta guardia fail-closed**: se in pagina c'è l'indicatore di sincronizzazione in corso, **non si invia**, esattamente come già accade quando la coda inbound non viene agganciata. Cecità dichiarata, mai scambiata per silenzio.
+
+**Perché resta aperta.** Catturare il selettore dell'indicatore richiede di scollegare e ricollegare WhatsApp Web, cioè un **re-scan del QR: è l'unica cosa che azzera PoC-1** e butta via i 14 giorni. Non si fa. Si cataloga al **primo re-scan che capiterà comunque** (crash, logout o fine di PoC-1): è un'osservazione gratuita, va solo colta invece che sprecata.
+
+### Il browser è morto da solo dopo 16 minuti — la sessione no
+
+Il daemon persistente è partito alle 12:22 UTC ed è morto entro le 12:38 (`TargetClosedError`), senza che nessuno lo chiudesse. Nessun crash di Chrome nell'Event Log di Windows: **la causa non è provata**. La pressione di RAM è l'ipotesi principale (7,4 GB totali sulla macchina, ~1,2 GB per profilo, 1,9 GB liberi a riposo), ma resta ipotesi.
+
+Due fatti invece stabiliti, entrambi requisiti per M1:
+- **la sessione WhatsApp è sopravvissuta**: l'heartbeat successivo ha trovato la lista chat, nessun QR, nessun re-scan. Per il criterio di PoC-1 non è un guasto — è morto il processo, non la sessione;
+- **il daemon se n'è accorto solo allo scan successivo**: fino a **15 minuti da morto senza saperlo**. Un watcher di produzione ha bisogno di un liveness check più fitto dello scan e di un riavvio automatico, altrimenti perde inbound in silenzio.
+
+---
+
+## 14. Prossimo passo
+SDD **v1.2** (24/07). Piano M0 scritto (24/07) ed **eseguito lato codice** (26/07: task 1-9, script PoC + helper testati, 71 test verdi). Restano: **Task 0 fisico** (numeri in allowlist, 3 messaggi, slot linked device) → **login QR** → i 14 giorni di PoC-1, con gli altri PoC dentro la finestra. Gate duro invariato: PoC-1/2/3 falliti ⇒ strada A rimessa in discussione prima di costruire M1+.

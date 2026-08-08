@@ -20,6 +20,36 @@ async def test_riattivazione_porta_a_pending_qr_non_ad_active(db_session):
 
 
 @pytest.mark.asyncio
+async def test_riattivazione_con_rampa_disabilitata_non_riaccende_il_cap_effettivo(
+        db_session, monkeypatch):
+    """Il caso che ha originato il flag G4 (08/08): un numero con la rampa
+    spenta a livello di prodotto (wa_warmup_enabled=False) viene sospeso e
+    poi riattivato. riattiva() continua a scrivere warmup_day=1 -- comportamento
+    INVARIATO, non e' lei il difetto -- ma con la rampa disabilitata quel
+    valore non deve piu' tradursi in un tetto basso: effective_wa_daily_cap
+    deve ignorare il gradino e restare sul daily_cap nudo del numero."""
+    from app.config import settings
+    from app.services import wa_number_manager as wnm
+
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_enabled", False)
+
+    tenant = await make_tenant(db_session)
+    n = await make_number(db_session, tenant, status=WaNumberStatus.retired)
+    n.daily_cap = 50
+    n.warmup_day = 0   # rampa spenta anche sul numero, prima della riattivazione
+    await db_session.commit()
+
+    await wa_numbers.riattiva(n.id, motivo="numero rientrato dal cliente", db=db_session)
+    await db_session.refresh(n)
+
+    assert n.warmup_day == 1   # riattiva scrive comunque 1: comportamento invariato
+    # ma il flag globale spento tiene il gradino (day-1 = 20) fuori dal min():
+    # il tetto resta il daily_cap nudo, non 20.
+    assert wnm.effective_wa_daily_cap(n, None) == 50
+
+
+@pytest.mark.asyncio
 async def test_riattivazione_senza_motivo_rifiutata(db_session):
     tenant = await make_tenant(db_session)
     n = await make_number(db_session, tenant, status=WaNumberStatus.suspended)

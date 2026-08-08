@@ -34,6 +34,28 @@ def test_effective_cap_past_warmup_uses_last_step(monkeypatch):
     assert wnm.effective_wa_daily_cap(number, _campaign()) == 100
 
 
+def test_effective_cap_ignora_il_gradino_se_la_rampa_e_disabilitata(monkeypatch):
+    """G4 (flag, 08/08): con wa_warmup_enabled=False il gradino di warmup
+    non entra piu' nel min(), QUALUNQUE sia warmup_day -- anche se la riga
+    dice 'sono al giorno 3' (gradino 30), il tetto resta il daily_cap nudo
+    del numero."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_enabled", False)
+    number = _number(daily_cap=200, warmup_day=3)   # gradino 3 = 30, ignorato
+    assert wnm.effective_wa_daily_cap(number, _campaign()) == 200
+
+
+def test_effective_cap_flag_true_di_default_comportamento_invariato(monkeypatch):
+    """Non-regressione esplicita: con wa_warmup_enabled=True (default, non
+    toccato) il gradino torna a comandare come prima del flag."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    assert settings.wa_warmup_enabled is True   # non toccato, e' il default
+    number = _number(daily_cap=200, warmup_day=3)
+    assert wnm.effective_wa_daily_cap(number, _campaign()) == 30
+
+
 def test_effective_cap_is_min_of_number_campaign_and_warmup(monkeypatch):
     from app.config import settings
     monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
@@ -294,6 +316,29 @@ async def test_advance_wa_warmup_avanza_di_un_solo_gradino(
     await db_session.refresh(numero)
     assert numero.warmup_day == 2
     assert numero.warmup_advanced_date == wnm._utc_today_str()
+
+
+@pytest.mark.asyncio
+async def test_advance_wa_warmup_non_avanza_nessun_numero_se_la_rampa_e_disabilitata(
+        db_session, monkeypatch, _tenant_warmup):
+    """G4 (flag, 08/08): a wa_warmup_enabled=False, advance_wa_warmup_if_needed
+    deve essere un no-op totale -- nessun numero avanza, nessuno warmup_
+    advanced_date viene toccato. Stesso principio del guard esistente su
+    WA_WARMUP_ADVANCE_STEPS_PER_DAY<=0 (routine gia' in questa funzione),
+    ma sul flag invece che sul passo."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    monkeypatch.setattr(settings, "wa_warmup_enabled", False)
+
+    numero = _make_wa_number(_tenant_warmup.id, warmup_day=1, warmup_advanced_date=None)
+    db_session.add(numero)
+    await db_session.commit()
+
+    await wnm.advance_wa_warmup_if_needed()
+
+    await db_session.refresh(numero)
+    assert numero.warmup_day == 1
+    assert numero.warmup_advanced_date is None
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,18 @@ from app.services.work_enqueue import arq_redis_settings
 # Contratto §3.2.
 MAX_GUASTI_CONSECUTIVI = 3
 
+# Rete di sicurezza del drift SDD/contratto (sessione 08/08, vedi wa_sender.
+# _SEGNALI_CHAT_INESISTENTE): 'nessun-messaggio-nel-pannello' non arma piu'
+# guasti_consecutivi (produce skipped/no_existing_chat, guardia V2, non e'
+# colpa nostra), ma un contatore GEMELLO e SEPARATO conta i
+# 'no_existing_chat' consecutivi su chat diverse e ferma comunque il numero
+# a 5. Piu' alto di MAX_GUASTI_CONSECUTIVI (3) perche' qui il segnale singolo
+# e' ambiguo per costruzione (puo' essere un pannello lento su una
+# cronologia vecchia, evento reale) -- solo una sequenza lunga distingue
+# "il DOM e' cambiato" da rumore normale. SDD §guardia V2 / contratto-M2-M3
+# §7 vanno aggiornati in coppia con questa costante.
+MAX_NO_EXISTING_CHAT_CONSECUTIVI = 5
+
 # Cooldown Redis applicato quando FM2 ferma il numero (Fix 3, review finale
 # I4): diverso dai cooldown BREVI usati altrove per blocchi soft di
 # routine, perche' qui serve un UMANO che legga l'alert Telegram (gia'
@@ -381,6 +393,7 @@ async def esegui_mini_sessione(number_id: str) -> dict:
     quanti = None          # calcolato dopo il primo claim, sulla campagna vera
     processati = 0
     guasti_consecutivi = 0
+    no_existing_chat_consecutivi = 0
 
     try:
         async with wa_profile_lock.held(number_id) as lock_token:
@@ -492,9 +505,18 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                         if res.stato == "sent":
                             esito["inviati"] += 1
                             guasti_consecutivi = 0
+                            # Un invio riuscito e' l'UNICO evento che azzera
+                            # questo contatore (decisione esplicita, drift
+                            # SDD): gli altri 'skipped'/'failed' di mezzo non
+                            # lo toccano, di proposito -- e' dedicato a UNA
+                            # sequenza dello stesso segnale, non un secondo
+                            # guasti_consecutivi generico.
+                            no_existing_chat_consecutivi = 0
                         elif res.stato in ("skipped", "opted_out", "replied"):
                             esito["saltati"] += 1
                             guasti_consecutivi = 0
+                            if res.stato == "skipped" and res.motivo == "no_existing_chat":
+                                no_existing_chat_consecutivi += 1
                         elif res.stato == "failed":
                             esito["falliti"] += 1
                             guasti_consecutivi = 0
@@ -516,6 +538,14 @@ async def esegui_mini_sessione(number_id: str) -> dict:
                             await _ferma_numero_per_guasto(db, number_id, campaign_id,
                                                            guasti_consecutivi)
                             esito["motivo"] = "guasti_consecutivi"
+                            break
+                        if no_existing_chat_consecutivi >= MAX_NO_EXISTING_CHAT_CONSECUTIVI:
+                            await _ferma_numero_per_guasto(
+                                db, number_id, campaign_id, no_existing_chat_consecutivi,
+                                causa="segnali 'no_existing_chat' consecutivi "
+                                      "(probabile DOM cambiato proprio su quel selettore, "
+                                      "non i contatti)")
+                            esito["motivo"] = "no_existing_chat_consecutivi"
                             break
 
                     # Heartbeat del lucchetto: rimette il TTL pieno ora che c'e'
@@ -547,11 +577,19 @@ async def _rilascia_lock(db, cc_id: str) -> None:
     await db.commit()
 
 
-async def _ferma_numero_per_guasto(db, number_id: str, campaign_id: str, n: int) -> None:
-    """FM2: N fallimenti nostri consecutivi su chat diverse = DOM cambiato o
-    pagina in stato inatteso. Si ferma il numero e si mette la campagna in
-    error; i contatti restano queued perche' NON e' colpa loro. Un selettore
-    rotto non deve bruciare una lista (SDD 11)."""
+async def _ferma_numero_per_guasto(db, number_id: str, campaign_id: str, n: int, *,
+                                   causa: str = "guasti consecutivi (probabile DOM cambiato)") -> None:
+    """FM2: N eventi consecutivi su chat diverse che indicano un problema
+    NOSTRO (DOM cambiato o pagina in stato inatteso) fermano il numero e
+    mettono la campagna in error; i contatti restano intatti (queued o,
+    nel caso no_existing_chat, gia' correttamente skipped) perche' NON e'
+    colpa loro. Un selettore rotto non deve bruciare una lista (SDD 11).
+
+    Due contatori distinti chiamano questa funzione (esegui_mini_sessione):
+    guasti_consecutivi (guasti DOM classici, soglia 3) e
+    no_existing_chat_consecutivi (drift SDD, soglia 5, vedi wa_sender.py).
+    `causa` distingue il log/alert fra i due invece di dire sempre lo stesso
+    "probabile DOM cambiato" generico."""
     from app.models.wa import WaCampaign, WaCampaignStatus, WaNumber, WaNumberStatus
     from app.services import notifier, wa_number_manager
     from app.utils import events
@@ -568,11 +606,11 @@ async def _ferma_numero_per_guasto(db, number_id: str, campaign_id: str, n: int)
     # stop (Fix 3, review finale I4).
     await wa_number_manager.apply_wa_cooldown(number_id, minutes=FM2_COOLDOWN_MINUTES)
     events.emit(campaign_id, "wa.number.stopped",
-                f"{n} guasti consecutivi: numero fermato, contatti intatti",
+                f"{n} {causa}: numero fermato, contatti intatti",
                 level="error")
     await notifier.send_telegram(
-        f"WhatsApp: numero fermato dopo {n} guasti consecutivi "
-        f"(probabile DOM cambiato). Campagna in error, contatti NON bruciati.",
+        f"WhatsApp: numero fermato dopo {n} {causa}. "
+        f"Campagna in error, contatti NON bruciati.",
         level="error")
 
 
@@ -700,8 +738,8 @@ async def wa_send_task(ctx: dict, number_id: str) -> None:
     # solo un browser aperto a vuoto piu' volte all'ora finche' un umano non
     # legge il log. Meglio fermarsi e farsi notare.
     if esito["motivo"] in ("send_disabled", "wa_halted", "numero_non_attivo",
-                           "guasti_consecutivi", "niente_da_fare",
-                           "quarantena_oltre_cap_sessione"):
+                           "guasti_consecutivi", "no_existing_chat_consecutivi",
+                           "niente_da_fare", "quarantena_oltre_cap_sessione"):
         if esito["motivo"] == "niente_da_fare":
             # Unico momento in cui si sa che non e' rimasto lavoro da fare: e'
             # qui che una campagna finita smette di sembrare "In corso" per
@@ -780,7 +818,22 @@ async def recover_wa_sending_on_startup() -> int:
     health-check periodico (cron_worker.wa_health_check, timeout
     wa_lock_timeout_min), che copre un caso diverso (worker morto senza un
     invio in corso) e ha gia' la sua logica -- non va duplicata ne'
-    ristretta da questa funzione."""
+    ristretta da questa funzione.
+
+    G5 (fix, sessione 08/08): l'UPDATE sul contatto filtra ORA anche per il
+    suo stato ATTUALE (queued/in_sequence, cioe' "ancora in lavorazione").
+    Prima non filtrava affatto: un contatto gia' servito con successo
+    (completed/replied) da un ALTRO step/messaggio, ma con un messaggio
+    orfano 'sending' rimasto in giro, veniva declassato a 'skipped' --
+    corrompendo i conteggi della campagna e la sua chiusura automatica.
+    Interazione con la guardia anti-doppio-invio (PR #52, wa_sender.py
+    invia_a_contatto): quella guardia, trovando gia' un WaMessage
+    'sending'/'sent' per la stessa tripla (campagna, contatto, step), marca
+    il contatto 'skipped' ma LASCIA il messaggio in 'sending' -- al riavvio
+    successivo questa funzione lo ritrova. Col filtro di stato, 'skipped'
+    non e' piu' fra gli stati toccati: il secondo passaggio diventa un
+    no-op sul contatto invece di ri-scrivere sopra la decisione gia' presa
+    dalla guardia."""
     from app.database import AsyncSessionLocal
     from app.models.wa import WaCampaignContact, WaContactStatus, WaMessage, WaMessageStatus
 
@@ -794,7 +847,9 @@ async def recover_wa_sending_on_startup() -> int:
             await db.execute(
                 update(WaCampaignContact)
                 .where(WaCampaignContact.campaign_id == msg.campaign_id,
-                       WaCampaignContact.contact_id == msg.contact_id)
+                       WaCampaignContact.contact_id == msg.contact_id,
+                       WaCampaignContact.status.in_((WaContactStatus.queued,
+                                                     WaContactStatus.in_sequence)))
                 .values(status=WaContactStatus.skipped,
                        next_action_at=None,
                        locked_by=None,

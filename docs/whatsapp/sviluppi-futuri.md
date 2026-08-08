@@ -48,6 +48,21 @@ L'MVP include SOLO: invio sequenze semplici (lista messaggi `msg1→2→3`) con 
 - **Cosa:** oltre il limite MVP (max 2 numeri per IP/proxy, stessa azienda), gestione scalata di molti numeri/proxy.
 - **Perché rimandata:** ~10 clienti nei primi 6 mesi; il modello 1 proxy mobile ↔ max 2 numeri stessa azienda basta.
 
+### F8 — Profilazione del contatto dal contenuto della conversazione
+- **Cosa:** leggere la conversazione già avvenuta e ricavarne un **profilo del contatto** (preferenze, interessi, categorie di prodotto/servizio) su una tassonomia **decisa dal cliente** per il suo settore. Serve a segmentare le campagne, non solo a personalizzare il singolo messaggio (che è F3).
+- **Dove vivono le chat — risposta alla domanda del 27/07.** WhatsApp Web tiene le sue chat in **IndexedDB dentro il profilo del browser**, in forma gestita e offuscata dall'app. **Non si legge quel database.** Due motivi: si rompe a ogni aggiornamento dell'app, ed è concettualmente la stessa cosa della **strada B già scartata** (parlare col protocollo/dati di WhatsApp invece che con l'interfaccia). La strada giusta è l'opposta: **un nostro DB**, popolato da ciò che estraiamo dal DOM come farebbe una persona che legge. L'estrazione della cronologia serve già a F3: F8 ci si appoggia, non apre un fronte nuovo.
+- **Perché rimandata:** l'MVP non legge le conversazioni. Prima deve esistere l'estrazione della cronologia (F3), poi la persistenza, poi la profilazione.
+- **Come riprenderla:** (1) tabella `conversazione_messaggio` (tenant, contatto, direzione, testo, ts) popolata dal DOM; (2) passata LLM per contatto con tassonomia per-tenant come input; (3) il profilo diventa un filtro di targeting per le campagne.
+- **⚠️ Vincolo GDPR, più pesante di F3.** Qui non si manda un messaggio: si **profila una persona** sulla base di conversazioni private. È trattamento ulteriore rispetto alla finalità per cui la chat esisteva, richiede base giuridica propria e informativa, e ricade nel territorio dell'art. 22 (decisioni automatizzate/profilazione). **Va messo esplicitamente sul tavolo del parere legale già in corso**, non trattato come dettaglio implementativo. Vale anche il vincolo di F3: testo di conversazione a un provider AI = PII a un terzo → DPA e nessun provider fuori UE su PII (lezione TheVista).
+
+### F9 — Note vocali: trascrizione e comprensione
+- **Cosa:** molti clienti rispondono con **audio**. Oggi per noi un vocale è un buco: il watcher vede che è arrivato qualcosa e non sa cosa dice. Serve trascriverlo e trattarlo come testo — inclusa la cosa più importante: **uno STOP detto a voce oggi non lo intercettiamo**.
+- **Prima di costruire, la cosa gratis:** WhatsApp ha una **trascrizione nativa** delle note vocali. Se è attiva sull'account, il testo è già in pagina e si legge dal DOM come qualunque altro messaggio — zero costo, zero provider, zero PII che esce. **Va catalogato come prima cosa** quando si apre questo fronte: cambia completamente il costo della feature.
+- **Se la nativa non basta:** scaricare l'audio in-page e passarlo a uno speech-to-text. Non gira su questa macchina (7,4 GB di RAM, già al limite con un solo profilo browser): è lavoro lato server.
+- **Perché rimandata:** fase 2+, e dipende da F3 per l'estrazione della cronologia.
+- **⚠️ GDPR:** un vocale mandato a un provider STT è contenuto personale che esce verso un terzo, esattamente come F3/F8. Stesso vincolo: base giuridica, DPA, no provider extra-UE su PII.
+- **Nota di sicurezza (opt-out):** finché i vocali non si leggono, la garanzia opt-out vale **solo per gli STOP scritti**. È un limite da dichiarare al cliente, non da lasciare implicito.
+
 ---
 
 ## Regola

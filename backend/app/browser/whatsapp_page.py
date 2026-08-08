@@ -59,6 +59,12 @@ class ChatRow:
     last_is_outbound: bool
     outgoing_state: str | None
     muted: bool
+    # "Messaggi a te stesso": riga speciale inclusa apposta nello scan (serve
+    # ad altri chiamanti), ma il suo titolo e' il nome del TITOLARE del
+    # numero, non di un contatto -- chi consuma righe[0] per identificare
+    # "la chat appena scritta" deve escluderla esplicitamente (bug trovato
+    # 08/08: _impara_chat_title la prendeva per buona, 4/4 sull'invio reale).
+    is_yourself: bool = False
 
 
 def classify_direction(*, aria_tu: bool, tail_icon: str | None,
@@ -209,6 +215,7 @@ _JS_SCAN_CHAT_LIST = """
       last_is_outbound: outgoingState !== null,
       outgoing_state: outgoingState,
       muted: !!r.querySelector(args.muted),
+      is_yourself: r.matches(args.yourself),
     };
   });
 }
@@ -515,6 +522,7 @@ class WhatsAppWebPage:
                     last_is_outbound=r["last_is_outbound"],
                     outgoing_state=r["outgoing_state"],
                     muted=r["muted"],
+                    is_yourself=r["is_yourself"],
                 ))
             except KeyError as exc:
                 # Un KeyError grezzo qui dentro il ciclo non dice a chi debugga

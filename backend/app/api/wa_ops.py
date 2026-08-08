@@ -37,13 +37,48 @@ class RevokeOptoutRequest(BaseModel):
 
 @router.get("/status")
 async def wa_ops_status(db=Depends(get_db)) -> dict:
+    """Striscia di stato del canale (G3): oltre a fermo/attivo, il PERCHE'
+    si e' fermato e il tetto giornaliero reale -- servono a un operatore
+    prima di premere "Riprendi" senza sapere se sta riattivando un numero
+    che sta bruciando (collaudo M5: 90/90 verde, zero messaggi spediti,
+    perche' nessuno vedeva che il canale era fermo).
+
+    `motivo_stop`: gia' salvato a DB (bot_state.wa_halted_reason, fix B1 di
+    PR #52) da halt_wa/wa_ops_halt -- qui solo esposto, nessuna migrazione.
+    None se il canale non e' fermo (o se e' stato fermato senza un motivo
+    esplicito, caso raro: solo halt_wa scrive questo campo).
+
+    `cap_effettivo`: il tetto giornaliero REALE del canale (G4). Con la
+    rampa di warmup disattivata (warmup_day=0 sui numeri, decisione
+    prodotto 08/08), questo e' l'UNICA protezione anti-ban rimasta visibile
+    all'operatore -- deve essere in questa striscia, non solo nei log.
+    Semantica scelta per il caso (oggi raro, domani no) di piu' numeri
+    attivi contemporaneamente: il MINIMO fra i cap effettivi di ciascun
+    numero (wa_number_manager.effective_wa_daily_cap), perche' e' il collo
+    di bottiglia vero del canale -- non la media, non il primo trovato.
+    Calcolato SENZA il daily_limit di una campagna specifica (quel limite
+    si applica per-invio dentro la mini-sessione, non e' una proprieta' del
+    canale nel suo complesso): solo daily_cap del numero + il gradino di
+    warmup se warmup_day > 0. None se nessun numero e' attivo -- uno zero
+    si potrebbe leggere come "canale bloccato a 0 invii/giorno", che e'
+    un'affermazione diversa da "non c'e' nessun numero da limitare"."""
     from app.config import settings
+    from app.models.bot_state import BotState
+    from app.services import wa_number_manager
+
     oggi = func.date(WaMessage.sent_at) == func.date(func.now())
+    bot_state = await db.scalar(select(BotState).limit(1))
+    numeri_attivi = (await db.execute(
+        select(WaNumber).where(WaNumber.status == WaNumberStatus.active))).scalars().all()
+
     return {
         "wa_halted": await bot_state_service.is_wa_halted(db),
+        "motivo_stop": bot_state.wa_halted_reason if bot_state else None,
         "send_enabled": bool(settings.wa_send_enabled),
-        "numeri_attivi": await db.scalar(
-            select(func.count(WaNumber.id)).where(WaNumber.status == WaNumberStatus.active)),
+        "numeri_attivi": len(numeri_attivi),
+        "cap_effettivo": (
+            min(wa_number_manager.effective_wa_daily_cap(n, None) for n in numeri_attivi)
+            if numeri_attivi else None),
         "campagne_running": await db.scalar(
             select(func.count(WaCampaign.id)).where(WaCampaign.status == WaCampaignStatus.running)),
         "inviati_oggi": await db.scalar(
