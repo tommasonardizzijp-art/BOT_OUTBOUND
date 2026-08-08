@@ -42,21 +42,33 @@ def bio_done_status(current: "CampaignStatus") -> "CampaignStatus":
     )
 
 
-# Livello di arricchimento: decide SE si aprono i profili per raccogliere dati.
-# Ortogonale a `bio_engine`, che decide COME (instagrapi o browser) — e i due motori
-# pagano il livello 'contacts' in modo diverso:
+# Livello di arricchimento: decide quali RICHIESTE si fanno a Instagram, non se si
+# salvano i dati che arrivano gratis (decisione Tommaso, passo 4 A.5). Ortogonale a
+# `bio_engine`, che decide COME (instagrapi o browser) — i due motori pagano il
+# livello 'contacts' con richieste diverse, ma a parita' di livello raccolgono lo
+# STESSO tipo di dato:
 #   none     = nessuna visita dedicata. I dati arrivano solo dalla Fase Lista, piu'
 #              l'harvest passivo durante la visita che il DM fa comunque.
-#   bio      = visita dedicata, bio/follower/link. Nessun contatto salvato.
-#   contacts = come 'bio' + contatti (email/telefono).
-#              - canale BROWSER: i contatti costano una richiesta IN PIU' (/info/),
-#                quindi partono solo se il profilo e' anche professional (gate
-#                separato, vedi `contatti_richiesti` in browser_bio.py).
-#              - canale API: i contatti sono GIA' dentro il payload che
-#                user_info_v1/fetch_profile_app_like ha scaricato per la bio —
-#                zero richieste in piu'. Qui il livello decide solo se SALVARLI,
-#                per coerenza con quanto l'utente ha scelto in UI (vedi
-#                `contatti_richiesti_dal_livello` sotto).
+#   bio      = visita dedicata: bio/follower/link, PIU' i contatti che si trovano
+#              gratis nel testo della bio (email/telefono via regex) o in un link
+#              whatsapp — non costano nessuna richiesta oltre alla bio stessa.
+#              Nessuna richiesta DEDICATA ai contatti.
+#              - canale BROWSER: qui si vede la differenza — /info/ non parte,
+#                quindi i campi business (public_email/public_phone_number) restano
+#                vuoti; solo il testo della bio puo' dare un contatto.
+#              - canale API: user_info_v1/fetch_profile_app_like porta SEMPRE quei
+#                campi business nello stesso payload della bio (zero richieste in
+#                piu' del browser a questo livello), ma a 'bio' NON si salvano —
+#                sono l'equivalente di cio' che sul browser costerebbe la richiesta
+#                dedicata. Si salva solo cio' che arriverebbe gratis anche li' (bio-
+#                testo, link, whatsapp). Vedi `extract_contacts(includi_campi_dedicati=)`
+#                in contact_extract.py.
+#   contacts = come 'bio' + i campi business dedicati (public_email/public_phone_number).
+#              - canale BROWSER: costano la richiesta /info/, quindi partono solo se
+#                il profilo e' anche professional (gate separato, vedi
+#                `contatti_richiesti` in browser_bio.py).
+#              - canale API: sono gia' nel payload; il livello decide solo se
+#                includerli (vedi `contatti_richiesti_dal_livello` sotto).
 ENRICHMENT_NONE = "none"
 ENRICHMENT_BIO = "bio"
 ENRICHMENT_CONTACTS = "contacts"
@@ -67,15 +79,22 @@ ENRICHMENT_WITH_VISIT = (ENRICHMENT_BIO, ENRICHMENT_CONTACTS)
 
 
 def contatti_richiesti_dal_livello(campaign) -> bool:
-    """True se il livello scelto in UI include la raccolta contatti.
+    """True se il livello scelto in UI e' 'contacts'.
 
-    E' il pezzo comune ai due canali: valuta SOLO `enrichment_level == 'contacts'`,
-    nient'altro. Sul canale browser va combinato con il kill-switch operativo e il
-    gate professional (la spesa e' una richiesta reale, vedi `contatti_richiesti`
-    in browser_bio.py); sul canale API e' l'UNICA condizione che serve, perche' i
-    contatti sono un sottoprodotto gratuito del payload gia' scaricato per la bio —
-    non c'e' nessuna richiesta da risparmiare saltandoli, solo la promessa della UI
-    da rispettare non salvandoli quando l'utente non li ha chiesti.
+    E' il pezzo comune ai due canali (valuta SOLO `enrichment_level == 'contacts'`,
+    nient'altro), ma i due canali lo usano in due modi diversi (passo 4, A.5 —
+    decisione Tommaso: il livello governa le RICHIESTE, non i dati gia' arrivati
+    gratis):
+      - canale BROWSER: se False blocca la richiesta `/info/` (combinata con
+        kill-switch operativo + gate professional, vedi `contatti_richiesti` in
+        browser_bio.py) — a livello 'bio' quella richiesta non parte, quindi i
+        campi business restano vuoti e basta.
+      - canale API: i campi business sono GIA' nel payload scaricato per la bio
+        (zero richieste in piu'), quindi qui il risultato diventa il flag
+        `includi_campi_dedicati` di `extract_contacts()` — se False quei DUE campi
+        (public_email, public_phone_number/contact_phone_number) non si salvano,
+        ma tutto il resto (bio-testo, link, whatsapp) si salva comunque: e' dato
+        gratuito, non e' governato dal livello.
 
     Retrocompatibilita': campo assente o None => procede (comportamento pre-livelli).
     Questo ramo NON e' raggiungibile da una vera riga Campaign: la colonna e'

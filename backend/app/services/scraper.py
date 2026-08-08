@@ -36,7 +36,7 @@ from app.utils.instagrapi_client import (
     get_scraping_account_ids,
 )
 from app.services.bot_state_service import is_halted
-from app.utils.contact_extract import extract_contacts, extract_bio_links_only, ContactData
+from app.utils.contact_extract import extract_contacts, ContactData
 from app.services.global_contact_service import upsert_lead
 from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty
 from app.services.account_manager import has_scrape_budget, increment_scrape_lookup
@@ -328,18 +328,17 @@ async def fetch_and_store_bio(follower, campaign, db, pool):
         logger.warning(f"[Bio] user_info @{follower.username} fallito: {e}")
         return "error", current_account, e
 
-    from app.utils.contact_extract import extract_contacts, extract_bio_links_only
-    # Ramo API: i contatti sono gia' dentro `user_info` (stesso payload della bio,
-    # zero richieste in piu'), quindi il gate qui NON risparmia nessuna chiamata IG
-    # — decide solo se salvarli, per coerenza con quanto l'utente ha scelto in UI.
-    # Non "ottimizzare" togliendolo: costa 0 lookup, ma i contatti finirebbero nel
-    # DB anche a livello 'bio', che promette il contrario.
-    # NB: a livello 'bio' i bio_links/external_url restano — non sono un contatto,
-    # sono cio' che quel livello promette (bio/follower/link).
-    contacts = (
-        extract_contacts(user_info)
-        if contatti_richiesti_dal_livello(campaign)
-        else extract_bio_links_only(user_info)
+    from app.utils.contact_extract import extract_contacts
+    # Ramo API: `user_info` porta SEMPRE i campi business (stesso payload della
+    # bio, zero richieste in piu'), ma il livello decide se salvarli (passo 4, A.5
+    # — decisione Tommaso: il livello governa le RICHIESTE, non i dati gia'
+    # arrivati gratis). A 'bio' restano fuori SOLO public_email e
+    # public_phone_number/contact_phone_number: sono l'equivalente di cio' che sul
+    # browser costerebbe la richiesta /info/. Bio-testo, link, whatsapp ed
+    # external_url si salvano SEMPRE, a qualunque livello — non "ottimizzare"
+    # gatandoli anche loro.
+    contacts = extract_contacts(
+        user_info, includi_campi_dedicati=contatti_richiesti_dal_livello(campaign)
     )
     # Una sola sorgente per il contatore cap: bump in-memory, persistito dal
     # db.commit() sotto. NON usare anche increment_scrape_lookup (UPDATE atomico
@@ -753,17 +752,16 @@ async def _store_followers_batch(
                 following_count = getattr(user_info, 'following_count', None)
                 ext = getattr(user_info, 'external_url', None)
                 external_url = str(ext) if ext else None
-                # Ramo API: i contatti sono gia' dentro `user_info` (stesso payload
-                # della bio, zero richieste in piu'), quindi il gate qui NON risparmia
-                # nessuna chiamata IG — decide solo se salvarli, per coerenza con
-                # quanto l'utente ha scelto in UI. Non "ottimizzare" togliendolo: costa
-                # 0 lookup, ma i contatti finirebbero nel DB anche a livello 'bio'.
-                # NB: a livello 'bio' i bio_links/external_url restano — non sono un
-                # contatto, sono cio' che quel livello promette (bio/follower/link).
-                contacts = (
-                    extract_contacts(user_info)
-                    if contatti_richiesti_dal_livello(campaign)
-                    else extract_bio_links_only(user_info)
+                # Ramo API: `user_info` porta SEMPRE i campi business (stesso
+                # payload della bio, zero richieste in piu'), ma il livello decide
+                # se salvarli (passo 4, A.5 — decisione Tommaso: il livello governa
+                # le RICHIESTE, non i dati gia' arrivati gratis). A 'bio' restano
+                # fuori SOLO public_email e public_phone_number/contact_phone_number:
+                # sono l'equivalente di cio' che sul browser costerebbe la richiesta
+                # /info/. Bio-testo, link, whatsapp ed external_url si salvano
+                # SEMPRE, a qualunque livello — non "ottimizzare" gatandoli anche loro.
+                contacts = extract_contacts(
+                    user_info, includi_campi_dedicati=contatti_richiesti_dal_livello(campaign)
                 )
                 # Un solo conteggio: bump in-memory date-aware, persistito dal commit
                 # del batch. (Prima sommava anche increment_scrape_lookup -> doppio.)

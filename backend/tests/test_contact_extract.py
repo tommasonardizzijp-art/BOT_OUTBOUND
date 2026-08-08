@@ -92,6 +92,39 @@ def test_business_phone_wins_over_bio_regex():
     assert c.sources["phone"] == CONTACT_SOURCE_IG
 
 
+def test_includi_campi_dedicati_false_salta_solo_i_campi_business():
+    """Passo 4, A.5 — decisione Tommaso: il livello di arricchimento governa le
+    RICHIESTE, non i dati gia' arrivati gratis nel payload. Col flag a False deve
+    saltare SOLO public_email/public_phone_number(/contact_phone_number) — bio_links,
+    external_url e i contatti trovati con la regex nel TESTO restano, perche' non
+    costano nessuna richiesta in piu' e su una campagna viva e' da li' che arriva
+    la maggior parte dei contatti utili."""
+    u = _User(
+        biography="Scrivici a bio@example.com o chiama il 3331234567",
+        public_email="business@shop.example.com",
+        public_phone_number="3491234567",
+        public_phone_country_code="39",
+        bio_links=[_Link("https://negozio.example.com", "Sito")],
+        external_url="https://negozio.example.com",
+    )
+
+    con_campi = extract_contacts(u, includi_campi_dedicati=True)
+    assert con_campi.email == "business@shop.example.com"
+    assert con_campi.phone == "+393491234567"
+
+    senza_campi = extract_contacts(u, includi_campi_dedicati=False)
+    # dal TESTO della bio: restano, non sono un campo dedicato
+    assert senza_campi.email == "bio@example.com", (
+        f"atteso il contatto dal testo bio, trovato {senza_campi.email!r}"
+    )
+    assert senza_campi.phone == "3331234567", (
+        f"atteso il contatto dal testo bio, trovato {senza_campi.phone!r}"
+    )
+    # link/external_url: mai governati dal livello, restano sempre
+    assert {l["url"] for l in senza_campi.bio_links} == {"https://negozio.example.com"}
+    assert senza_campi.external_url == "https://negozio.example.com"
+
+
 def test_empty_input_no_exception():
     c = extract_contacts(_User())
     assert isinstance(c, ContactData)

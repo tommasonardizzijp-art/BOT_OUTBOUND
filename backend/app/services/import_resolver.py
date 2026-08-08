@@ -22,7 +22,7 @@ from app.utils.exceptions import BotHaltedError, ScraperError
 from app.services.scraping_pool import ScrapingPool, ScrapingPoolEmpty
 from app.services.bot_state_service import is_halted
 from app.utils.events import emit as emit_event
-from app.utils.contact_extract import extract_contacts, extract_bio_links_only
+from app.utils.contact_extract import extract_contacts
 from app.services.global_contact_service import upsert_lead
 from app.services.account_manager import increment_scrape_lookup
 
@@ -231,19 +231,17 @@ async def resolve_imports(campaign_id: str) -> None:
                         Follower.campaign_id == campaign_id, Follower.ig_user_id == ig_pk,
                     ))).scalar_one_or_none()
                     if dup is None:
-                        # Ramo API: i contatti sono gia' dentro `info` (stesso payload
-                        # della bio, zero richieste in piu'), quindi il gate qui NON
-                        # risparmia nessuna chiamata IG — decide solo se salvarli, per
-                        # coerenza con quanto l'utente ha scelto in UI. Non "ottimizzare"
-                        # togliendolo: costa 0 lookup, ma i contatti finirebbero nel DB
-                        # anche a livello 'bio', che promette il contrario.
-                        # NB: a livello 'bio' i bio_links/external_url restano — non sono
-                        # un contatto, sono cio' che quel livello promette (bio/follower/
-                        # link). extract_bio_links_only() li calcola comunque.
-                        contacts = (
-                            extract_contacts(info)
-                            if contatti_richiesti_dal_livello(campaign)
-                            else extract_bio_links_only(info)
+                        # Ramo API: `info` porta SEMPRE i campi business (stesso
+                        # payload della bio, zero richieste in piu'), ma il livello
+                        # decide se salvarli (passo 4, A.5 — decisione Tommaso: il
+                        # livello governa le RICHIESTE, non i dati gia' arrivati
+                        # gratis). A 'bio' restano fuori SOLO public_email e
+                        # public_phone_number/contact_phone_number: sono l'equivalente
+                        # di cio' che sul browser costerebbe la richiesta /info/.
+                        # Bio-testo, link, whatsapp ed external_url si salvano SEMPRE,
+                        # a qualunque livello — non "ottimizzare" gatandoli anche loro.
+                        contacts = extract_contacts(
+                            info, includi_campi_dedicati=contatti_richiesti_dal_livello(campaign)
                         )
                         biography = getattr(info, "biography", None) or None
                         db.add(Follower(

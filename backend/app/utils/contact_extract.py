@@ -138,29 +138,20 @@ def text_has_contact(text: str | None) -> bool:
     return bool(wa)
 
 
-def extract_bio_links_only(info) -> ContactData:
-    """Come `extract_contacts` ma SOLO bio_links + external_url, senza email/
-    telefono/whatsapp. Never raises.
+def extract_contacts(info, includi_campi_dedicati: bool = True) -> ContactData:
+    """Extract contacts from an instagrapi User (or None). Never raises.
 
-    Serve al gate di livello 'bio' (passo 4, A.5): il link in bio NON e' un
-    contatto, e' parte di quello che quel livello promette ("bio/follower/link").
-    Chi chiama con livello 'bio' deve continuare a salvare i link anche se non
-    salva email/telefono — altrimenti si perde dato che l'utente ha chiesto.
+    `includi_campi_dedicati` (passo 4, A.5 — decisione Tommaso): il livello di
+    arricchimento governa le RICHIESTE fatte a Instagram, non i dati che arrivano
+    gratis dentro un payload gia' scaricato. Con False si saltano SOLO i due campi
+    business che instagrapi porta nello stesso payload della bio ma che sul canale
+    browser arriverebbero solo da una richiesta dedicata (`/info/`):
+    `public_email` e `public_phone_number`/`contact_phone_number`. Bio_links,
+    external_url, whatsapp (da link o testo) ed email/telefono trovati con la
+    regex nel TESTO della bio restano SEMPRE: sono dato gratuito, indipendente dal
+    livello, e su una campagna viva e' proprio da li' che arriva la maggior parte
+    dei contatti utili.
     """
-    data = ContactData()
-    if info is None:
-        return data
-    try:
-        bio_links, external = _bio_links_from(info)
-        data.bio_links = bio_links
-        data.external_url = external
-    except Exception:
-        return data
-    return data
-
-
-def extract_contacts(info) -> ContactData:
-    """Extract contacts from an instagrapi User (or None). Never raises."""
     data = ContactData()
     if info is None:
         return data
@@ -172,7 +163,10 @@ def extract_contacts(info) -> ContactData:
         link_urls = [l["url"] for l in bio_links]
 
         # ── Email ──
-        biz_email = _normalize_email(getattr(info, "public_email", None))
+        biz_email = (
+            _normalize_email(getattr(info, "public_email", None))
+            if includi_campi_dedicati else None
+        )
         if biz_email:
             data.email = biz_email
             data.sources["email"] = CONTACT_SOURCE_IG
@@ -182,17 +176,20 @@ def extract_contacts(info) -> ContactData:
                 data.email = re_email
                 data.sources["email"] = CONTACT_SOURCE_REGEX
 
-        # ── WhatsApp (links + bio text) ──
+        # ── WhatsApp (links + bio text) — MAI un campo dedicato, resta sempre ──
         wa, wa_phone = _whatsapp_from(link_urls + [bio])
         if wa:
             data.whatsapp = wa
             data.sources["whatsapp"] = CONTACT_SOURCE_REGEX
 
         # ── Phone ──
-        biz_phone = _compose_business_phone(
-            getattr(info, "public_phone_number", None)
-            or getattr(info, "contact_phone_number", None),
-            getattr(info, "public_phone_country_code", None),
+        biz_phone = (
+            _compose_business_phone(
+                getattr(info, "public_phone_number", None)
+                or getattr(info, "contact_phone_number", None),
+                getattr(info, "public_phone_country_code", None),
+            )
+            if includi_campi_dedicati else None
         )
         if biz_phone:
             data.phone = biz_phone

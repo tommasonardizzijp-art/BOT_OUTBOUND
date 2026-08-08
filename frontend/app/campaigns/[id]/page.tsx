@@ -1110,21 +1110,11 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               accendilo solo se i dati ti servono davvero.
             </p>
           </div>
-          {campaign.source_type === 'import' && (campaign.bio_engine ?? 'api') === 'api' && (
-            <div className="flex items-start gap-2 rounded-lg border border-red-700/50 bg-red-900/10 px-3 py-2">
-              <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
-              <p className="text-xs text-red-300">
-                Lista importata + motore API: email e telefono vengono raccolti comunque durante
-                la risoluzione dei profili, qualunque sia il livello scelto qui sotto. Il livello
-                di arricchimento ha effetto solo con il motore browser.
-              </p>
-            </div>
-          )}
           <div className="flex gap-3">
             {([
               { v: 'none', t: '✉️ Solo DM', d: 'Non apre i profili' },
-              { v: 'bio', t: '📄 Bio', d: 'Apre i profili, niente contatti' },
-              { v: 'contacts', t: '📇 Bio + contatti', d: 'Aggiunge email e telefono' },
+              { v: 'bio', t: '📄 Bio', d: 'Apre i profili; email e telefono solo se già scritti nel testo' },
+              { v: 'contacts', t: '📇 Bio + contatti', d: 'Aggiunge anche email e telefono dichiarati come contatto business' },
             ] as const).map(({ v, t, d }) => (
               <button
                 key={v}
