@@ -9,6 +9,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Plus, Play, Pause, Square, Loader2, Trash2, RotateCcw } from 'lucide-react'
 import { toast } from 'sonner'
 import type { Campaign, CampaignStatus } from '@/lib/types'
+import { avvioLabel } from '@/lib/avvio'
 import { useState } from 'react'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -196,8 +197,9 @@ export default function CampaignsPage() {
                   <div className="flex items-center gap-2 flex-wrap">
                     {c.status === 'draft' && (
                       <Button size="sm" variant="outline" className="border-gray-700 text-gray-300"
-                        onClick={() => action(c.id, () => api.campaigns.startScrape(c.id))} disabled={isLoading}>
-                        {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Scraping'}
+                        onClick={() => action(c.id, () => api.campaigns.startScrape(c.id))} disabled={isLoading}
+                        title={avvioLabel(c).title}>
+                        {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : avvioLabel(c).breve}
                       </Button>
                     )}
                     {c.status === 'ready' && (
