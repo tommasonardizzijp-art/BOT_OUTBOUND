@@ -58,8 +58,10 @@ delle chiamate API (10-60s) all'apertura di una chat, gesto di natura diversa.
 6. **Soglia per entrare in scorrimento veloce**: 10 nomi gia' noti consecutivi.
 7. **Contatto gia' noto incontrato durante la raccolta**: si salta senza riaprire, ma si
    aggiornano data e ultimo messaggio.
-8. **Criteri di stop**: tutti e quattro — fondo lista, tetto contatti (`list_target`),
-   troppo gia'-visto, tempo massimo di sessione. Valori proposti nel dettaglio piu' sotto.
+8. **Criteri di stop**: fondo lista, tetto contatti (`list_target`), tempo massimo di sessione.
+   Il quarto criterio scelto da Tommaso ("troppo gia'-visto") **non e' implementabile come
+   stop** in questo motore — vedi "Perche' non esiste uno stop per troppo gia'-visto": diventa
+   un avviso sull'esito.
 9. **Diversivi**: in base al contenuto — ci si sofferma dove c'e' stato uno scambio vero, si
    tira dritto dove c'e' solo il nostro messaggio mai risposto.
 10. **Pause**: tre livelli, con le soste di medio livello *usate* per rileggere la
@@ -306,6 +308,25 @@ tetto complessivo ~60 s), rileggendo i tre segnali a ogni giro.
 - attese esaurite + altezza ferma ma **non** in fondo → anomalia: chiusura pulita e avviso
   (non dovrebbe accadere; se accade e' un cambio di struttura della pagina)
 
+## Perche' non esiste uno stop per "troppo gia'-visto"
+
+Il motore API ha `inbox_empty_page_stop = 8`: dopo 8 pagine consecutive senza contatti nuovi
+si ferma e avvisa. Serve perche' li' **la lista non ha un fondo osservabile** — IG puo' tenere
+`has_older=True` all'infinito, e senza quel contatore la raccolta girerebbe a vuoto per sempre
+in silenzio (bug realmente accaduto).
+
+Trasporre quel criterio qui sarebbe **codice morto**: dopo 10 gia'-noti consecutivi il motore
+passa in scorrimento veloce e **smette di aprire chat**, quindi un contatore di "chat aperte a
+vuoto" non raggiungerebbe mai una soglia piu' alta di 10. La soglia scatterebbe sempre prima.
+
+E non serve: col browser il fondo e' un fatto osservabile (l'altezza smette di crescere), quindi
+il rischio del giro infinito e' gia' coperto da un segnale reale invece che da un contatore.
+
+**Al suo posto, un avviso sull'esito**: se una sessione si chiude — per fondo o per tempo —
+avendo raccolto **zero contatti nuovi**, l'evento lo dichiara esplicitamente, cosi' Tommaso sa
+che rilanciarla non serve finche' non arrivano nuovi DM in entrata. E' lo stesso messaggio che
+il motore API emette come `drained`, ma calcolato su un segnale affidabile.
+
 ## Comportamento
 
 **Pause fra chat**, tre livelli a probabilita' calante:
@@ -349,7 +370,7 @@ non una misura: vanno tarati sull'uso.
 | pausa stacco / probabilita' | 2-5 min / 0.02 | la distrazione vera, rara |
 | durata sessione | 30-55 min | scelto da Tommaso |
 | tetto giornaliero | 800 chat | sotto una sessione piena |
-| stop per gia'-visto | 40 chat aperte di fila senza un solo contatto nuovo | ~2 minuti di lavoro a vuoto: abbastanza per attraversare una zona mista, poco per sprecare una sessione |
+| avviso "nulla di nuovo" | sessione chiusa con 0 contatti nuovi | non e' uno stop: e' l'esito da comunicare (vedi sotto) |
 | passo di scorrimento | 0.6-0.8 dell'altezza visibile, randomizzato | sopra il buffer renderizzato si perdono righe **in silenzio** |
 | attese prima di dichiarare la fine | 1, 2, 4, 8, 16 s (tetto ~60 s) | la lentezza normale non deve mai essere scambiata per fine lista |
 
@@ -377,7 +398,9 @@ non una misura: vanno tarati sull'uso.
 - segnaposto ignorati in italiano **e** in inglese
 - nome troncato
 - archivio vuoto alla prima esecuzione
-- i quattro criteri di stop, uno per uno
+- i tre criteri di stop, uno per uno (fondo, tetto contatti, tempo sessione)
+- sessione chiusa con zero contatti nuovi → l'avviso "nulla di nuovo" viene emesso
+- sessione con almeno un contatto nuovo → l'avviso **non** viene emesso
 
 ### Sulla targa
 - determinismo: stesso username → sempre lo stesso numero
