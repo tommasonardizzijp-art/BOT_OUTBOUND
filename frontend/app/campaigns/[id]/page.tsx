@@ -2233,7 +2233,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                     </>}
                     {campaign.scrape_mode === 'dm_threads' && <>
                       <span className="text-gray-500">Engine inbox</span>
-                      <span className="text-gray-400">{campaign.inbox_engine ?? 'browser'}</span>
+                      <span className="text-gray-400">{campaign.inbox_engine ?? 'api'}</span>
                     </>}
                   </div>
                 </div>
