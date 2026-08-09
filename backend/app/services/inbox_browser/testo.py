@@ -29,7 +29,7 @@ LINGUE: dict[str, dict[str, str]] = {
 }
 
 _SEGNAPOSTO = {v["segnaposto"] for v in LINGUE.values()}
-_INVISIBILI = re.compile(r"[​-‏﻿]")
+_INVISIBILI = re.compile(r"[\u200b-\u200f\u2028-\u202f\ufeff]")
 _SPAZI = re.compile(r"\s+")
 
 
