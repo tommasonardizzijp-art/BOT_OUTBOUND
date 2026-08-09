@@ -30,9 +30,25 @@ def test_un_segnaposto_non_si_apre_mai():
 
 
 def test_scenario_che_affossava_il_disegno_precedente():
-    """10 note in cima, poi un nuovo ogni 10: TUTTI i nuovi vanno raccolti."""
+    """Gia' in zona rapida, poi 9 note + 1 nuovo ripetuto: TUTTI i nuovi vanno raccolti.
+
+    Il test parte esplicitamente in zona 'rapida' (warm-up sotto), cosi' esercita
+    davvero il ramo che deve verificare: senza warm-up il pattern "9 note + 1
+    nuovo" non raggiunge mai da solo la soglia di 10 riconoscimenti consecutivi
+    (il "nuovo" ogni 10 azzera lo streak all'ottavo/nono) e il test resterebbe
+    in zona 'piena' per l'intero scenario, senza discriminare nulla.
+    """
     archivio = ArchivioNomi([f"Noto {i}" for i in range(50)])
     contatore = ContatoreZona()
+    # Warm-up: porta la zona a 'rapida' PRIMA di iniziare lo scenario, cosi'
+    # il test attraversa davvero il ramo che deve verificare. Senza questo,
+    # il pattern "9 note + 1 nuovo" non raggiunge mai la soglia di 10
+    # riconoscimenti consecutivi (il "nuovo" ogni 10 azzera lo streak
+    # all'ottavo/nono), e la zona resta 'piena' per l'intero test — bug
+    # verificato: la prova del nove non falliva come descritto nel piano.
+    for _ in range(10):
+        contatore.registra(True)
+    assert contatore.zona == "rapida", "warm-up non ha raggiunto la soglia — verificare NOTI_PER_ZONA_RAPIDA"
     aperte = 0
     for blocco in range(5):
         for i in range(9):
