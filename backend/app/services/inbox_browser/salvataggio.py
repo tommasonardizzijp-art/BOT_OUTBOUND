@@ -23,6 +23,7 @@ from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.models.follower import Follower, FollowerStatus
 from app.services.inbox_browser.targa import (
@@ -62,6 +63,28 @@ class DatiContatto:
     last_message_text: str | None
 
 
+async def _fondi(db, esistente: Follower, username: str, dati: DatiContatto) -> None:
+    """Fusione: si integra, non si sovrascrive. Non committa (il chiamante lo fa)."""
+    if not esistente.full_name and dati.nome:
+        esistente.full_name = dati.nome
+    esistente.last_message_at = dati.last_message_at or esistente.last_message_at
+    esistente.last_message_from = dati.last_message_from or esistente.last_message_from
+    esistente.last_message_text = dati.last_message_text or esistente.last_message_text
+    esistente.status = stato_vincente(esistente.status, FollowerStatus.pending)
+    esistente.updated_at = datetime.utcnow()
+
+    # La targa VERA non si tocca mai: sostituirla con una provvisoria
+    # sgancerebbe il contatto da GlobalContact e dalle prenotazioni.
+    if e_provvisoria(esistente.ig_user_id):
+        atteso = targa_provvisoria(username)
+        if esistente.ig_user_id != atteso:
+            logger.info(
+                f"[InboxBrowser] @{username}: targa provvisoria riallineata "
+                f"({esistente.ig_user_id} -> {atteso})"
+            )
+            esistente.ig_user_id = atteso
+
+
 async def salva_contatto(db, campaign_id: str, dati: DatiContatto) -> str:
     """Crea o aggiorna il contatto. Ritorna 'creato' o 'aggiornato'."""
     username = normalizza_username(dati.username)
@@ -89,28 +112,26 @@ async def salva_contatto(db, campaign_id: str, dati: DatiContatto) -> str:
             last_message_text=dati.last_message_text,
             source_channel="browser",
         ))
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Due chiamate concorrenti sullo stesso (campaign_id, username) calcolano
+            # la STESSA targa provvisoria (hash deterministico): la SELECT sopra puo'
+            # non vedere ancora la riga dell'altra, e le due INSERT collidono sul
+            # vincolo UNIQUE(campaign_id, ig_user_id). Non e' un errore del chiamante:
+            # si ripiega sulla fusione contro la riga che ha vinto la corsa.
+            await db.rollback()
+            esistente = (await db.execute(
+                select(Follower).where(
+                    Follower.campaign_id == campaign_id,
+                    Follower.username == username,
+                )
+            )).scalar_one()
+            await _fondi(db, esistente, username, dati)
+            await db.commit()
+            return "aggiornato"
         return "creato"
 
-    # Fusione: si integra, non si sovrascrive.
-    if not esistente.full_name and dati.nome:
-        esistente.full_name = dati.nome
-    esistente.last_message_at = dati.last_message_at or esistente.last_message_at
-    esistente.last_message_from = dati.last_message_from or esistente.last_message_from
-    esistente.last_message_text = dati.last_message_text or esistente.last_message_text
-    esistente.status = stato_vincente(esistente.status, FollowerStatus.pending)
-    esistente.updated_at = datetime.utcnow()
-
-    # La targa VERA non si tocca mai: sostituirla con una provvisoria
-    # sgancerebbe il contatto da GlobalContact e dalle prenotazioni.
-    if e_provvisoria(esistente.ig_user_id):
-        atteso = targa_provvisoria(username)
-        if esistente.ig_user_id != atteso:
-            logger.info(
-                f"[InboxBrowser] @{username}: targa provvisoria riallineata "
-                f"({esistente.ig_user_id} -> {atteso})"
-            )
-            esistente.ig_user_id = atteso
-
+    await _fondi(db, esistente, username, dati)
     await db.commit()
     return "aggiornato"

@@ -3,12 +3,14 @@
 La fusione non e' un caso limite: e' l'esito NORMALE, perche' ogni contatto
 raccolto via API ha full_name=None e verra' riaperto.
 """
+import asyncio
 from datetime import datetime
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from app.database import AsyncSessionLocal
 from app.models.campaign import Campaign
 from app.models.follower import Follower, FollowerStatus
 from app.services.inbox_browser.salvataggio import (
@@ -106,6 +108,35 @@ async def test_username_normalizzato_nel_confronto(db_session, campagna):
 async def test_username_vuoto_solleva(db_session, campagna):
     with pytest.raises(ValueError):
         await salva_contatto(db_session, campagna.id, _dati(username="  "))
+
+
+@pytest.mark.asyncio
+async def test_due_salvataggi_concorrenti_stesso_username_una_riga_sola(campagna):
+    """ADVERSARIAL (QA Task 15): due `salva_contatto` concorrenti sullo stesso
+    (campaign_id, username), via `asyncio.gather` reale su due sessioni DB
+    indipendenti — non sequenziale. La targa e' deterministica (SHA-256 dello
+    username), quindi entrambe le insert puntano allo stesso `ig_user_id`:
+    la finestra fra la SELECT esplicita e il COMMIT (righe 71-92 di
+    salvataggio.py) puo' far vedere "nessuna riga" a entrambe, facendole
+    collidere sul vincolo UNIQUE(campaign_id, ig_user_id) in fase di INSERT.
+    Riprodotto anche contro Postgres reale durante il QA di chiusura modulo.
+    """
+    username = "corsaconcorrente"
+
+    async def _salva():
+        async with AsyncSessionLocal() as db:
+            return await salva_contatto(db, campagna.id, _dati(username=username))
+
+    risultati = await asyncio.gather(_salva(), _salva(), return_exceptions=True)
+
+    errori = [r for r in risultati if isinstance(r, BaseException)]
+    assert not errori, f"IntegrityError non gestita: {errori}"
+
+    async with AsyncSessionLocal() as db:
+        righe = (await db.execute(
+            select(Follower).where(Follower.campaign_id == campagna.id, Follower.username == username)
+        )).scalars().all()
+    assert len(righe) == 1, "due contatti concorrenti sullo stesso username devono produrre una riga sola"
 
 
 def test_precedenza_di_stato():
