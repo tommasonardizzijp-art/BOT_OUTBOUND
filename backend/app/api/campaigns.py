@@ -14,6 +14,7 @@ from app.models.message import Message, MessageStatus
 from app.models.activity_log import ActivityLog
 from app.models.imported_profile import ImportedProfile
 from app.services.import_resolver import store_imported_lines
+from app.services.inbox_browser.gate import valida_combinazione_motori
 from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignResponse
 from app.utils.roles import SCRAPE_ROLES, DM_ROLES, INBOX_ROLES
 from app.services.campaign_control import (
@@ -213,6 +214,11 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=400, detail="scrape_break_minutes_min > max")
     if campaign.bio_fetch_delay_min > campaign.bio_fetch_delay_max:
         raise HTTPException(status_code=400, detail="bio_fetch_delay_min > max")
+    errore_motori = valida_combinazione_motori(
+        campaign.inbox_engine, campaign.bio_engine, campaign.enrichment_level,
+    )
+    if errore_motori:
+        raise HTTPException(status_code=400, detail=errore_motori)
     db.add(campaign)
 
     log = ActivityLog(campaign_id=campaign.id, action="campaign_created", details=json.dumps({"name": data.name}))
@@ -345,6 +351,18 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
                 detail="Il livello di arricchimento si cambia solo a campagna ferma (draft/ready/paused/error), non mentre sta girando.",
             )
         campaign.enrichment_level = data.enrichment_level
+
+    # Gate sulla combinazione FINALE dei tre motori, non su un campo alla volta.
+    # I tre campi sono indipendenti e applicati in sequenza sullo stesso oggetto
+    # (:329, :338, :347 sopra): un controllo sul valore in DB si aggirerebbe con un solo
+    # PATCH {"inbox_engine": "browser"}, che non tocca gli altri due e lascia la
+    # campagna incoerente.
+    errore_motori = valida_combinazione_motori(
+        campaign.inbox_engine, campaign.bio_engine, campaign.enrichment_level,
+    )
+    if errore_motori:
+        raise HTTPException(status_code=400, detail=errore_motori)
+
     if data.scrape_session_size is not None:
         campaign.scrape_session_size = data.scrape_session_size
     if data.scrape_break_minutes_min is not None:
