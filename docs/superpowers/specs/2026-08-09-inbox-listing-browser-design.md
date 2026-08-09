@@ -44,6 +44,8 @@ Tutto quanto segue e' stato verificato sul campo, non dedotto.
 | Data nel thread aperto | **assoluta** (`9 feb 2026, 20:28`), formato localizzato | idem |
 | Testo integrale dei messaggi | leggibile via `document.body.innerText` a thread aperto | idem |
 | Delimitatore di fine conversazione | la riga `Scrivi un messaggio...` (localizzata) | idem |
+| Segnale visivo di chat non letta (pallino/grassetto/aria-label) | **NON MISURATO in modo conclusivo** — su 10 righe di probe tutte identiche (`pallini=0`, `pesi=['400']`), ma l'account di prova non aveva nessuna chat realmente non letta al momento della misura (zero badge numerici, zero attributi `unread` nel DOM) | `probe_inbox_web_nonlette.py`, 2026-08-09 |
+| Richieste fallite verso endpoint inbox durante scroll sano | **ZERO** su 12 giri di scroll (altezza 1152→3672), zero in assoluto, zero ristrette a `direct_v2`/`graphql` | `probe_inbox_web_requestfailed.py`, 2026-08-09 |
 
 **Conseguenza sulla velocita'**: il dato e' leggibile in mezzo secondo, quindi *l'apertura* non
 e' il collo di bottiglia. Il throughput reale lo decidono le **pause**, non la lettura: vedi
@@ -519,17 +521,24 @@ riceverebbe un allarme a ogni giro. Il ramo "fine lista" sarebbe **codice morto*
 
 Va quindi ristretto agli endpoint dell'inbox (`/api/v1/direct_v2/...` o la query GraphQL della
 lista) e **misurato con un probe dedicato prima** di costruirci sopra una macchina a stati.
-Finche' non e' misurato, la regola di fallback e' conservativa: altezza ferma + in fondo →
-**fine lista**, e il "piantato" si riconosce solo da un'eccezione vera della pagina.
+
+**Probe eseguito il 2026-08-09** (`probe_inbox_web_requestfailed.py`, account
+`claudio.abbigliamentovincente`): **zero richieste fallite** in assoluto su 12 giri di scroll
+sano (altezza cresciuta monotonicamente 1152 → 3672), quindi zero anche ristrette agli
+endpoint inbox. Il segnale ristretto e' **pulito**: si adotta come discriminante per
+"piantato", nei limiti di questa misura (una sessione di ~30s, un solo account, connessione
+via proxy funzionante — non e' escluso che condizioni di rete peggiori producano rumore anche
+ristretto; se in produzione si osservano falsi "piantato", il fallback e' la regola
+conservativa sotto).
 
 **Procedura**: mai decidere al primo dubbio. Attese a pazienza crescente (1, 2, 4, 8, 16 s;
 tetto complessivo ~60 s), rileggendo i tre segnali a ogni giro.
 
 - altezza cresciuta → si riprende normalmente, non era ne' fondo ne' guasto
-- attese esaurite + altezza ferma + in fondo allo scorrimento + **zero richieste fallite**
-  → **fine lista**, campagna completata
-- attese esaurite + **richieste fallite** nel frattempo → **piantato**: chiusura pulita,
-  campagna NON completata, avviso a Tommaso
+- attese esaurite + altezza ferma + in fondo allo scorrimento + **zero richieste fallite verso
+  gli endpoint inbox** (`direct_v2`/`graphql`) → **fine lista**, campagna completata
+- attese esaurite + **almeno una richiesta fallita verso gli endpoint inbox** nel frattempo →
+  **piantato**: chiusura pulita, campagna NON completata, avviso a Tommaso
 - attese esaurite + altezza ferma ma **non** in fondo → anomalia: chiusura pulita e avviso
   (non dovrebbe accadere; se accade e' un cambio di struttura della pagina)
 
@@ -568,10 +577,23 @@ vede comparire "Visto" senza ricevere risposta.
 **Decisione**: si aprono **solo le conversazioni gia' lette**. Quelle con messaggi non letti
 vengono saltate e lasciate intatte, cosi' il segnale delle risposte vere resta leggibile.
 
-Da accertare con un probe prima di implementare: **come si riconosce una chat non letta dalla
-lista** (probabilmente un indicatore visivo o il nome in grassetto). Se il segnale non fosse
-distinguibile in modo affidabile, la decisione va riportata a Tommaso invece di indovinare —
-sbagliare qui vuol dire aprire proprio le chat che si volevano preservare.
+**Probe eseguito il 2026-08-09** (`probe_inbox_web_nonlette.py`, account
+`claudio.abbigliamentovincente`): risultato **inconcludente**, non "segnale assente". Le 10
+righe lette dalla lista risultano tutte identiche su `pallini` (0) e `pesi` del font
+(sempre `400`, mai un valore diverso), nessuna `aria-label`. Ma questo account **non aveva
+nessuna chat realmente non letta** al momento della misura — verificato con tre controlli
+indipendenti, tutti a sola lettura: nessun badge numerico in tutta la pagina, nessun
+attributo DOM contenente `unread`/`non letto`, l'icona "Messaggi" in sidebar senza alcun
+conteggio annesso (a differenza dell'icona Notifiche, che nello stesso screenshot mostra un
+pallino rosso — il meccanismo di badge esiste sull'interfaccia, solo non per i DM in questo
+momento). Il probe non ha quindi potuto testare l'ipotesi per mancanza di un caso di
+controllo, non ha dimostrato che il segnale non esista.
+
+**Decisione riportata esplicitamente a Tommaso, come prescritto**: non si è indovinata
+un'euristica al suo posto. Il probe va rilanciato quando `claudio.abbigliamentovincente` (o
+un altro account sacrificabile) ha almeno una risposta in arrivo non ancora letta
+manualmente. Finché questo esito manca, la macchina a stati che decide se aprire una chat in
+base al suo stato di lettura **non può essere implementata con certezza** — vedi Task 8/9.
 
 Conseguenza sul perimetro: i contatti che hanno risposto e non sono ancora stati letti **non
 vengono raccolti** in quel passaggio. Verranno raccolti dopo che Tommaso li ha letti. E' il
@@ -822,8 +844,10 @@ non una limitazione arbitraria.
 - **nessun nome saltato fra due passi di scorrimento consecutivi** (il fallimento qui e' silenzioso:
   e' il test piu' importante del gruppo)
 - un passo piu' grande del buffer **deve** far fallire il test: e' la prova che il test discrimina
-- altezza ferma + in fondo + zero richieste fallite → dichiarato **fine lista**
-- altezza ferma + richieste fallite → dichiarato **piantato**, campagna NON completata
+- altezza ferma + in fondo + zero richieste fallite verso gli endpoint inbox → dichiarato
+  **fine lista**
+- altezza ferma + richieste fallite verso gli endpoint inbox → dichiarato **piantato**,
+  campagna NON completata
 - altezza che cresce dopo 8 s di attesa → si riprende, non si dichiara nulla (il caso "lento")
 - altezza ferma ma non in fondo → anomalia segnalata, non completamento silenzioso
 
