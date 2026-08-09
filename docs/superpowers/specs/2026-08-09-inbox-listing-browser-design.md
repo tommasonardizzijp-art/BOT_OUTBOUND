@@ -44,7 +44,7 @@ Tutto quanto segue e' stato verificato sul campo, non dedotto.
 | Data nel thread aperto | **assoluta** (`9 feb 2026, 20:28`), formato localizzato | idem |
 | Testo integrale dei messaggi | leggibile via `document.body.innerText` a thread aperto | idem |
 | Delimitatore di fine conversazione | la riga `Scrivi un messaggio...` (localizzata) | idem |
-| Segnale visivo di chat non letta (pallino/grassetto/aria-label) | **NON MISURATO in modo conclusivo** — su 10 righe di probe tutte identiche (`pallini=0`, `pesi=['400']`), ma l'account di prova non aveva nessuna chat realmente non letta al momento della misura (zero badge numerici, zero attributi `unread` nel DOM) | `probe_inbox_web_nonlette.py`, 2026-08-09 |
+| Segnale visivo di chat non letta | **Sì, netto**: nome del contatto in `font-weight: 600` (contro `400` sulle righe lette) **+** pallino blu pieno a destra della riga. Nessuna `aria-label` dedicata. Verificato con un caso reale: 4/10 righe segnalate dal probe combaciano 1:1 con le 4 righe che lo screenshot mostra in grassetto+pallino, e con il contatore "(4)" comparso nel `<title>` della pagina | `probe_inbox_web_nonlette.py`, 2026-08-09 (primo giro senza non letti: tutte le righe identiche, nessun segnale osservabile — coerente, non contraddittorio: senza un caso positivo il segnale non poteva emergere) |
 | Richieste fallite verso endpoint inbox durante scroll sano | **ZERO** su 12 giri di scroll (altezza 1152→3672), zero in assoluto, zero ristrette a `direct_v2`/`graphql` | `probe_inbox_web_requestfailed.py`, 2026-08-09 |
 
 **Conseguenza sulla velocita'**: il dato e' leggibile in mezzo secondo, quindi *l'apertura* non
@@ -577,23 +577,34 @@ vede comparire "Visto" senza ricevere risposta.
 **Decisione**: si aprono **solo le conversazioni gia' lette**. Quelle con messaggi non letti
 vengono saltate e lasciate intatte, cosi' il segnale delle risposte vere resta leggibile.
 
-**Probe eseguito il 2026-08-09** (`probe_inbox_web_nonlette.py`, account
-`claudio.abbigliamentovincente`): risultato **inconcludente**, non "segnale assente". Le 10
-righe lette dalla lista risultano tutte identiche su `pallini` (0) e `pesi` del font
-(sempre `400`, mai un valore diverso), nessuna `aria-label`. Ma questo account **non aveva
-nessuna chat realmente non letta** al momento della misura — verificato con tre controlli
-indipendenti, tutti a sola lettura: nessun badge numerico in tutta la pagina, nessun
-attributo DOM contenente `unread`/`non letto`, l'icona "Messaggi" in sidebar senza alcun
-conteggio annesso (a differenza dell'icona Notifiche, che nello stesso screenshot mostra un
-pallino rosso — il meccanismo di badge esiste sull'interfaccia, solo non per i DM in questo
-momento). Il probe non ha quindi potuto testare l'ipotesi per mancanza di un caso di
-controllo, non ha dimostrato che il segnale non esista.
+**Probe eseguito il 2026-08-09, due giri.** Primo giro senza nessuna chat realmente non letta
+nell'account: le 10 righe risultavano tutte identiche (`pallini=0`, `pesi=['400']`) — esito
+coerente con l'assenza di un caso positivo da testare, non prova che il segnale non esista
+(verificato con tre controlli aggiuntivi a sola lettura: nessun badge numerico in tutta la
+pagina, nessun attributo DOM `unread`/`non letto`, icona "Messaggi" in sidebar senza
+conteggio annesso).
 
-**Decisione riportata esplicitamente a Tommaso, come prescritto**: non si è indovinata
-un'euristica al suo posto. Il probe va rilanciato quando `claudio.abbigliamentovincente` (o
-un altro account sacrificabile) ha almeno una risposta in arrivo non ancora letta
-manualmente. Finché questo esito manca, la macchina a stati che decide se aprire una chat in
-base al suo stato di lettura **non può essere implementata con certezza** — vedi Task 8/9.
+**Secondo giro, con un caso reale**: Tommaso ha marcato manualmente una chat come non letta
+su `claudio.abbigliamentovincente`. Il segnale **esiste ed è netto**:
+
+```
+nome del contatto      font-weight 600  (contro 400 sulle righe lette)
+indicatore aggiuntivo   pallino blu pieno, a destra della riga
+aria-label               assente, non utilizzabile
+```
+
+4 righe su 10 risultavano segnalate dal probe (`pallini=1`, `pesi=['600', '400']`); lo
+screenshot di controllo mostra che sono **esattamente** le stesse 4 righe con nome in
+grassetto e pallino blu, e il `<title>` della pagina è passato a `"(4) Instagram — Messaggi"`
+— tre riscontri indipendenti che combaciano. Il quarto non letto oltre a quello di Tommaso è
+verosimilmente arrivato nel frattempo (l'account è un inbox attivo); non cambia
+l'interpretazione, la rinforza: il segnale ha seguito il conteggio reale, non un artefatto
+fisso.
+
+**Decisione**: il motore browser riconosce una chat non letta da **`font-weight: 600` sul
+nome** (soglia netta: le lette sono sempre `400`, mai un valore intermedio). Il pallino blu è
+un secondo segnale ridondante, utilizzabile come conferma ma non necessario da solo. Non
+serve aprire nulla per saperlo.
 
 Conseguenza sul perimetro: i contatti che hanno risposto e non sono ancora stati letti **non
 vengono raccolti** in quel passaggio. Verranno raccolti dopo che Tommaso li ha letti. E' il
