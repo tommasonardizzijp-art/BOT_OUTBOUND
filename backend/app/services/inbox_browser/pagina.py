@@ -85,6 +85,7 @@ _JS_CONTENITORE = """() => {
 }"""
 
 _JS_HREF_THREAD = """() => [...document.querySelectorAll('a[href^="/"]')]
+    .filter(e => e.getBoundingClientRect().left > 660)
     .map(e => e.getAttribute('href'))"""
 
 _JS_HEADER_THREAD = """() => {
@@ -145,6 +146,11 @@ async def apri_riga(page, indice: int, nome_atteso: str, lingua: str) -> str | N
 
     La riga viene ri-risolta QUI, immediatamente prima del click: mai riusare un
     riferimento preso prima di una pausa.
+
+    `lingua` e' accettata per uniformita' di firma con `leggi_righe_visibili`
+    (il chiamante ha gia' la lingua a portata di mano per quella chiamata), ma
+    qui non serve: la verifica post-click confronta i nomi via `nome_combacia`,
+    che normalizza senza dipendere dalla lingua dell'interfaccia.
     """
     handle = await page.evaluate_handle(
         """(idx) => [...document.querySelectorAll('div[role="button"], div[tabindex="0"], a')]
@@ -169,6 +175,9 @@ async def apri_riga(page, indice: int, nome_atteso: str, lingua: str) -> str | N
         return None
 
     href = await page.evaluate(_JS_HREF_THREAD)
+    # propri=set(): placeholder consapevole. Se serve escludere lo username
+    # del proprio account dai candidati, lo decide il Task 9 (il motore), che
+    # conosce l'account loggato — pagina.py non ce l'ha.
     return estrai_username_thread(href, propri=set())
 
 
@@ -216,7 +225,14 @@ async def decidi_fine_lista(page, falliti_inbox: list) -> str:
     """Un giro di scorrimento con attese a pazienza crescente: se l'altezza non
     cresce con NESSUna delle attese, solo allora si dichiarano esaurite (le
     attese sono qui, non nella funzione pura, perche' richiedono il browser).
-    La decisione vera e propria resta in `decidi_da_segnali`."""
+    La decisione vera e propria resta in `decidi_da_segnali`.
+
+    `falliti_inbox` e' condiviso per l'intera sessione (30-55 min): si
+    misura solo il DELTA da quando si e' entrati in questa chiamata, altrimenti
+    un fallimento isolato all'inizio della sessione marcherebbe 'piantato'
+    ogni fine-lista successiva per il resto della sessione.
+    """
+    baseline_falliti = len(falliti_inbox)
     stato = await scorri(page)
     altezza_prima = stato.altezza
     for attesa_s in ATTESE_S:
@@ -228,6 +244,6 @@ async def decidi_fine_lista(page, falliti_inbox: list) -> str:
 
     return decidi_da_segnali(
         altezza_prima=altezza_prima, altezza_dopo=stato.altezza,
-        al_fondo=stato.al_fondo, falliti_inbox=len(falliti_inbox),
+        al_fondo=stato.al_fondo, falliti_inbox=len(falliti_inbox) - baseline_falliti,
         attese_esaurite=True,
     )

@@ -4,7 +4,8 @@ decisione. Il browser reale e' coperto dal QA agent (Task 15), non da pytest.
 import pytest
 
 from app.services.inbox_browser.pagina import (
-    PASSO_SCROLL_MAX, RigaVisibile, apri_riga, decidi_da_segnali, nome_combacia,
+    PASSO_SCROLL_MAX, RigaVisibile, StatoScorrimento, apri_riga, decidi_da_segnali,
+    decidi_fine_lista, nome_combacia,
 )
 
 
@@ -140,3 +141,32 @@ async def test_con_verifica_post_click_apri_riga_rinuncia_alla_riga(monkeypatch)
     risultato = await apri_riga(page, indice=0, nome_atteso="Bruzzo Abbigliamento", lingua="it")
 
     assert risultato is None
+
+
+# ── decidi_fine_lista: falliti nella finestra, non cumulativi di sessione ──
+class _FakePageAttese:
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_decidi_fine_lista_ignora_falliti_precedenti_alla_finestra(monkeypatch):
+    """Fix round 1, Critical: un fallimento avvenuto MOLTO PRIMA nella sessione
+    (30-55 minuti di durata) non deve marcare 'piantato' una fine-lista reale
+    successiva se non ci sono NUOVI fallimenti nella finestra di attesa di
+    QUESTA chiamata. Senza baseline/delta, len(falliti_inbox) grezzo resta > 0
+    per il resto della sessione e ogni fine-lista vera diventa un falso allarme."""
+    from app.services.inbox_browser import pagina
+
+    async def scorri_ferma(_page):
+        return StatoScorrimento(altezza=5112, al_fondo=True)   # mai cresce: nessun nuovo caricamento
+
+    monkeypatch.setattr(pagina, "scorri", scorri_ferma)
+
+    # Fallimenti gia' presenti PRIMA di entrare in decidi_fine_lista (simula un
+    # hiccup avvenuto molto prima nella sessione).
+    falliti_inbox = ["errore-vecchio-1", "errore-vecchio-2", "errore-vecchio-3"]
+
+    esito = await decidi_fine_lista(_FakePageAttese(), falliti_inbox)
+
+    assert esito == "fine"  # nessun fallimento NUOVO nella finestra di attesa
