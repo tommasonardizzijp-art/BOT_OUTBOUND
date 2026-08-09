@@ -38,6 +38,12 @@ Tutto quanto segue e' stato verificato sul campo, non dedotto.
 | Altezza del contenitore durante lo scroll | cresce a ogni caricamento: 1152 → 1872 → 2232 → ... → 5112 | idem |
 | Ritardo di caricamento | subito dopo lo scroll l'altezza e' ancora la vecchia, ~1-2s dopo e' cresciuta | idem |
 | Numero di righe nel DOM | **oscilla** (78, 96, 75, 78, 93, 72...): lista virtualizzata | idem |
+| Chi ha scritto per ultimo | leggibile **dalla lista**, prefisso `Tu:` sull'anteprima | probe messaggi |
+| Anteprima ultimo messaggio | nella lista, **troncata** | idem |
+| Data nella lista | **relativa** (`22 sett`) | idem |
+| Data nel thread aperto | **assoluta** (`9 feb 2026, 20:28`), formato localizzato | idem |
+| Testo integrale dei messaggi | leggibile via `document.body.innerText` a thread aperto | idem |
+| Delimitatore di fine conversazione | la riga `Scrivi un messaggio...` (localizzata) | idem |
 
 **Conseguenza sulla velocita'**: ~1200 chat/ora con attesa prudente + pausa umana, quindi
 ~2.5h per 3000 contatti. Una stima iniziale di 8-25h era sbagliata perche' applicava il pacing
@@ -238,6 +244,44 @@ Il riorientamento costa poco perche' in scorrimento non si apre nulla.
 `full_name`. Decisione di Tommaso: **nessun codice dedicato**, in quei casi si rileggono le
 chat. Il riconoscimento si popola da solo con l'uso.
 
+## Dove si legge ogni dato (misurato)
+
+```
+DALLA LISTA — gratis, senza aprire nulla
+  nome visualizzato       "KIDS Mstore Civitanova Marche (Uscita A14)"
+  chi ha scritto x ultimo  prefisso "Tu:" sull'anteprima -> nostro; assente -> loro
+  anteprima messaggio      TRONCATA
+  data                     RELATIVA ("22 sett")
+
+DAL THREAD APERTO — costa un'apertura
+  username                 href "/modando__palermo/" + header "modando__palermo - Instagram"
+  data                     ASSOLUTA ("9 feb 2026, 20:28")
+  testo integrale          document.body.innerText, fino alla riga "Scrivi un messaggio..."
+```
+
+**Conseguenza sui diversivi**: sapere *prima di aprire* se c'e' stato uno scambio (assenza del
+prefisso `Tu:`) rende gratuita la decisione se soffermarsi a rileggere la conversazione o
+sbrigare la chat. Non serve aprire per decidere.
+
+**Conseguenza sulla lettura dei messaggi**: i selettori "furbi" per il pannello conversazione
+non funzionano (due tentativi falliti in fase di misura, 0 righe lette). Quello che funziona e'
+`document.body.innerText` con delimitazione sulla riga del campo di scrittura.
+
+### Stringhe localizzate: elenco unico
+
+Tutte queste stringhe dipendono dalla **lingua dell'interfaccia dell'account**, non da una
+impostazione nostra. Vanno in un unico elenco multilingua, non sparse nel codice:
+
+| Cosa | Italiano | Inglese | Se sbagliata |
+|---|---|---|---|
+| autore = noi | `Tu:` | `You:` | **ogni** chat classificata come "ha risposto": classificazione tutta falsa, in silenzio |
+| profilo cancellato | `Utente Instagram` | `Instagram User` | chat inutili aperte, tempo sprecato |
+| fine conversazione | `Scrivi un messaggio...` | `Message...` | il testo dell'ultimo messaggio viene letto male |
+| mesi nelle date | `feb`, `sett`, ... | `Feb`, `Sep`, ... | data non interpretabile |
+
+Il primo caso e' il piu' pericoloso: non produce nessun errore, produce **dati sbagliati**.
+Serve un test che giri su entrambe le lingue.
+
 ### Normalizzazione dei nomi
 
 Il confronto fra nome letto e nome in archivio passa da una normalizzazione: minuscole, spazi
@@ -352,9 +396,13 @@ perche' sono misure, non comportamento).
 
 **Sessione**: 30-55 minuti, poi stacco lungo gestito dal governo esistente.
 
-**Tetto giornaliero**: configurabile per campagna. Default proposto **800 chat/giorno** — sotto
-la resa di una singola sessione piena (~1200/ora), cosi' il valore di partenza non e' mai
-sorprendente. Da alzare consapevolmente, non un limite tecnico.
+**Tetto giornaliero**: configurabile per campagna. Default proposto **1500 chat/giorno**.
+
+Il valore va scelto insieme alla durata della sessione, altrimenti i due parametri si
+contraddicono. A ~1200 chat/ora una sessione da 45 minuti apre ~900 chat: un tetto di 800
+verrebbe sfondato **dalla prima sessione**, e il motore si fermerebbe a meta' con la campagna
+in uno stato che sembra un errore. 1500 lascia spazio a una sessione piena piu' una seconda
+parziale, che e' il ritmo realistico di una giornata.
 
 ### Parametri e valori proposti
 
@@ -369,7 +417,7 @@ non una misura: vanno tarati sull'uso.
 | pausa sosta / probabilita' | 10-30 s / 0.10 | coincide con la rilettura della conversazione |
 | pausa stacco / probabilita' | 2-5 min / 0.02 | la distrazione vera, rara |
 | durata sessione | 30-55 min | scelto da Tommaso |
-| tetto giornaliero | 800 chat | sotto una sessione piena |
+| tetto giornaliero | 1500 chat | una sessione piena (~900) + una parziale; 800 verrebbe sfondato dalla prima |
 | avviso "nulla di nuovo" | sessione chiusa con 0 contatti nuovi | non e' uno stop: e' l'esito da comunicare (vedi sotto) |
 | passo di scorrimento | 0.6-0.8 dell'altezza visibile, randomizzato | sopra il buffer renderizzato si perdono righe **in silenzio** |
 | attese prima di dichiarare la fine | 1, 2, 4, 8, 16 s (tetto ~60 s) | la lentezza normale non deve mai essere scambiata per fine lista |
@@ -397,6 +445,10 @@ non una misura: vanno tarati sull'uso.
 - normalizzazione: maiuscole, spazi doppi, emoji, spazi invisibili
 - segnaposto ignorati in italiano **e** in inglese
 - nome troncato
+- **stringhe localizzate**: la stessa lista, letta con interfaccia in italiano e in inglese,
+  deve produrre la **stessa** classificazione di "chi ha scritto per ultimo". E' il test che
+  intercetta il fallimento piu' insidioso: nessun errore, solo dati sbagliati
+- interfaccia in una lingua non prevista → si rifiuta di classificare invece di indovinare
 - archivio vuoto alla prima esecuzione
 - i tre criteri di stop, uno per uno (fondo, tetto contatti, tempo sessione)
 - sessione chiusa con zero contatti nuovi → l'avviso "nulla di nuovo" viene emesso
