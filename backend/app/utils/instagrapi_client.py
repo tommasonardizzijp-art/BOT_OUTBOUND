@@ -109,7 +109,7 @@ async def _get_account_lock(account_id: str) -> asyncio.Lock:
         return _account_locks[account_id]
 
 
-async def login(account: InstagramAccount, db, skip_gql_verify: bool = False) -> "Client":
+async def login(account: InstagramAccount, db) -> "Client":
     """
     Restore Instagram session for `account`.
     Acquires per-account lock — only one caller at a time can restore
@@ -117,16 +117,15 @@ async def login(account: InstagramAccount, db, skip_gql_verify: bool = False) ->
     NEVER attempts automated fresh login (ban risk). Requires prior
     manual browser login via Account → 'Login Browser'.
 
-    skip_gql_verify=True: skip the user_info_by_username_gql ping (reply checker).
-    The GQL call is only needed before mobile scraping (web→mobile session jump),
-    not for reading the DM inbox which uses a different API surface.
+    Il ripristino non fa nessuna chiamata di verifica: vedi _do_login per il
+    perche' (la vecchia verifica GQL partiva anonima e prendeva 429 sempre).
     """
     lock = await _get_account_lock(account.id)
     async with lock:
-        return await _do_login(account, db, skip_gql_verify=skip_gql_verify)
+        return await _do_login(account, db)
 
 
-async def _do_login(account: InstagramAccount, db, skip_gql_verify: bool = False) -> "Client":
+async def _do_login(account: InstagramAccount, db) -> "Client":
     from instagrapi import Client
 
     client = Client()
@@ -134,14 +133,13 @@ async def _do_login(account: InstagramAccount, db, skip_gql_verify: bool = False
     if account.proxy:
         client.set_proxy(account.proxy)
 
-    # Fail-fast sul verify GQL. L'endpoint web (web_profile_info) viene 429-ato da IG
-    # in modo sistematico su quasi ogni IP: è un limite dell'endpoint, non un flag
-    # sull'account (verificato: stesso 429 da IP casa e da proxy mobile). instagrapi
-    # monta di default una Retry(total=3, backoff_factor=2) sulla sessione `public` →
-    # ~15s persi a OGNI login, sempre, per un 429 inevitabile. Riduciamo a 1 retry
-    # senza backoff: il 429 torna in ~1-2s e si prosegue con la sessione mobile.
-    # NON tocca l'anti-ban: la chiamata-web "gentile" pre-mobile (baking) resta, fa
-    # solo meno richieste ripetute = meno aggressivo, non di più.
+    # Fail-fast su QUALSIASI chiamata alla sessione `public`. instagrapi monta di
+    # default una Retry(total=3, backoff_factor=2) su `public`: ogni risposta
+    # 429/5xx costa ~15s di ritentativi. Riduciamo a 1 retry senza backoff, cosi'
+    # un rifiuto torna in ~1-2s invece di bloccare il chiamante.
+    # (Nato per il verify GQL, ora rimosso — vedi sotto. Resta perche' vale per
+    # ogni altro uso della sessione web, e meno richieste ripetute = meno
+    # aggressivo, non di piu'.)
     try:
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
@@ -165,37 +163,27 @@ async def _do_login(account: InstagramAccount, db, skip_gql_verify: bool = False
         session = json.loads(account.session_data)
         client.set_settings(session)
 
-        if not skip_gql_verify:
-            # Verify session via WEB GraphQL (not mobile API).
-            # Calling mobile `account_info()` right after a fresh manual web login
-            # triggers UFAC challenge ("ufac_www_bloks") due to web→mobile session
-            # jump. GraphQL accepts web cookies cleanly, lets the session "bake"
-            # before scraper actually hits mobile endpoints.
-            #
-            # If this endpoint returns 429 (IP-level rate limit), skip the verify
-            # and proceed — 429 here means the web endpoint is throttled, NOT that
-            # the mobile session is invalid. Blocking login on a transient IP limit
-            # prevents all scraping even when the account is perfectly usable.
-            try:
-                await asyncio.to_thread(
-                    client.user_info_by_username_gql, account.username
-                )
-            except Exception as gql_exc:
-                gql_str = str(gql_exc).lower()
-                if "429" in gql_str or "too many" in gql_str or "retryerror" in type(gql_exc).__name__.lower():
-                    logger.warning(
-                        f"GQL verify 429 per @{account.username} — "
-                        "endpoint web rate-limited, proseguo con sessione mobile"
-                    )
-                else:
-                    raise
-
+        # NESSUNA verifica GQL. Qui c'era una chiamata a user_info_by_username_gql
+        # che doveva "far riposare" la sessione web prima del salto agli endpoint
+        # mobile (per evitare la challenge UFAC dopo un login manuale via browser).
+        # Non ha mai fatto quel lavoro: user_info_by_username_gql passa da
+        # `client.public`, una requests.Session distinta da `client.private`, e i
+        # cookie della sessione salvata finiscono SOLO in `private` (instagrapi
+        # auth.py::init). `public` riceve il sessionid unicamente via
+        # inject_sessionid_to_public(), che instagrapi chiama dentro login() — e
+        # noi login() non lo facciamo mai (per scelta anti-ban: si ripristina e
+        # basta). Quindi la richiesta partiva ANONIMA, e Instagram risponde 429 a
+        # web_profile_info anonimo: da qui il "GQL verify 429" a ogni login, su
+        # ogni account, anche appena creato, da qualsiasi IP.
+        # Essendo anonima non toccava la sessione dell'account: non preparava
+        # nulla. Restava solo il costo — 1-2s per login e una richiesta anonima
+        # verso web_profile_info, l'endpoint piu' sorvegliato che tocchiamo
+        # (misurato 0/65 contro 65/65 del GraphQL passivo). Rimossa.
         account.session_data = json.dumps(client.get_settings())
         account.last_login_at = datetime.utcnow()
         await db.commit()
 
-        label = "senza verifica GQL" if skip_gql_verify else "verifica web GQL"
-        logger.info(f"Sessione ripristinata per @{account.username} ({label})")
+        logger.info(f"Sessione ripristinata per @{account.username}")
         return client
 
     except Exception as e:

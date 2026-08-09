@@ -178,10 +178,9 @@ async def _scan_inbox(account: InstagramAccount, sent_followers: dict, db) -> in
     """
     from pydantic import ValidationError as PydanticValidationError
 
-    # skip_gql_verify: the GQL ping is only needed before mobile scraping to avoid
-    # UFAC challenge — it fails with 400 on some sessions and is not needed for
-    # reading the DM inbox, which uses a different API surface.
-    client = await _login(account, db, skip_gql_verify=True)
+    # Il login non fa piu' nessun ping GQL (partiva anonimo e prendeva 429 sempre,
+    # vedi instagrapi_client._do_login): il flag skip_gql_verify non esiste piu'.
+    client = await _login(account, db)
     own_pk = int(client.user_id)
 
     # Fetch recent inbox threads — direct_threads() returns list[DirectThread]
