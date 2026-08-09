@@ -87,12 +87,20 @@ class TestMediaXmaPatch:
 
 
 # ─────────────────────────────────────────────────────────
-# 2. GQL verify 429 bypass
+# 2. Il ripristino sessione non chiama endpoint web
 # ─────────────────────────────────────────────────────────
 
-class TestGqlVerify429Bypass:
-    """_do_login must skip GQL verify gracefully when Instagram returns 429
-    on the web_profile_info endpoint (IP-level rate limit)."""
+class TestLoginSenzaVerifyGql:
+    """_do_login NON deve chiamare nessun endpoint di verifica web.
+
+    C'era una chiamata a user_info_by_username_gql pensata per far "riposare"
+    la sessione web prima del salto agli endpoint mobile. Partiva pero' da
+    client.public, che non riceve mai i cookie della sessione salvata (finiscono
+    solo in client.private, instagrapi auth.py::init; public li avrebbe solo via
+    inject_sessionid_to_public(), invocato dentro login() che noi non chiamiamo
+    mai). Quindi era anonima -> 429 garantito su web_profile_info, a ogni login,
+    su ogni account. Non preparava nulla e costava 1-2s + una richiesta anonima
+    sull'endpoint piu' sorvegliato. Questi test impediscono che rientri."""
 
     def _fake_account(self) -> MagicMock:
         acc = MagicMock()
@@ -109,83 +117,85 @@ class TestGqlVerify429Bypass:
         return db
 
     @pytest.mark.asyncio
-    async def test_login_succeeds_when_gql_returns_429(self):
+    async def test_login_non_chiama_mai_il_verify_gql(self):
+        """Nessuna chiamata a user_info_by_username_gql durante il ripristino."""
         from app.utils.instagrapi_client import _do_login
 
-        exc_429 = Exception("RetryError: too many 429 error responses")
         with patch("instagrapi.Client") as MockClient:
             client = MagicMock()
             client.user_id = "111"
             client.get_settings.return_value = {}
-            client.user_info_by_username_gql.side_effect = exc_429
             MockClient.return_value = client
 
-            result = await _do_login(self._fake_account(), self._fake_db(), skip_gql_verify=False)
+            result = await _do_login(self._fake_account(), self._fake_db())
+            client.user_info_by_username_gql.assert_not_called()
             assert result.user_id == "111"
 
     @pytest.mark.asyncio
-    async def test_login_succeeds_when_gql_returns_retryerror(self):
+    async def test_login_non_tocca_la_sessione_public(self):
+        """Nessuna chiamata diretta a public_request durante il ripristino.
+
+        NOTA sul perimetro: il client e' un MagicMock, quindi invocare un metodo
+        di alto livello (user_info_by_username_gql & co.) NON fa scattare questo
+        assert — verificato con la prova del nove. Copre solo una public_request
+        scritta a mano nel nostro codice. La guardia contro il verify vero e'
+        test_login_non_chiama_mai_il_verify_gql, che invece fallisce davvero se
+        la chiamata rientra.
+        """
         from app.utils.instagrapi_client import _do_login
 
-        exc_retry = Exception("RetryError: HTTPSConnectionPool Max retries exceeded (Caused by ResponseError(too many 429))")
         with patch("instagrapi.Client") as MockClient:
             client = MagicMock()
             client.user_id = "222"
             client.get_settings.return_value = {}
-            client.user_info_by_username_gql.side_effect = exc_retry
             MockClient.return_value = client
 
-            result = await _do_login(self._fake_account(), self._fake_db(), skip_gql_verify=False)
-            assert result.user_id == "222"
+            await _do_login(self._fake_account(), self._fake_db())
+            client.public_request.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_login_fails_on_challenge_error(self):
-        """Non-429 errors (challenge, auth) must still propagate and block login."""
-        from app.utils.instagrapi_client import _do_login
-        from app.utils.exceptions import AccountChallengeError, ScraperError
+    async def test_il_flag_skip_gql_verify_non_esiste_piu(self):
+        """La firma non deve piu' accettare skip_gql_verify.
 
-        exc_challenge = Exception("ChallengeRequired: checkpoint_required")
+        Se qualcuno lo ripassasse credendo di disattivare qualcosa, otterrebbe
+        un falso senso di controllo su un comportamento che non c'e' piu'.
+        """
+        import inspect
+
+        from app.utils.instagrapi_client import _do_login, login
+
+        assert "skip_gql_verify" not in inspect.signature(login).parameters
+        assert "skip_gql_verify" not in inspect.signature(_do_login).parameters
+
+    @pytest.mark.asyncio
+    async def test_sessione_scaduta_blocca_ancora_il_login(self):
+        """'LoginRequired' da set_settings deve ancora fermare tutto."""
+        from app.utils.exceptions import ScraperError
+        from app.utils.instagrapi_client import _do_login
+
         with patch("instagrapi.Client") as MockClient:
             client = MagicMock()
             client.user_id = "333"
-            client.get_settings.return_value = {}
-            client.user_info_by_username_gql.side_effect = exc_challenge
-            MockClient.return_value = client
-
-            with pytest.raises((AccountChallengeError, ScraperError)):
-                await _do_login(self._fake_account(), self._fake_db(), skip_gql_verify=False)
-
-    @pytest.mark.asyncio
-    async def test_login_fails_on_session_expired(self):
-        """'LoginRequired' is NOT a 429 — must still block login."""
-        from app.utils.instagrapi_client import _do_login
-        from app.utils.exceptions import ScraperError
-
-        exc_login = Exception("LoginRequired: session expired")
-        with patch("instagrapi.Client") as MockClient:
-            client = MagicMock()
-            client.user_id = "444"
-            client.get_settings.return_value = {}
-            client.user_info_by_username_gql.side_effect = exc_login
+            client.set_settings.side_effect = Exception("LoginRequired: session expired")
             MockClient.return_value = client
 
             with pytest.raises(ScraperError):
-                await _do_login(self._fake_account(), self._fake_db(), skip_gql_verify=False)
+                await _do_login(self._fake_account(), self._fake_db())
 
     @pytest.mark.asyncio
-    async def test_skip_gql_verify_flag_still_works(self):
-        """skip_gql_verify=True must never call user_info_by_username_gql."""
+    async def test_challenge_blocca_ancora_il_login(self):
+        """Una challenge durante il ripristino deve ancora propagare."""
+        from app.utils.exceptions import AccountChallengeError, ScraperError
         from app.utils.instagrapi_client import _do_login
 
         with patch("instagrapi.Client") as MockClient:
             client = MagicMock()
-            client.user_id = "555"
-            client.get_settings.return_value = {}
+            client.user_id = "444"
+            client.set_settings.side_effect = Exception("ChallengeRequired: checkpoint_required")
             MockClient.return_value = client
 
-            result = await _do_login(self._fake_account(), self._fake_db(), skip_gql_verify=True)
-            client.user_info_by_username_gql.assert_not_called()
-            assert result.user_id == "555"
+            with pytest.raises((AccountChallengeError, ScraperError)):
+                await _do_login(self._fake_account(), self._fake_db())
 
 
 # ─────────────────────────────────────────────────────────

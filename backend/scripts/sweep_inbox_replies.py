@@ -122,7 +122,7 @@ async def main() -> None:
             return
         print(f"[..] login @{account.username} (status={account.status.value}, proxy={account.proxy or 'nessuno'})")
         try:
-            client = await _login(account, db, skip_gql_verify=True)
+            client = await _login(account, db)
         except Exception as e:
             print(f"[X] login fallito ({type(e).__name__}): {e}")
             return
