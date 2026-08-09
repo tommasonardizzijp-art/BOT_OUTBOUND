@@ -29,20 +29,24 @@ class ArchivioNomi:
     """
 
     def __init__(self, nomi: list[str | None]):
-        conteggio = Counter(n for n in (normalizza_nome(x) for x in nomi or []) if n)
-        self._unici = {n for n, k in conteggio.items() if k == 1}
+        self._conteggio = Counter(n for n in (normalizza_nome(x) for x in nomi or []) if n)
 
     def e_riconosciuto(self, nome: str | None) -> bool:
         normale = normalizza_nome(nome)
         if not normale or e_segnaposto(nome):
             return False
-        return normale in self._unici
+        return self._conteggio.get(normale) == 1
 
     def aggiungi(self, nome: str | None) -> None:
-        """Un nome appena raccolto entra nell'archivio."""
+        """Un nome appena raccolto entra nell'archivio.
+
+        Se il nome era gia' presente, il conteggio sale a 2+ e smette di
+        valere come riconoscimento: e' lo stesso caso ambiguo del costruttore,
+        solo scoperto a runtime invece che al caricamento iniziale.
+        """
         normale = normalizza_nome(nome)
         if normale and not e_segnaposto(nome):
-            self._unici.add(normale)
+            self._conteggio[normale] += 1
 
 
 class ContatoreZona:

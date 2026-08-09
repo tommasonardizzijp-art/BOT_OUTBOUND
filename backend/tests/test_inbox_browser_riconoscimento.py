@@ -32,6 +32,16 @@ def test_nomi_vuoti_non_creano_un_falso_riconoscimento():
     assert a.e_riconosciuto("") is False
 
 
+def test_aggiungi_stesso_nome_lo_rende_ambiguo():
+    """aggiungi() deve mantenere la stessa invariante del costruttore: se un
+    secondo profilo con lo stesso nome viene raccolto in seguito, il nome non
+    e' piu' univoco e smette di valere come riconoscimento."""
+    a = ArchivioNomi(["Mario Rossi"])
+    assert a.e_riconosciuto("Mario Rossi") is True
+    a.aggiungi("Mario Rossi")
+    assert a.e_riconosciuto("Mario Rossi") is False
+
+
 def test_segnaposto_mai_riconosciuto():
     a = ArchivioNomi(["Utente Instagram", "Bruzzo"])
     assert a.e_riconosciuto("Utente Instagram") is False
