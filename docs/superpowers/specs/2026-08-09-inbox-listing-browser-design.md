@@ -169,6 +169,18 @@ Verificato che l'arricchimento via browser porta la targa vera su **entrambi** i
 `browser_bio.py:152` (`pk=user.get("id")`, percorso nativo) e `browser_bio.py:194`
 (`shaped["id"] = g.get("pk") or g.get("id")`, fallback GraphQL).
 
+**Dove vive la sostituzione**: dentro `fetch_and_store_bio_browser`, subito prima di
+`browser_bio.py:570` (`upsert_lead(ig_user_id=follower.ig_user_id, ...)`). Questo file compare
+fra i "riusi" ma **va modificato**: e' l'unico punto in cui la targa vera e il follower
+coesistono. La modifica e' additiva e non tocca il percorso API.
+
+**Precisazione su `browser_bio` e il pk** (correzione a una stesura precedente): la Fase Bio
+browser naviga per username (`:278`), ma **usa il pk** per i contatti business —
+`_fetch_public_contact_inpage(raw_page, shim.pk)` a `:524`, che esegue
+`fetch('/api/v1/users/${pk}/info/')` a `:389`. Il pk usato e' quello **vero appena letto dalla
+pagina**, non quello del DB, quindi la conclusione regge: la targa provvisoria non intralcia
+l'interrogazione. Ma non e' vero che il canale browser ignori del tutto il pk.
+
 Casi da gestire nella sostituzione, tutti sotto test:
 - la targa vera risulta **gia' presente** nella campagna → fondere, non duplicare
   (il `UniqueConstraint` altrimenti solleva);
@@ -176,18 +188,67 @@ Casi da gestire nella sostituzione, tutti sotto test:
   (`locked_by_account_id`), quindi nessun altro puo' infilarsi;
 - `upsert_lead` deve ricevere la targa **vera**, mai la provvisoria.
 
-### Vincolo: arricchimento via browser obbligatorio
+### Vincolo: l'arricchimento deve avvenire, e via browser
 
 L'arricchimento via API interroga Instagram **con la targa** (`profile_lookup.py:49`,
 `user_info_v1(pk)`): su un contatto appena raccolto cercherebbe una persona inesistente.
 
-Quindi una campagna con `inbox_engine='browser'` deve avere `bio_engine='browser'`.
+**Ma il vincolo su `bio_engine` da solo NON basta** — buco trovato in revisione adversarial,
+verificato:
 
-- **Backend**: l'API rifiuta `bio_engine='api'` su queste campagne, con messaggio esplicito.
-- **Frontend**: il pulsante API va reso grigio e non cliccabile
-  (`frontend/app/campaigns/[id]/page.tsx:1173-1186`), con spiegazione del perche'.
+La Fase Bio non e' governata da `bio_engine` ma da `enrichment_level`, dichiarato
+«ortogonale a `bio_engine`» (`campaign.py:46-48`). La guardia
+`enrichment_blocca_la_fase_bio` sta a `scrape_bios.py:82` e fa `return None` **prima** del
+dispatch su `bio_engine`, che e' a `scrape_bios.py:114`. E il default sulle campagne nuove e'
+proprio `'none'` (`campaign.py:182-184`, `server_default=ENRICHMENT_NONE`).
 
-Il blocco serve su entrambi i lati: uno solo grafico si aggira.
+Nella configurazione di **default**, quindi: `inbox_engine='browser'` +
+`enrichment_level='none'` → la Fase Bio non parte affatto → i follower restano `pending` con
+la targa provvisoria → e `follower_workability.py:33-38` li rende **inviabili cosi' come
+sono**. Il ponte provvisoria→vera non viene mai attraversato.
+
+Conseguenza grave: la targa negativa arriva fino a `GlobalContact`
+(`browser_bio.py:570` → `global_contact_service.py:82-104`) e al dedup anti-doppio-DM
+(`campaign_orchestrator.py:485-488`, `_mark_globally_contacted` a `:1503-1560`). La stessa
+persona raccolta via API in un'altra campagna avrebbe una chiave diversa: **la protezione
+contro il doppio DM cross-campagna non la riconoscerebbe**. E' esattamente la protezione che
+la targa provvisoria doveva preservare.
+
+### Tre presidi, non uno
+
+Il primo presidio e' gia' saltato una volta in revisione: non ci si affida a un solo livello.
+
+1. **Vincolo di configurazione**: `inbox_engine='browser'` richiede
+   `enrichment_level != 'none'` **e** `bio_engine='browser'`. Rifiutato dall'API con
+   messaggio esplicito; disabilitato nel frontend.
+2. **Guardia difensiva sul confine dei dati**: `upsert_lead` / `GlobalContact` **rifiutano**
+   una targa provvisoria (negativa). Se per qualunque motivo un contatto non arricchito ci
+   arriva, si ferma li' e lo si registra. Regge anche se il vincolo (1) venisse aggirato da un
+   percorso futuro.
+3. **Export protetto**: le targhe provvisorie non compaiono nei CSV
+   (`api/leads.py:363,374` esportano `ig_user_id` come **prima colonna**) — altrimenti numeri
+   negativi finirebbero in un foglio Excel aperto da Tommaso.
+
+**Limite dichiarato**: una campagna browser **senza** arricchimento non e' supportata. Se
+servisse in futuro, la strada e' estendere il dedup globale a chiave username, non allentare
+il vincolo.
+
+### Frontend: l'interruttore inbox e' disabilitato via codice
+
+Correzione a un'affermazione precedente di questo documento. Backend e schema accettano
+`'browser'`, ma il frontend **no**: `frontend/app/campaigns/[id]/page.tsx:1084-1091` ha
+`disabled` **cablato** (non condizionale), `cursor-not-allowed` e
+`title="L'estrazione dell'inbox usa sempre l'API: il motore browser e' stato rimosso."`,
+piu' il paragrafo esplicativo a `:1065-1067`. Va riabilitato e riscritto: **non e' a costo
+zero**.
+
+I pulsanti `bio_engine` da ingrigire stanno a `page.tsx:1167-1194` (`handleBioEngineSwitch('api')`
+a `:1171`, `('browser')` a `:1184`). Il range 1173-1186 citato in una stesura precedente
+tagliava a meta' entrambi i tag `<button>`.
+
+**Bug collaterale da correggere**: `page.tsx:736` legge `campaign.inbox_engine ?? 'browser'`
+mentre il backend ha default `'api'` (`campaign.py:174`). Su una campagna col campo nullo la UI
+mostrerebbe uno stato **diverso da quello reale**.
 
 Evoluzione possibile ma **fuori scope**: far usare all'arricchimento API il percorso per
 username (`user_info_by_username_v1`, gia' usato da `import_resolver.py:94`), che
@@ -422,6 +483,33 @@ non una misura: vanno tarati sull'uso.
 | passo di scorrimento | 0.6-0.8 dell'altezza visibile, randomizzato | sopra il buffer renderizzato si perdono righe **in silenzio** |
 | attese prima di dichiarare la fine | 1, 2, 4, 8, 16 s (tetto ~60 s) | la lentezza normale non deve mai essere scambiata per fine lista |
 
+## Presupposti e interazioni emerse in revisione
+
+**Un solo account inbox.** `api/campaigns.py:73-77` (`inbox_account_count_ok`) impone
+`active_count == 1` per `dm_threads`. Vale anche col motore browser: e' un presupposto, non
+qualcosa da aggiungere. Il test adversarial "due sessioni sullo stesso account" ci si appoggia.
+
+**Cambio motore a caldo.** `scrape_bios.py:188-199` ha un auto-defer (`ENGINE_SWITCH_DEFER`)
+per quando `bio_engine` cambia mentre il job sta girando: senza, il lock arq in-progress resta
+appeso e blocca anche un nuovo avvio. Il motore inbox browser ha lo stesso problema in forma
+**peggiore** — sessioni da 30-55 minuti contro una pagina API. Serve il gemello.
+
+Nota: la guardia di `campaigns.py:322-326` protegge solo il cambio a campagna ferma
+(`draft/ready/paused/error`), ma una campagna in listing passa per `listing_break`, che **non**
+e' fra gli stati bloccati. Da coprire.
+
+**Listing e arricchimento non devono sovrapporsi.** `browser_bio.py:918-935` conta i `pending`
+residui per decidere se il pool e' smaltito e la Fase Bio puo' chiudersi. Se il listing browser
+continua a inserire follower mentre la Fase Bio browser gira, quel conteggio **non torna mai a
+zero** e la Fase Bio non si chiude. Vanno serializzate: prima il listing, poi l'arricchimento.
+(Il lock di profilo di `BrowserSession` gia' impedisce due browser sullo stesso account, il che
+copre il caso in pratica — ma la dipendenza va dichiarata, non lasciata implicita.)
+
+**Nessun messaggio AI senza arricchimento.** `ai_personalizer.py:415,478` selezionano solo
+follower in `bio_scraped`. Con `enrichment_level='none'` restano `pending` e nessun messaggio
+AI viene mai generato: e' un'altra ragione per cui il vincolo sull'arricchimento e' corretto,
+non una limitazione arbitraria.
+
 ## Errori
 
 | Situazione | Comportamento |
@@ -460,6 +548,14 @@ non una misura: vanno tarati sull'uso.
 - targa vera che arriva ed e' gia' presente nella campagna → fusione, non `IntegrityError`
 - sostituzione mentre la scheda e' bloccata da un altro account
 - `upsert_lead` riceve la targa vera, mai la provvisoria
+- **`GlobalContact` rifiuta una targa negativa**: il presidio difensivo scatta anche se il
+  vincolo di configurazione viene aggirato
+- **campagna browser con `enrichment_level='none'` viene RIFIUTATA** dall'API (il buco trovato
+  in revisione: senza questo test rientra in silenzio)
+- **campagna browser con `bio_engine='api'` viene RIFIUTATA**
+- export CSV: nessuna targa provvisoria nella prima colonna
+- lo username **cambia** fra due sessioni (rename del profilo): la targa derivata cambia →
+  verificare che non nasca un doppione e che il dedup per username lo intercetti
 
 ### Sul comportamento
 - distribuzione delle pause: **nessuna pila sui bordi** (stesso test scritto per il motore API,
