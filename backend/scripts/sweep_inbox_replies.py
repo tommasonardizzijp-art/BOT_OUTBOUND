@@ -1,7 +1,7 @@
 """Sweep one-off dell'inbox DM per una campagna dm_threads:
 
 1. pagina l'inbox con il pattern collaudato di inbox_source.fetch_inbox_page
-   (pagine da 20, parametri identici all'app reale, delay 10-40s tra pagine
+   (pagine da 20, parametri identici all'app reale, delay 10-60s tra pagine
    + pausa lunga occasionale — stessi valori di config del listing inbox);
 2. per ogni thread 1-a-1: se l'altro utente ha scritto ALMENO un messaggio
    (tra gli ultimi 10 del thread) -> "replied";
@@ -41,6 +41,7 @@ from app.models.follower import Follower, FollowerStatus
 from app.utils.instagrapi_client import login as _login
 from app.utils.roles import is_inbox
 from app.services.inbox_source import fetch_inbox_page, extract_thread_participant, _as_users
+from app.services.scrape_inbox import _inbox_page_delay
 
 
 def _thread_items(raw_thread) -> list:
@@ -173,16 +174,10 @@ async def main() -> None:
                 break
             if pages >= args.max_pages:
                 break
-            delay = random.uniform(
-                settings.inbox_api_page_delay_min_seconds,
-                settings.inbox_api_page_delay_max_seconds,
-            )
-            if random.random() < settings.inbox_long_pause_probability:
-                delay += random.uniform(
-                    settings.inbox_long_pause_min_seconds,
-                    settings.inbox_long_pause_max_seconds,
-                )
-            await asyncio.sleep(delay)
+            # Stesso pacing del motore (_inbox_page_delay): lognormale troncata,
+            # non uniform. L'uniforme e' piatta - nessun umano scorre con delay
+            # equiprobabili - ed era l'unico punto del flusso inbox a usarla.
+            await _inbox_page_delay()
 
         # ── snapshot audit ────────────────────────────────────────────────
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")

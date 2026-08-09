@@ -3,6 +3,7 @@ DM gia' avviati dell'account. Engine selezionabile (api/browser). Riusa lo stato
 listing/listing_break, il session-break via Retry(defer) e il challenge handler.
 """
 import asyncio
+import math
 import random
 from datetime import datetime, timedelta
 
@@ -38,9 +39,35 @@ def inbox_collect(participants, existing_ids) -> list[tuple[int, str]]:
     return out
 
 
+def _sample_page_delay(lo: float, hi: float, sigma: float = 0.9) -> float:
+    """Lognormale TRONCATA su [lo, hi] (riestrazione), non clampata.
+
+    Perche' non il clamp: `min(hi, max(lo, x))` non scarta la coda, la SCHIACCIA
+    sui bound. Con i vecchi 10-40 e sigma 0.9 finiva li' il 45% dei delay (30%
+    esattamente su 40.000s, 15% su 10.000s): due picchi netti su due valori fissi
+    sono una firma temporale piu' riconoscibile di un delay costante, perche'
+    nessun umano ripete lo stesso intervallo al millisecondo trenta volte su cento.
+    Riestraendo, la forma lognormale resta liscia dentro tutto il range.
+
+    Mediana = media geometrica sqrt(lo*hi), non (lo+hi)/2: e' il centro naturale
+    in scala logaritmica, quindi il troncamento taglia code simmetriche e accetta
+    al primo colpo ~2 volte su 3 (con 10-60: mediana 24.5s, ~68% di accettazione).
+    Il tetto di tentativi e il fallback sulla mediana coprono il caso degenere
+    lo == hi, dove nessuna estrazione cadrebbe mai nel range.
+    """
+    if hi <= lo:
+        return float(lo)
+    median = math.sqrt(lo * hi)
+    for _ in range(20):
+        delay = random.lognormvariate(0, sigma) * median
+        if lo <= delay <= hi:
+            return delay
+    return median
+
+
 async def _inbox_page_delay() -> None:
-    """Pacing umano tra pagine inbox: lognormale (scroll attivo) + pausa lunga
-    occasionale ("si ferma a leggere/rispondere"). Distribuzione bimodale:
+    """Pacing umano tra pagine inbox: lognormale troncata (scroll attivo) + pausa
+    lunga occasionale ("si ferma a leggere/rispondere"). Distribuzione bimodale:
     la maggior parte delle pagine veloci, raramente uno stop lungo. Piu' credibile
     dell'uniforme piatto perche' un umano non aspetta lo stesso intervallo a ogni
     caricamento.
@@ -51,11 +78,10 @@ async def _inbox_page_delay() -> None:
         )
         logger.info(f"[InboxLista] Pausa lunga {delay:.0f}s (legge/risponde)")
     else:
-        lo, hi = settings.inbox_api_page_delay_min_seconds, settings.inbox_api_page_delay_max_seconds
-        mid = (lo + hi) / 2
-        # lognormvariate(0, 0.9): mediana 1.0 -> mediana delay = mid (6s con 2-10),
-        # sigma alto = varianza ampia; il clamp [lo, hi] tiene i bound.
-        delay = min(hi, max(lo, random.lognormvariate(0, 0.9) * mid))
+        delay = _sample_page_delay(
+            settings.inbox_api_page_delay_min_seconds,
+            settings.inbox_api_page_delay_max_seconds,
+        )
     await asyncio.sleep(delay)
 
 
