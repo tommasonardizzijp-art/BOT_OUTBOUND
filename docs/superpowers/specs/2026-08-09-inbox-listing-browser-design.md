@@ -45,9 +45,10 @@ Tutto quanto segue e' stato verificato sul campo, non dedotto.
 | Testo integrale dei messaggi | leggibile via `document.body.innerText` a thread aperto | idem |
 | Delimitatore di fine conversazione | la riga `Scrivi un messaggio...` (localizzata) | idem |
 
-**Conseguenza sulla velocita'**: ~1200 chat/ora con attesa prudente + pausa umana, quindi
-~2.5h per 3000 contatti. Una stima iniziale di 8-25h era sbagliata perche' applicava il pacing
-delle chiamate API (10-60s) all'apertura di una chat, gesto di natura diversa.
+**Conseguenza sulla velocita'**: il dato e' leggibile in mezzo secondo, quindi *l'apertura* non
+e' il collo di bottiglia. Il throughput reale lo decidono le **pause**, non la lettura: vedi
+"Il ritmo dipende dalla zona". Attenzione al numero `~1200 chat/ora` stampato dal probe: assume
+una pausa fissa di 1,5 s, cioe' nessuna sosta e nessuno stacco. Non e' il ritmo del motore.
 
 **Conseguenza sui dati**: il canale browser non conosce il pk. Vedi "Targa provvisoria".
 
@@ -58,7 +59,8 @@ delle chiamate API (10-60s) all'apertura di una chat, gesto di natura diversa.
 2. **Perimetro**: solo conversazioni 1-a-1. Niente scheda Generali, niente Richieste.
 3. **Dati raccolti**: username, nome visualizzato, data ultimo messaggio, chi ha scritto per
    ultimo, **testo integrale** dell'ultimo messaggio, provenienza del dato.
-4. **Ritmo**: equilibrio, ~800-1200 chat/ora.
+4. **Ritmo**: differenziato per zona — pause piene dove si aprono chat nuove, ritmo rapido dove
+   si attraversa la zona gia' nota (decisione rivista dopo il ricalcolo del throughput).
 5. **Strategia di ripresa**: automatica, sempre dalla cima, due modalita' che si alternano da
    sole. Nessun segnaposto di posizione.
 6. **Soglia per entrare in scorrimento veloce**: 10 nomi gia' noti consecutivi.
@@ -181,12 +183,72 @@ browser naviga per username (`:278`), ma **usa il pk** per i contatti business �
 pagina**, non quello del DB, quindi la conclusione regge: la targa provvisoria non intralcia
 l'interrogazione. Ma non e' vero che il canale browser ignori del tutto il pk.
 
-Casi da gestire nella sostituzione, tutti sotto test:
-- la targa vera risulta **gia' presente** nella campagna → fondere, non duplicare
-  (il `UniqueConstraint` altrimenti solleva);
-- la sostituzione avviene mentre la scheda e' gia' bloccata dal processo di arricchimento
-  (`locked_by_account_id`), quindi nessun altro puo' infilarsi;
-- `upsert_lead` deve ricevere la targa **vera**, mai la provvisoria.
+### La funzione della targa: specificata, non lasciata all'implementazione
+
+`SHA-256` dello username **normalizzato** (minuscolo, senza `@` iniziale — vedi gli username
+con la chiocciola gia' in DB), primi 63 bit, **negato**.
+
+Le due scelte ovvie in Python sono entrambe sbagliate:
+- `hash()` e' **randomizzato per processo** (PYTHONHASHSEED): deterministico dentro una
+  sessione, **diverso alla successiva** → riga duplicata a ogni riavvio del worker. E un test
+  "stesso username → stesso numero" che gira in un solo processo **passerebbe lo stesso**: e'
+  esattamente il tipo di test che non vede il difetto. Il test di determinismo deve girare
+  **su due processi separati**.
+- `crc32` e' a 32 bit: su ~3000 contatti la collisione e' ~10⁻³, e lo spazio non e' confinato
+  alla campagna — `GlobalContact.ig_user_id` e' globale a tutte le campagne
+  (`global_contact_service.py:82-84`), quindi si riempie nel tempo. Due persone fuse in una
+  riga, in silenzio.
+
+### La fusione: lookup esplicita, non "provo e vediamo se solleva"
+
+**La fusione non e' un caso limite: e' l'esito normale.** Ogni rename produce una targa diversa
+per la stessa persona, e ogni contatto raccolto via API non ha `full_name`
+(`scrape_inbox.py:179` lo scrive esplicitamente a `None`), quindi non e' riconoscibile.
+
+Affidarla al vincolo UNIQUE fallisce, in due modi diversi a seconda del percorso — verificato:
+- **percorso principale**: l'`IntegrityError` viene catturato a `browser_bio.py:1188-1190` →
+  `outcome="error"` → la riga finisce `skipped` con `skip_reason="browser_error"`, la fusione
+  **non avviene**, e tutto cio' che il browser aveva raccolto viene **buttato** col commit
+  fallito. Nessun allarme.
+- **percorso batch di pausa**: peggio. L'eccezione arriva a `browser_bio.py:1362-1364` che fa
+  `break` **senza marcare il follower**; la selezione e' `limit(1)` **senza ORDER BY**
+  (`:1351-1356`) → il giro dopo ripesca la stessa riga → stessa eccezione → batch a zero bio,
+  per sempre. Il commento a `:1378-1379` documenta gia' questa forma di guasto, ma la
+  protezione copre solo il ramo `not_found/private/error`, non l'eccezione inattesa.
+
+Quindi: **lookup esplicita prima della scrittura**, in transazione propria.
+
+**Regola di precedenza, dichiarata**: in una fusione **lo stato piu' avanzato vince sempre**.
+Un contatto gia' `sent` non torna mai `pending` — altrimenti riceve un secondo messaggio.
+Si preservano stato terminale, messaggi collegati e `locked_by_account_id`; si integrano solo i
+campi vuoti.
+
+### Atomicita': il requisito, non l'affermazione
+
+Una stesura precedente affermava che il lock di arricchimento rendesse la sostituzione sicura.
+**Falso**, verificato in `browser_bio.py:563-577`:
+```python
+follower.status = FollowerStatus.bio_scraped   # <- diventa mandabile
+follower.locked_by_account_id = None           # <- lock RILASCIATO
+await db.commit()                              # <- stesso commit
+await upsert_lead(db, ig_user_id=follower.ig_user_id, ...)   # <- gira DOPO
+```
+Tre buchi: (1) il lock si rilascia nello stesso commit che rende la riga mandabile, quindi se la
+sostituzione non e' **dentro quel commit** esiste una finestra in cui un worker DM claima una
+riga con targa ancora provvisoria; (2) il lock protegge la riga in arricchimento, **non la riga
+bersaglio della fusione**, che nessuno blocca; (3) `release_stale_locks` (cron ogni 15 min,
+`LOCK_TIMEOUT_MINUTES=20`, `campaign_orchestrator.py:66,1251`) puo' togliere il lock sotto
+l'arricchitore.
+
+**Requisito**: sostituzione della targa e rilascio del lock nella **stessa transazione**, con la
+riga bersaglio della fusione bloccata a sua volta.
+
+Casi sotto test:
+- targa vera **gia' presente** nella campagna → fusione per lookup, non `IntegrityError`
+- fusione: lo stato piu' avanzato vince, un `sent` non torna `pending`
+- `upsert_lead` riceve la targa **vera**, mai la provvisoria
+- pk restituito **diverso** da una targa vera gia' registrata → username riassegnato, si ferma
+- determinismo della targa **su due processi separati**
 
 ### Vincolo: l'arricchimento deve avvenire, e via browser
 
@@ -271,31 +333,75 @@ Nessuna modifica a colonne esistenti. Nessun vincolo nuovo.
 
 ## Le due modalita'
 
+### REGOLA FONDANTE: si apre sempre cio' che non si riconosce
+
+**Una riga il cui nome non e' riconosciuto viene SEMPRE aperta**, in qualunque modalita' ci si
+trovi. Le modalita' non decidono *se* aprire: decidono solo **quanto in fretta si scorre e
+quanto ci si ferma**.
+
 ```
-   +------------------------ RACCOLTA -------------------------+
-   |  apre la chat . legge username, nome, data,               |
-   |  chi ha scritto per ultimo, testo                         |
-   |  gia' in archivio? -> non duplica, aggiorna data+messaggio|
-   |                                                           |
-   |  contatore "gia' noti di fila"  --> 10 --------------+    |
-   |  (si AZZERA appena ne trova uno nuovo)               |    |
-   +------------------------------------------------------|---+
-                            ^                             |
-     3 sconosciuti          |                             v
-     negli ultimi 10        |            +------- SCORRIMENTO --------+
-                            +------------|  non apre niente           |
-                                         |  legge solo i nomi         |
-                                         +----------------------------+
+   +--------------------- ZONA NUOVA (ritmo pieno) ------------------+
+   |  apre ogni riga non riconosciuta                                |
+   |  pause a tre livelli, soste di rilettura, diversivi             |
+   |                                                                 |
+   |  10 riconosciuti di fila  ----------------------------------+   |
+   |  (contatore azzerato al primo non riconosciuto)             |   |
+   +-------------------------------------------------------------|---+
+                            ^                                    |
+     3 non riconosciuti     |                                    v
+     negli ultimi 10        |      +---- ZONA NOTA (ritmo rapido) -----+
+                            +------|  scorre veloce, pause brevi       |
+                                   |  MA apre comunque ogni riga non   |
+                                   |  riconosciuta che incontra        |
+                                   +-----------------------------------+
 ```
 
-**Perche' il contatore si azzera al primo nuovo**: con ~100 DM/giorno in uscita la lista si
-rimescola di continuo e si formano zone a macchia di leopardo. Un contatore che non si azzera
-farebbe passare il sistema in scorrimento veloce dentro una zona mista, **perdendo i nuovi in
-mezzo**.
+**Perche' questa regola e' fondante e non un dettaglio.** Nella stesura precedente la modalita'
+scorrimento *non apriva niente*, e il rientro in raccolta chiedeva 3 non riconosciuti su 10.
+Due revisori indipendenti hanno dimostrato che quel disegno **non perdeva qualche contatto: ne
+raccoglieva zero a regime**.
 
-**Perche' 3-su-10 per tornare a raccogliere** (e non 1): un solo sconosciuto in una zona gia'
-lavorata farebbe rimbalzare il sistema fra le due modalita', producendo un ritmo a scatti —
-esattamente il tipo di firma che vogliamo evitare. E' un parametro, non una struttura.
+Sequenza che lo prova, verificata sul design:
+```
+la lista e' ordinata per messaggio piu' recente
+-> in cima ci sono i ~100 DM appena inviati dal bot = tutti gia' noti
+-> righe 1-10 tutte note -> contatore a 10 -> SCORRIMENTO, zero chat aperte
+-> da li' in poi 1-2 sconosciuti ogni 10 non superano mai la soglia 3-su-10
+-> nessuna chat viene mai aperta -> sessione chiusa con 0 contatti
+-> ripresa sempre dalla cima -> STESSA distribuzione -> zero anche domani
+```
+E l'avviso "nulla di nuovo, non serve rilanciare" sarebbe scattato **proprio quando i contatti
+nuovi c'erano e sono stati saltati**: peggio del silenzio, perche' avrebbe scoraggiato il
+rilancio che aggirava il difetto.
+
+Con la regola fondante il buco non esiste **per costruzione**, non per taratura di una soglia.
+
+**Perche' il contatore si azzera al primo non riconosciuto**: con ~100 DM/giorno in uscita la
+lista si rimescola e si formano zone a macchia di leopardo. Il contatore governa solo il ritmo,
+quindi l'errore peggiore che puo' fare ora e' andare piu' piano del necessario.
+
+### Il riconoscimento NON autorizza a scrivere
+
+Una riga riconosciuta viene saltata **e basta**: nessun dato viene aggiornato senza aprire.
+
+Modifica la decisione 7 ("si salta senza riaprire, ma si aggiornano data e ultimo messaggio"),
+per un motivo trovato in revisione:
+
+```
+archivio: "Marco Rossi" -> @marco.rossi88   (nome unico in archivio)
+lista:    "Marco Rossi" -> in realta' @mrossi_design, mai visto
+  -> il nome combacia ed e' unico -> classificato NOTO -> saltato
+  -> con la vecchia regola: data e testo di @mrossi_design scritti
+     sulla scheda di @marco.rossi88
+```
+I nomi visualizzati non sono univoci per costruzione. Saltare un contatto omonimo costa **un
+contatto perso** (accettabile: Tommaso ha detto che perderne 2-3 ogni tanto va bene); scriverci
+sopra costa **dati corrotti su una scheda sbagliata**, e quei campi guidano poi i diversivi —
+il comportamento anti-ban verrebbe pilotato da dati falsi.
+
+Quindi: i campi messaggio si scrivono **solo** quando la chat e' stata aperta e lo username
+confermato. Il che e' anche l'unico modo di avere il testo integrale, visto che dalla lista
+l'anteprima e' troncata.
 
 **Ripresa fra sessioni**: sempre dalla cima. Nessun segnaposto di posizione salvato: la lista
 si riordina a ogni DM in entrata, quindi "riparti dal contatto N" e' fragile per costruzione.
@@ -398,9 +504,23 @@ I segnali disponibili sono altri:
 1. **Altezza del contenitore** — cresce a ogni caricamento riuscito. E' il segnale primario.
    Il numero di righe **non** e' utilizzabile: oscilla per via della virtualizzazione.
 2. **Posizione di scroll** — siamo effettivamente in fondo, o stiamo ancora scendendo?
-3. **Richieste di rete fallite** — il browser le conosce (`page.on("requestfailed")`).
-   E' il discrimine vero fra "fondo" e "piantato": un segnale di fatto, non una deduzione
-   dai tempi.
+3. **Richieste di rete fallite verso gli endpoint dell'inbox**, dentro la finestra di attesa.
+
+**Correzione importante sul punto 3.** Una stesura precedente lo definiva "il discrimine vero,
+un segnale di fatto" — ed era l'unico segnale della sezione **senza una misura alle spalle**.
+`page.on("requestfailed")` scatta su **qualunque** richiesta abortita: anteprime cancellate
+durante lo scroll, prefetch annullati, tracker bloccati, `net::ERR_ABORTED` di navigazione. Su
+una SPA come Instagram, in 30-55 minuti di scorrimento, "zero richieste fallite" non si verifica
+**mai**.
+
+Conseguenza se lasciato cosi': la condizione "fine lista" non sarebbe **mai** vera, ogni fine
+legittima verrebbe classificata "piantato", la campagna non arriverebbe mai a `ready` e Tommaso
+riceverebbe un allarme a ogni giro. Il ramo "fine lista" sarebbe **codice morto**.
+
+Va quindi ristretto agli endpoint dell'inbox (`/api/v1/direct_v2/...` o la query GraphQL della
+lista) e **misurato con un probe dedicato prima** di costruirci sopra una macchina a stati.
+Finche' non e' misurato, la regola di fallback e' conservativa: altezza ferma + in fondo →
+**fine lista**, e il "piantato" si riconosce solo da un'eccezione vera della pagina.
 
 **Procedura**: mai decidere al primo dubbio. Attese a pazienza crescente (1, 2, 4, 8, 16 s;
 tetto complessivo ~60 s), rileggendo i tre segnali a ogni giro.
@@ -412,6 +532,50 @@ tetto complessivo ~60 s), rileggendo i tre segnali a ogni giro.
   campagna NON completata, avviso a Tommaso
 - attese esaurite + altezza ferma ma **non** in fondo → anomalia: chiusura pulita e avviso
   (non dovrebbe accadere; se accade e' un cambio di struttura della pagina)
+
+## Dedup in scrittura: sullo USERNAME (decisione di Tommaso)
+
+La chiave di deduplicazione in scrittura e' lo **username**, non la targa.
+
+Motivo: i contatti raccolti via API hanno `full_name = None` (`scrape_inbox.py:179`), quindi non
+sono riconoscibili dal nome e le loro chat verrebbero riaperte. Arrivando con una targa
+provvisoria diversa dalla targa vera che hanno gia' in archivio, un dedup basato sulla targa
+non scatterebbe e produrrebbe **una riga duplicata per ogni contatto gia' presente** — e su una
+campagna con arricchimento attivo quella riga duplicata puo' portare a un **secondo DM**.
+
+Regola: prima di inserire, si cerca per `(campaign_id, username)`. Se esiste, si **aggiorna**
+quella riga (rispettando la precedenza di stato: il piu' avanzato vince). Si inserisce solo se
+non esiste.
+
+Conseguenza sul conteggio: `list_target` va valutato sui **contatti distinti**, non sul numero
+di righe (`run_inbox_list` conta `COUNT(Follower)` a `scrape_inbox.py:151-153`): righe duplicate
+gonfierebbero il conteggio e chiuderebbero la campagna in anticipo, con meno contatti reali di
+quelli richiesti.
+
+Nota: questo **non** sostituisce il `UniqueConstraint("campaign_id","ig_user_id")`, che resta a
+proteggere il percorso API. Sono due reti a maglie diverse.
+
+## Conferme di lettura: si aprono solo le chat gia' lette (decisione di Tommaso)
+
+Aprire una chat la **marca come letta** e manda la conferma di lettura al destinatario. Il
+motore API non lo fa (`visual_message_return_type=unseen`, `inbox_source.py:58-64`): e' una
+differenza di comportamento fra i due motori che chi sceglie un "engine" non si aspetta.
+
+Su 6 chat di probe e' irrilevante. Su centinaia al giorno significa che Tommaso perde il badge
+dei non letti — l'unico modo umano di accorgersi di una risposta vera — e che il destinatario
+vede comparire "Visto" senza ricevere risposta.
+
+**Decisione**: si aprono **solo le conversazioni gia' lette**. Quelle con messaggi non letti
+vengono saltate e lasciate intatte, cosi' il segnale delle risposte vere resta leggibile.
+
+Da accertare con un probe prima di implementare: **come si riconosce una chat non letta dalla
+lista** (probabilmente un indicatore visivo o il nome in grassetto). Se il segnale non fosse
+distinguibile in modo affidabile, la decisione va riportata a Tommaso invece di indovinare —
+sbagliare qui vuol dire aprire proprio le chat che si volevano preservare.
+
+Conseguenza sul perimetro: i contatti che hanno risposto e non sono ancora stati letti **non
+vengono raccolti** in quel passaggio. Verranno raccolti dopo che Tommaso li ha letti. E' il
+prezzo di preservare il segnale.
 
 ## Perche' non esiste uno stop per "troppo gia'-visto"
 
@@ -434,13 +598,39 @@ il motore API emette come `drained`, ma calcolato su un segnale affidabile.
 
 ## Comportamento
 
-**Pause fra chat**, tre livelli a probabilita' calante:
+### Il ritmo dipende dalla zona (decisione di Tommaso)
 
-| Livello | Durata | Frequenza |
+Il throughput annunciato in una stesura precedente (~1200 chat/ora) era **smentito dalla
+tabella delle pause della spec stessa**. Il probe misurava 1200/ora assumendo una pausa fissa
+di 1,5 s: nessuna sosta, nessuno stacco. Con le pause a tre livelli:
+
+```
+apertura + lettura                    1,0 s
+pausa normale   1-4 s     (88%)       2,2 s
+sosta          10-30 s    (10%)       2,0 s
+stacco          2-5 min    (2%)       4,2 s
+                                   ────────
+                                      9,4 s per chat  ->  382 chat/ora
+```
+Cioe' **7,8 ore per 3000 contatti** e **287 chat per una sessione da 45 minuti**, non 900.
+La stima "8-25h" che il documento dichiarava sbagliata era corretta nell'estremo basso.
+
+**Decisione**: pause piene solo dove si aprono chat nuove, ritmo rapido dove si attraversa la
+zona gia' nota. Il tempo si spende dove serve.
+
+| | Zona nuova (si apre) | Zona nota (si attraversa) |
 |---|---|---|
-| normale | 1-4 s | quasi sempre |
-| sosta | 10-30 s | ~1 su 10 |
-| stacco | 2-5 min | ~1 su 50 |
+| pausa normale | 1-4 s, quasi sempre | 0,4-1,2 s |
+| sosta | 10-30 s, ~1 su 10 | ~1 su 40 |
+| stacco | 2-5 min, ~1 su 50 | invariato |
+| diversivi | si', in base al contenuto | no: non c'e' niente da rileggere |
+
+Il ritmo rapido e' credibile proprio perche' *e'* quello che fa una persona: si scorre in fretta
+le conversazioni gia' viste e ci si ferma su quelle che interessano. La variabilita' resta
+(stessa distribuzione, parametri diversi), quindi non nasce nessun ritmo fisso.
+
+**Nota**: qualunque riga non riconosciuta viene aperta **anche in zona nota**, con le pause
+piene. La zona non decide se aprire, decide solo quanto si corre fra un'apertura e l'altra.
 
 La distribuzione e' **lognormale troncata per riestrazione**, mai clampata: il clamp accumula
 la coda sui bound (misurato sul motore API: 45% dei delay su due valori fissi) ed e' una firma
@@ -460,10 +650,12 @@ perche' sono misure, non comportamento).
 **Tetto giornaliero**: configurabile per campagna. Default proposto **1500 chat/giorno**.
 
 Il valore va scelto insieme alla durata della sessione, altrimenti i due parametri si
-contraddicono. A ~1200 chat/ora una sessione da 45 minuti apre ~900 chat: un tetto di 800
-verrebbe sfondato **dalla prima sessione**, e il motore si fermerebbe a meta' con la campagna
-in uno stato che sembra un errore. 1500 lascia spazio a una sessione piena piu' una seconda
-parziale, che e' il ritmo realistico di una giornata.
+contraddicono — errore gia' commesso una volta in questo documento (tetto 800 contro una
+sessione che ne apriva 900).
+
+Col ritmo differenziato per zona, una sessione da 45 minuti apre fra ~290 (tutta zona nuova,
+pause piene) e ~900 chat (in gran parte attraversamento rapido). 1500 copre due sessioni piene
+anche nel caso veloce, quindi il tetto non scatta mai a sorpresa a meta' lavoro.
 
 ### Parametri e valori proposti
 
@@ -482,6 +674,66 @@ non una misura: vanno tarati sull'uso.
 | avviso "nulla di nuovo" | sessione chiusa con 0 contatti nuovi | non e' uno stop: e' l'esito da comunicare (vedi sotto) |
 | passo di scorrimento | 0.6-0.8 dell'altezza visibile, randomizzato | sopra il buffer renderizzato si perdono righe **in silenzio** |
 | attese prima di dichiarare la fine | 1, 2, 4, 8, 16 s (tetto ~60 s) | la lentezza normale non deve mai essere scambiata per fine lista |
+
+## Due trappole silenziose, e le loro verifiche di identita'
+
+Entrambe producono **dati sbagliati senza sollevare nessun errore**. Sono la classe di guasto
+peggiore: il sistema riferisce successo mentre fa danno.
+
+### Il click atterra sulla riga sbagliata
+
+`human_input.human_click` clicca su **coordinate**, non su un elemento
+(`human_input.py:99-107`): calcola il riquadro, muove il mouse in 5-15 passi, attende 50-150 ms,
+poi `page.mouse.click(x, y)`. Fra il calcolo e il click passa una finestra reale.
+
+```
+t0  bounding_box() della riga "Elena" a y=430
+t1  arriva un DM da una chat piu' in basso -> quella salta in cima
+    -> tutto cio' che sta fra cima e cursore scende di una posizione
+t2  mouse.click(x, 430) -> a y=430 ora c'e' la riga PRECEDENTE
+    -> si apre la chat sbagliata. mouse.click riesce sempre: nessun errore.
+```
+Leggeremmo dati corretti **della persona sbagliata**, e la riga che volevamo aprire verrebbe
+considerata fatta. `human_click` e' nato per le pagine profilo, che stanno ferme; l'inbox si
+riordina da sola. La spec lo elencava fra i riusi "senza modificarli" senza notare che il
+contesto d'uso ne cambia i presupposti.
+
+**Verifica obbligatoria**: dopo il click si confronta il nome nell'header del thread aperto con
+il nome della riga che si intendeva aprire. Se non combaciano: non si salva niente, non si
+avanza oltre quella riga, si riprova.
+
+**Vincolo correlato**: mai riusare un riferimento a una riga attraverso una pausa. Fra due
+aperture puo' passare una sosta di 10-30 s o uno stacco di 2-5 minuti, e la lista e'
+virtualizzata: la riga puo' essere uscita dal DOM, o peggio le coordinate restano valide ma
+puntano ad altro. La riga va **ri-risolta per contenuto immediatamente prima del click**.
+
+### Lo username cambia proprietario
+
+Il riconoscimento usa il **nome**, la targa e l'arricchimento usano lo **username**. I due
+cambiano in momenti diversi, e da qui nasce il caso peggiore dell'intero progetto:
+
+```
+t0  raccolto:  nome "Elena Rocchetti", username @lerocchette, targa -H("lerocchette")
+t1  la persona rinomina: @lerocchette -> @elenarocchette (il NOME resta lo stesso)
+t2  sessione dopo: il nome combacia -> riga SALTATA -> il rename non viene mai rilevato
+t3  Instagram LIBERA @lerocchette; un terzo lo prende
+t4  arricchimento: browser_bio.py:489 usa follower.username -> visita /lerocchette/
+    -> trova un profilo VALIDO, di un'ALTRA persona
+    -> ne salva bio, contatti e pk sulla scheda di Elena
+t5  invio: campaign_orchestrator.py:1462 -> send_dm(username=follower.username)
+    -> il DM va alla persona sbagliata
+```
+Nessun passaggio solleva un errore: a t4 la guardia esistente confronta lo username restituito
+con quello richiesto (`browser_bio.py:261-262`) e **combacia**, perche' il profilo esiste
+davvero. Il motore API non ha questo problema: interroga per pk, che i rename non toccano.
+
+**Verifica obbligatoria**: se un contatto ha gia' una targa **vera** e l'arricchimento
+restituisce un pk **diverso**, lo username ha cambiato proprietario. Non si scrive niente, si
+marca il contatto come da rivedere e si segnala. E' un controllo di due righe che chiude un
+caso da danno reputazionale.
+
+Per i contatti con targa ancora provvisoria non esiste riferimento: il primo arricchimento
+fissa la targa vera, e da li' in poi il controllo protegge.
 
 ## Presupposti e interazioni emerse in revisione
 
@@ -526,9 +778,12 @@ non una limitazione arbitraria.
 
 ### Funzionali
 - riconoscimento: zona a macchia di leopardo — **il nuovo in mezzo non deve sparire**
-- transizione raccolta → scorrimento a 10 noti consecutivi, e ritorno a 3-su-10
-- azzeramento del contatore al primo contatto nuovo
-- contatto gia' noto: aggiorna data e messaggio senza duplicare
+- passaggio a ritmo rapido dopo 10 riconosciuti consecutivi, e ritorno al ritmo pieno a 3-su-10
+- azzeramento del contatore al primo non riconosciuto
+- **in ritmo rapido una riga non riconosciuta viene comunque aperta** (regola fondante)
+- contatto riconosciuto: saltato **senza scrivere nulla** (nessun aggiornamento al buio)
+- dedup in scrittura per `(campaign_id, username)`: un contatto gia' presente viene aggiornato,
+  mai duplicato, qualunque sia la sua targa
 - perimetro: i gruppi vengono scartati
 - normalizzazione: maiuscole, spazi doppi, emoji, spazi invisibili
 - segnaposto ignorati in italiano **e** in inglese
@@ -571,6 +826,24 @@ non una limitazione arbitraria.
 - altezza ferma + richieste fallite → dichiarato **piantato**, campagna NON completata
 - altezza che cresce dopo 8 s di attesa → si riprende, non si dichiara nulla (il caso "lento")
 - altezza ferma ma non in fondo → anomalia segnalata, non completamento silenzioso
+
+### Sulle due trappole silenziose
+- **click che atterra sulla riga sbagliata**: si simula un riordino fra il calcolo del riquadro
+  e il click → la verifica post-apertura deve accorgersene e **non salvare niente**
+- riferimento a una riga riusato dopo una pausa lunga → deve essere ri-risolto, non riusato
+- **username riassegnato**: pk restituito diverso da una targa vera gia' nota → si ferma, non
+  scrive, segnala. E' il test che impedisce di mandare un DM a un estraneo
+- profilo semplicemente sparito (404) → skip normale, **non** confuso col caso precedente
+
+### Sul ritmo per zona
+- in zona nota, una riga non riconosciuta viene **comunque aperta** (regola fondante)
+- la sequenza "10 righe note in cima" (i DM appena inviati) **non** deve azzerare la raccolta:
+  e' lo scenario che affossava il disegno precedente
+- zona a tasso di nuovi del 10%: **tutti** vengono raccolti, nessuno saltato
+
+### Sulle conferme di lettura
+- una chat con messaggi non letti **non** viene aperta
+- il riconoscimento "non letta" funziona; se il segnale manca, ci si ferma invece di indovinare
 
 ### Sulla tenuta / adversarial
 - interruzione a meta' sessione e ripresa nel punto giusto
