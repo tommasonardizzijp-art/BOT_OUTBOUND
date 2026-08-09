@@ -4,11 +4,13 @@ Il caso peggiore dell'intero modulo e' qui: se il prefisso "Tu:" non viene
 riconosciuto (perche' l'interfaccia e' in inglese), OGNI chat risulta "ha
 risposto". Nessun errore, solo dati falsi.
 """
+from datetime import datetime
+
 import pytest
 
 from app.services.inbox_browser.testo import (
-    LINGUE, analizza_riga_lista, e_segnaposto, estrai_ultimo_messaggio,
-    estrai_username_thread, normalizza_nome,
+    LINGUE, analizza_riga_lista, e_segnaposto, estrai_data_thread,
+    estrai_ultimo_messaggio, estrai_username_thread, normalizza_nome,
 )
 
 
@@ -103,3 +105,23 @@ def test_estrai_ultimo_messaggio_si_ferma_al_campo_di_scrittura():
 
 def test_estrai_ultimo_messaggio_senza_delimitatore():
     assert estrai_ultimo_messaggio("solo\nrighe\nsparse", "it") is None
+
+
+# ── data assoluta del thread ───────────────────────────────────────────────
+def test_estrai_data_thread_italiano():
+    pagina = "modando__palermo\nVisualizza profilo\n9 feb 2026, 20:28\nCiao!"
+    assert estrai_data_thread(pagina, "it") == datetime(2026, 2, 9, 20, 28)
+
+
+def test_estrai_data_thread_inglese():
+    pagina = "modando__palermo\nView profile\n9 Feb 2026, 20:28\nHi!"
+    assert estrai_data_thread(pagina, "en") == datetime(2026, 2, 9, 20, 28)
+
+
+def test_estrai_data_thread_senza_data_riconoscibile():
+    assert estrai_data_thread("solo\nrighe\nsparse", "it") is None
+
+
+def test_estrai_data_thread_lingua_non_prevista_solleva():
+    with pytest.raises(KeyError):
+        estrai_data_thread("9 feb 2026, 20:28", "de")

@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 
 LINGUE: dict[str, dict[str, str]] = {
     "it": {
@@ -118,3 +119,34 @@ def estrai_ultimo_messaggio(testo_pagina: str, lingua: str) -> str | None:
     except ValueError:
         return None
     return righe[i - 1] if i > 0 else None
+
+
+_MESI: dict[str, dict[str, int]] = {
+    "it": {"gen": 1, "feb": 2, "mar": 3, "apr": 4, "mag": 5, "giu": 6,
+           "lug": 7, "ago": 8, "set": 9, "sett": 9, "ott": 10, "nov": 11, "dic": 12},
+    "en": {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12},
+}
+
+
+def estrai_data_thread(testo_pagina: str, lingua: str) -> "datetime | None":
+    """Data assoluta dal thread aperto, es. '9 feb 2026, 20:28' (IT).
+
+    None se il formato non combacia: mai indovinare una data. Solleva KeyError
+    su lingua non prevista, coerente con le altre funzioni di questo modulo.
+    """
+    mesi = _MESI[lingua]
+    m = re.search(
+        r"(\d{1,2})\s+([A-Za-zÀ-ù]{3,4})\.?\s+(\d{4}),?\s+(\d{1,2}):(\d{2})",
+        testo_pagina or "",
+    )
+    if not m:
+        return None
+    giorno, mese_str, anno, ora, minuto = m.groups()
+    mese = mesi.get(mese_str.lower())
+    if mese is None:
+        return None
+    try:
+        return datetime(int(anno), mese, int(giorno), int(ora), int(minuto))
+    except ValueError:
+        return None
