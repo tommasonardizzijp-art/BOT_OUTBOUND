@@ -43,6 +43,13 @@ class Follower(Base):
     bio_links: Mapped[str | None] = mapped_column(Text, nullable=True)        # JSON: [{"url","title"}]
     contact_source: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON: {"phone":"ig_business",...}
     contact_extra: Mapped[str | None] = mapped_column(Text, nullable=True)    # JSON, reserved Fase 2
+    # ── Motore inbox browser (migration 031) ──────────────────────────────
+    # Popolati SOLO dal motore browser, a chat aperta. Nullable: le schede
+    # raccolte via API non li hanno e restano valide.
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_message_from: Mapped[str | None] = mapped_column(String(10), nullable=True)   # 'us' | 'them'
+    last_message_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_channel: Mapped[str | None] = mapped_column(String(10), nullable=True)      # 'api' | 'browser'
     status: Mapped[FollowerStatus] = mapped_column(
         SAEnum(FollowerStatus, native_enum=False), nullable=False, default=FollowerStatus.pending
     )
