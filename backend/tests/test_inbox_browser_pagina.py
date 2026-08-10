@@ -88,6 +88,45 @@ class _FakeElemento:
     pass
 
 
+# ── il DOM finto parla come quello vero ────────────────────────────────────
+# Dal 10/08 le query JS restituiscono dati grezzi CON LE COORDINATE e la
+# decisione sta in Python (vedi pagina.py, regola di disegno). I fake qui sotto
+# usano la geometria misurata su @primero_adv3: lista 72..471, colonna del
+# thread da 488, nome dell'header a 544, finestra 1280x660. Fake senza
+# coordinate passerebbero anche con un motore che non sa piu' leggere il DOM
+# vero — ed e' esattamente il buco da cui e' passato il bug originale.
+_BORDO = 471
+_VIEWPORT = {"w": 1280, "h": 660}
+
+
+def _dom_righe(testi: list[str]) -> dict:
+    return {
+        "viewport": _VIEWPORT,
+        "righe": [
+            {"indice": i, "testo": t, "left": 72, "right": _BORDO,
+             "top": 321 + i * 72, "w": 399, "nonLetta": False, "pallinoConferma": False}
+            for i, t in enumerate(testi)
+        ],
+    }
+
+
+def _dom_fascia_alta(testi: list[str]) -> list[dict]:
+    """I nodi dell'header del thread, a destra del bordo e in alto."""
+    return [{"left": 544, "top": 18 + i * 23, "testo": t} for i, t in enumerate(testi)]
+
+
+def _dom_href(href: list[str]) -> list[dict]:
+    return [{"left": 488, "top": 16 + i * 40, "href": h} for i, h in enumerate(href)]
+
+
+def _e_query_righe(script: str) -> bool:
+    return "nonLetta" in script
+
+
+def _e_query_href(script: str) -> bool:
+    return 'href^="/"' in script
+
+
 class _FakePage:
     """Simula il click per coordinate che si disallinea DOPO la risoluzione per
     contenuto: la riga giusta viene trovata e cliccata ('Bruzzo Abbigliamento',
@@ -105,11 +144,11 @@ class _FakePage:
         return _FakeHandle(_FakeElemento())
 
     async def evaluate(self, script, *args):
-        if "e.innerText)" in script:
-            return self.righe_testi
-        if 'href^="/"' in script:
+        if _e_query_righe(script):
+            return _dom_righe(self.righe_testi)
+        if _e_query_href(script):
             return []
-        return self.header
+        return _dom_fascia_alta(self.header)
 
     async def wait_for_timeout(self, ms):
         return None
@@ -171,12 +210,14 @@ class _FakePageHeaderLento:
     async def evaluate(self, script, *args):
         # La query di risoluzione per contenuto (e quella dell'href, dopo la
         # verifica) non vanno contate come "letture" dell'header lento.
-        if "e.innerText)" in script:
-            return [self._riga_testo]
-        if 'href^="/"' in script:
+        if _e_query_righe(script):
+            return _dom_righe([self._riga_testo])
+        if _e_query_href(script):
             return []
         self._letture += 1
-        return self._header_finale if self._letture >= self._soglia else []
+        if self._letture < self._soglia:
+            return []
+        return _dom_fascia_alta(self._header_finale)
 
     async def wait_for_timeout(self, ms):
         return None
@@ -239,11 +280,11 @@ class _FakePageIndiceRecorder:
         return _FakeHandle(_FakeElemento())
 
     async def evaluate(self, script, *args):
-        if "e.innerText)" in script:
-            return self.righe_testi
-        if 'href^="/"' in script:
+        if _e_query_righe(script):
+            return _dom_righe(self.righe_testi)
+        if _e_query_href(script):
             return []
-        return self.header
+        return _dom_fascia_alta(self.header)
 
     async def wait_for_timeout(self, ms):
         return None
@@ -325,11 +366,11 @@ async def test_apri_riga_esclude_il_proprio_username_dai_candidati_href(monkeypa
             return _FakeHandle(_FakeElemento())
 
         async def evaluate(self, script, *args):
-            if "e.innerText)" in script:
-                return self.righe_testi
-            if 'href^="/"' in script:
-                return self.href
-            return self.header
+            if _e_query_righe(script):
+                return _dom_righe(self.righe_testi)
+            if _e_query_href(script):
+                return _dom_href(self.href)
+            return _dom_fascia_alta(self.header)
 
         async def wait_for_timeout(self, ms):
             return None
@@ -365,11 +406,11 @@ async def test_apri_riga_senza_account_username_due_candidati_scarta_la_riga(mon
             return _FakeHandle(_FakeElemento())
 
         async def evaluate(self, script, *args):
-            if "e.innerText)" in script:
-                return self.righe_testi
-            if 'href^="/"' in script:
-                return self.href
-            return self.header
+            if _e_query_righe(script):
+                return _dom_righe(self.righe_testi)
+            if _e_query_href(script):
+                return _dom_href(self.href)
+            return _dom_fascia_alta(self.header)
 
         async def wait_for_timeout(self, ms):
             return None
@@ -378,6 +419,65 @@ async def test_apri_riga_senza_account_username_due_candidati_scarta_la_riga(mon
     risultato = await apri_riga(page, indice=0, nome_atteso="Bruzzo Abbigliamento", lingua="it")
 
     assert risultato is None
+
+
+# ── transizione fra due thread: l'header vecchio e' ancora li' ─────────────
+class _FakePageTransizione:
+    """Il pannello del thread non si svuota nell'istante del click: per qualche
+    decimo di secondo l'header mostra ancora la chat PRECEDENTE. Misurato dal
+    vivo il 10/08 aprendo tre chat di fila: le verifiche hanno letto 'None',
+    'Verificato' e perfino lo username di un'altra conversazione — righe buone
+    scartate in silenzio. L'URL /direct/t/<id>/ e' il segnale che la
+    transizione e' finita: cambia solo quando il thread nuovo e' quello aperto.
+    """
+
+    def __init__(self):
+        self.url = "https://www.instagram.com/direct/t/111/"
+        self._letture_header = 0
+
+    async def evaluate_handle(self, script, indice):
+        return _FakeHandle(_FakeElemento())
+
+    async def evaluate(self, script, *args):
+        if _e_query_righe(script):
+            return _dom_righe(["Nuova Persona\nCiao"])
+        if _e_query_href(script):
+            return _dom_href(["/nuova_persona/"] if self._transizione_finita else ["/vecchia_persona/"])
+        self._letture_header += 1
+        if self._transizione_finita:
+            return _dom_fascia_alta(["Nuova Persona"])
+        return _dom_fascia_alta(["Vecchia Persona"])
+
+    @property
+    def _transizione_finita(self):
+        """Dalla seconda lettura in poi il thread nuovo e' montato: l'URL cambia
+        insieme all'header."""
+        if self._letture_header >= 2:
+            self.url = "https://www.instagram.com/direct/t/222/"
+            return True
+        return False
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_apri_riga_aspetta_che_il_thread_sia_cambiato_prima_di_verificare(monkeypatch):
+    """Senza attendere il cambio di thread, la verifica confronta il nome della
+    riga cliccata con l'header della chat PRECEDENTE: mismatch garantito, riga
+    buona buttata, e nessun errore da nessuna parte."""
+    from app.services.inbox_browser import pagina
+
+    async def human_click_ok(page, elemento):
+        return None
+
+    monkeypatch.setattr(pagina.human_input, "human_click", human_click_ok)
+
+    page = _FakePageTransizione()
+    risultato = await apri_riga(page, indice=0, nome_atteso="Nuova Persona", lingua="it",
+                                account_username="primero_adv3")
+
+    assert risultato == "nuova_persona"
 
 
 # ── decidi_fine_lista: falliti nella finestra, non cumulativi di sessione ──

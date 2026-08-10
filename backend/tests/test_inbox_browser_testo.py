@@ -107,6 +107,41 @@ def test_estrai_ultimo_messaggio_senza_delimitatore():
     assert estrai_ultimo_messaggio("solo\nrighe\nsparse", "it") is None
 
 
+def test_lo_stato_di_lettura_non_e_un_messaggio():
+    """Quando l'ultimo messaggio e' nostro ed e' stato letto, Instagram scrive
+    sotto la bolla 'Visualizzato 8 h fa': e' la riga che precede il campo di
+    scrittura, e finiva salvata al posto del testo. Misurato il 10/08 sulla
+    campagna @michele.carozza: 10 contatti su 25 raccolti avevano lo stato di
+    lettura come 'ultimo messaggio', e da li' quel testo finisce nel contesto
+    con cui l'AI scrive i DM."""
+    pagina = (
+        "modando__palermo\n9 feb 2026, 20:28\n"
+        "La vostra strategia per settembre e' pronta?\n"
+        "Visualizzato 8 h fa\n"
+        "Scrivi un messaggio..."
+    )
+    assert estrai_ultimo_messaggio(pagina, "it") == "La vostra strategia per settembre e' pronta?"
+
+
+def test_gli_altri_stati_di_consegna_sono_ugualmente_scartati():
+    pagina = "Ciao, ci siamo sentiti a giugno\nConsegnato\nScrivi un messaggio..."
+    assert estrai_ultimo_messaggio(pagina, "it") == "Ciao, ci siamo sentiti a giugno"
+
+
+def test_un_messaggio_che_inizia_come_uno_stato_non_viene_scartato():
+    """'Inviato' secco e' uno stato; una frase che comincia per 'Inviato' e'
+    un messaggio vero. Scartarla perderebbe l'unico contenuto del thread."""
+    pagina = ("Inviato il pacco ieri mattina, dovrebbe arrivare domani\n"
+              "Scrivi un messaggio...")
+    assert estrai_ultimo_messaggio(pagina, "it") == (
+        "Inviato il pacco ieri mattina, dovrebbe arrivare domani")
+
+
+def test_una_conversazione_di_soli_stati_non_inventa_un_messaggio():
+    pagina = "Visualizzato 3 h fa\nScrivi un messaggio..."
+    assert estrai_ultimo_messaggio(pagina, "it") is None
+
+
 # ── data assoluta del thread ───────────────────────────────────────────────
 def test_estrai_data_thread_italiano():
     pagina = "modando__palermo\nVisualizza profilo\n9 feb 2026, 20:28\nCiao!"
