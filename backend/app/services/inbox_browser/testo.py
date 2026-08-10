@@ -21,13 +21,21 @@ LINGUE: dict[str, dict[str, str]] = {
         "prefisso_nostro": "Tu:",
         "segnaposto": "utente instagram",
         "campo_scrittura": "Scrivi un messaggio...",
+        "stati_consegna": ("visualizzato", "consegnato", "inviato", "letto"),
     },
     "en": {
         "prefisso_nostro": "You:",
         "segnaposto": "instagram user",
         "campo_scrittura": "Message...",
+        "stati_consegna": ("seen", "delivered", "sent", "read"),
     },
 }
+
+# Uno stato di consegna e' sempre corto ("Visualizzato 8 h fa", "Consegnato").
+# Il limite serve a non scartare un messaggio vero che comincia con la stessa
+# parola: "Inviato il pacco ieri mattina, dovrebbe arrivare domani" e' un
+# messaggio, e perderlo significherebbe restare senza il contenuto del thread.
+_LUNGHEZZA_MAX_STATO = 30
 
 _SEGNAPOSTO = {v["segnaposto"] for v in LINGUE.values()}
 _INVISIBILI = re.compile(r"[\u200b-\u200f\u2028-\u202f\ufeff]")
@@ -110,15 +118,36 @@ def estrai_username_thread(href_list: list[str], propri: set[str]) -> str | None
     return candidati[0] if len(candidati) == 1 else None
 
 
+def e_stato_di_consegna(riga: str | None, lingua: str) -> bool:
+    """"Visualizzato 8 h fa", "Consegnato": stato della bolla, non un messaggio."""
+    testo = (riga or "").strip()
+    if not testo or len(testo) > _LUNGHEZZA_MAX_STATO:
+        return False
+    prima_parola = testo.split()[0].strip(":,.").lower()
+    return prima_parola in LINGUE[lingua]["stati_consegna"]
+
+
 def estrai_ultimo_messaggio(testo_pagina: str, lingua: str) -> str | None:
-    """L'ultimo messaggio della conversazione: la riga prima del campo di scrittura."""
+    """L'ultimo messaggio della conversazione: la riga prima del campo di scrittura.
+
+    Quando l'ultimo messaggio e' nostro ed e' stato letto, Instagram scrive
+    sotto la bolla "Visualizzato 8 h fa": quella riga precede il campo di
+    scrittura e finiva salvata al posto del testo (misurato il 10/08 su
+    @michele.carozza: 10 contatti su 25). Da li' lo stato di lettura entrava
+    nel contesto con cui l'AI scrive i DM, come se fosse quello che la persona
+    ha detto. Si risale finche' si trova una riga che e' davvero un messaggio.
+    """
     delimitatore = LINGUE[lingua]["campo_scrittura"]
     righe = [r.strip() for r in (testo_pagina or "").split("\n") if r.strip()]
     try:
         i = len(righe) - 1 - righe[::-1].index(delimitatore)
     except ValueError:
         return None
-    return righe[i - 1] if i > 0 else None
+
+    j = i - 1
+    while j >= 0 and e_stato_di_consegna(righe[j], lingua):
+        j -= 1
+    return righe[j] if j >= 0 else None
 
 
 _MESI: dict[str, dict[str, int]] = {
