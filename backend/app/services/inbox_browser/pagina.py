@@ -152,7 +152,9 @@ async def leggi_righe_visibili(page, lingua: str, quante: int = 30) -> list[Riga
     return fuori
 
 
-async def apri_riga(page, indice: int, nome_atteso: str, lingua: str) -> str | None:
+async def apri_riga(
+    page, indice: int, nome_atteso: str, lingua: str, account_username: str | None = None,
+) -> str | None:
     """Apre la riga e ritorna lo username, oppure None se la verifica fallisce.
 
     La riga viene ri-risolta QUI, immediatamente prima del click — ma per
@@ -172,6 +174,11 @@ async def apri_riga(page, indice: int, nome_atteso: str, lingua: str) -> str | N
     (il chiamante ha gia' la lingua a portata di mano per quella chiamata), ma
     qui non serve: la verifica post-click confronta i nomi via `nome_combacia`,
     che normalizza senza dipendere dalla lingua dell'interfaccia.
+
+    `account_username`, se noto, esclude il proprio profilo dai candidati href
+    del thread (vedi `estrai_username_thread`): senza di esso un link al proprio
+    avatar/header nel pannello produce 2 candidati e la riga viene scartata
+    anche se il click era corretto.
     """
     nome_target = normalizza_nome(nome_atteso)
     if not nome_target:
@@ -228,10 +235,8 @@ async def apri_riga(page, indice: int, nome_atteso: str, lingua: str) -> str | N
         return None
 
     href = await page.evaluate(_JS_HREF_THREAD)
-    # propri=set(): placeholder consapevole. Se serve escludere lo username
-    # del proprio account dai candidati, lo decide il Task 9 (il motore), che
-    # conosce l'account loggato — pagina.py non ce l'ha.
-    return estrai_username_thread(href, propri=set())
+    propri = {account_username} if account_username else set()
+    return estrai_username_thread(href, propri=propri)
 
 
 async def scorri(page) -> StatoScorrimento:

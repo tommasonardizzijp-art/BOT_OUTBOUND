@@ -301,6 +301,85 @@ async def test_apri_riga_riga_assente_dal_dom_non_clicca(monkeypatch):
     assert page.idx_richiesto is None, "evaluate_handle non doveva essere chiamato affatto"
 
 
+# ── I3: propri= collegato con account_username ─────────────────────────────
+@pytest.mark.asyncio
+async def test_apri_riga_esclude_il_proprio_username_dai_candidati_href(monkeypatch):
+    """I3: senza account_username collegato, un link al proprio profilo nel
+    pannello (es. avatar/header) produce 2 candidati e estrai_username_thread
+    ritorna None per design — riga scartata anche se il click era corretto.
+    Con account_username passato, il proprio profilo viene escluso e resta un
+    solo candidato: l'interlocutore vero."""
+    from app.services.inbox_browser import pagina
+
+    async def human_click_ok(page, elemento):
+        return None
+    monkeypatch.setattr(pagina.human_input, "human_click", human_click_ok)
+
+    class _FakePageConHref:
+        def __init__(self):
+            self.righe_testi = ["Bruzzo Abbigliamento\nCiao"]
+            self.header = ["Bruzzo Abbigliamento"]
+            self.href = ["/bruzzo_abbigliamento/", "/mio_account_loggato/"]
+
+        async def evaluate_handle(self, script, indice):
+            return _FakeHandle(_FakeElemento())
+
+        async def evaluate(self, script, *args):
+            if "e.innerText)" in script:
+                return self.righe_testi
+            if 'href^="/"' in script:
+                return self.href
+            return self.header
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    page = _FakePageConHref()
+    risultato = await apri_riga(
+        page, indice=0, nome_atteso="Bruzzo Abbigliamento", lingua="it",
+        account_username="mio_account_loggato",
+    )
+
+    assert risultato == "bruzzo_abbigliamento"
+
+
+@pytest.mark.asyncio
+async def test_apri_riga_senza_account_username_due_candidati_scarta_la_riga(monkeypatch):
+    """Ramo negativo (prova del nove per I3): stesso scenario ma SENZA collegare
+    account_username — il comportamento pre-fix. Due candidati href, nessuno
+    escluso: estrai_username_thread ritorna None per design (thread di gruppo o
+    ambiguo, vedi testo.py), la riga corretta viene scartata."""
+    from app.services.inbox_browser import pagina
+
+    async def human_click_ok(page, elemento):
+        return None
+    monkeypatch.setattr(pagina.human_input, "human_click", human_click_ok)
+
+    class _FakePageConHref:
+        def __init__(self):
+            self.righe_testi = ["Bruzzo Abbigliamento\nCiao"]
+            self.header = ["Bruzzo Abbigliamento"]
+            self.href = ["/bruzzo_abbigliamento/", "/mio_account_loggato/"]
+
+        async def evaluate_handle(self, script, indice):
+            return _FakeHandle(_FakeElemento())
+
+        async def evaluate(self, script, *args):
+            if "e.innerText)" in script:
+                return self.righe_testi
+            if 'href^="/"' in script:
+                return self.href
+            return self.header
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    page = _FakePageConHref()
+    risultato = await apri_riga(page, indice=0, nome_atteso="Bruzzo Abbigliamento", lingua="it")
+
+    assert risultato is None
+
+
 # ── decidi_fine_lista: falliti nella finestra, non cumulativi di sessione ──
 class _FakePageAttese:
     async def wait_for_timeout(self, ms):

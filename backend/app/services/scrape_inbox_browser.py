@@ -176,7 +176,7 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
 
                 riconosciuta_prima = archivio.e_riconosciuto(riga.nome)
                 if decide_se_aprire(riga.nome, archivio, contatore.zona):
-                    username = await apri_riga(page, riga.indice, riga.nome, LINGUA)
+                    username = await apri_riga(page, riga.indice, riga.nome, LINGUA, account.username)
                     if username:
                         testo_pagina = await page.evaluate("() => document.body.innerText")
                         dati = DatiContatto(
