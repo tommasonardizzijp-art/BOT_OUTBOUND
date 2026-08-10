@@ -80,7 +80,16 @@ d:\BOT OUTBOUND\
 │   │   │   ├── manual_login.py       # Login browser manuale (Patchright)
 │   │   │   ├── reply_checker.py      # Cron: scansione inbox DM per risposte
 │   │   │   ├── human_behavior.py     # Sessioni, timing, finestra oraria
-│   │   │   └── campaign_control.py   # Controlli condivisi pausa/ripresa campagna (web + Telegram)
+│   │   │   ├── campaign_control.py   # Controlli condivisi pausa/ripresa campagna (web + Telegram)
+│   │   │   ├── scrape_inbox_browser.py  # Fase Lista via browser (dm_threads, inbox_engine=browser): motore separato da scrape_inbox.py, stesso contratto di ritorno
+│   │   │   └── inbox_browser/        # Moduli di supporto del motore inbox browser (funzioni pure + DOM)
+│   │   │       ├── targa.py          # Targa provvisoria negativa (SHA-256 username normalizzato) + e_provvisoria
+│   │   │       ├── testo.py          # Parsing testo/lingua inbox web (IT/EN), tri-stato ultimo_nostro
+│   │   │       ├── riconoscimento.py # ArchivioNomi + contatore di zona: il riconoscimento decide solo il ritmo, mai se aprire
+│   │   │       ├── ritmo.py          # Pause lognormali troncate per riestrazione, differenziate per zona piena/rapida
+│   │   │       ├── pagina.py         # Interazione DOM: scroll sotto il buffer virtualizzato, apertura riga per contenuto, fondo/lento/piantato
+│   │   │       ├── salvataggio.py    # Dedup in scrittura per username, fusione con precedenza di stato
+│   │   │       └── gate.py           # Vincolo di configurazione: inbox_engine=browser richiede enrichment+bio_engine browser
 │   │   ├── workers/
 │   │   │   ├── task_queue.py         # ARQ WorkerSettings, funzioni cron
 │   │   │   ├── lead_qualification_worker.py # Task batch qualifica lead

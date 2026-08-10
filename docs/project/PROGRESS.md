@@ -1205,6 +1205,37 @@ Avviato il design di un **secondo canale WhatsApp** (il progetto evolve in **pia
 
 ---
 
+## [2026-08-10] Fase Lista via browser per l'inbox — secondo motore (dm_threads, inbox_engine=browser)
+
+Nuovo motore per la Fase Lista delle campagne `scrape_mode=dm_threads`: apre le chat via browser (Patchright) invece di chiamare l'API privata Instagram, selezionabile per campagna via `Campaign.inbox_engine` (`'api'` default | `'browser'`, interruttore già esistente ma finora no-op). Non è una modifica del motore API (`scrape_inbox.py`/`inbox_source.py`), che resta intoccato: è un secondo ramo innestato in `scrape_list.py:81` sul bivio `inbox_engine`.
+
+**Perché serve**: sugli account dove l'API privata va evitata, l'unico modo di leggere i contatti dei DM già avviati è aprire le chat come farebbe una persona. Il canale browser non conosce il pk Instagram (misurato: dal thread si legge solo lo username, non il numero), quindi ogni contatto raccolto riceve una **targa provvisoria negativa** (`ig_user_id = -SHA256(username)`, mai collidente con un pk reale) che viene sostituita dalla targa vera durante l'arricchimento — anch'esso vincolato a girare via browser (`bio_engine='browser'` + `enrichment_level != 'none'`, imposti in configurazione e ribaditi da una guardia difensiva su `GlobalContact`/`try_reserve`).
+
+**File nuovi principali**:
+- `backend/app/services/inbox_browser/targa.py` — targa provvisoria (SHA-256 dello username normalizzato, 63 bit, negata)
+- `backend/app/services/inbox_browser/testo.py` — parsing testo/lingua (localizzato IT/EN: prefisso "Tu:"/"You:", segnaposto, delimitatore fine chat)
+- `backend/app/services/inbox_browser/riconoscimento.py` — `ArchivioNomi` + contatore di zona (nomi duplicati non contano come riconoscimento)
+- `backend/app/services/inbox_browser/ritmo.py` — pause lognormali troncate per riestrazione (mai clampate), differenziate per zona piena/rapida
+- `backend/app/services/inbox_browser/pagina.py` — interazione DOM: scroll a passi sotto il buffer virtualizzato, apertura riga, discriminazione fondo/lento/piantato
+- `backend/app/services/inbox_browser/salvataggio.py` — dedup in scrittura per `(campaign_id, username)`, fusione con precedenza di stato (il più avanzato vince)
+- `backend/app/services/inbox_browser/gate.py` — vincolo di configurazione: `inbox_engine='browser'` richiede `enrichment_level != 'none'` e `bio_engine='browser'`
+- `backend/app/services/scrape_inbox_browser.py` — orchestrazione della sessione: le due modalità (zona piena/rapida), i criteri di stop, il contratto di ritorno identico a `run_inbox_list`
+- `backend/alembic/versions/031_inbox_browser_fields.py` — 4 colonne nullable su `followers` (vedi [DATABASE.md](../architecture/DATABASE.md))
+
+**Due difetti Critical trovati dalla review finale e risolti in una fix wave dedicata** (non da nessuna review per-task: erano gap piano↔spec, non errori dei singoli task):
+1. **`apri_riga` risolveva la riga per indice invece che per contenuto** — con la lista virtualizzata che si riordina a ogni DM in entrata, ~2/3 di ogni lotto di 30 righe veniva perso sistematicamente, col rischio di bruciare il badge "non letto" sulla riga sbagliata. Fix: la riga viene ri-risolta per contenuto immediatamente prima del click, con verifica post-click che il nome nell'header combaci.
+2. **La fusione della targa non aveva lookup esplicita** — un rename o un contatto già presente produceva `IntegrityError` sul vincolo `UniqueConstraint(campaign_id, ig_user_id)`; sul percorso batch di `browser_bio.py` quell'eccezione arrivava a un `break` senza marcare il follower, con selezione `limit(1)` senza `ORDER BY`: il giro dopo ripescava la stessa riga e la Fase Bio restava bloccata per sempre. Fix: lookup esplicita per username prima della scrittura, in transazione propria, con precedenza di stato dichiarata (uno stato terminale non torna mai indietro).
+
+**Stato QA (Task 15)**: 56 test fra manuali e adversarial (compresi i due bug reali trovati e corretti durante il collaudo), coverage reale su browser con l'account `primero_azienda_cbd`. Suite completa finale: 1623 passed, 17 failed (baseline noto sul canale WA/warmup, invariato e non correlato), 2 skipped, 1 xfailed.
+
+**Finding residuo, non risolto in questo giro**: in `fetch_and_store_bio_browser` (`browser_bio.py:613-616`) il rilascio del lock non ha una guardia condizionale sul lock owner — se `release_stale_locks` (cron ogni 15 min, timeout 20 min) rilascia la riga per stale durante un fetch lento e un terzo worker la reclama, questo commit la sovrascrive alla cieca (lost-update sul claim del terzo worker). Finestra stretta (serve un fetch >20 min), trovato per analisi di codice non riprodotto empiricamente. Da valutare in un giro di fix futuro, separato da questo modulo.
+
+**Comportamento atteso**: creando/editando una campagna `dm_threads` in `draft` si sceglie il motore inbox; con `browser` la Fase Lista apre le chat via Patchright invece di chiamare `direct_v2/inbox/`, marca solo le chat già lette (non brucia il badge dei non letti di Tommaso), e i contatti restano `pending` con targa provvisoria finché l'arricchimento via browser non la sostituisce con la targa vera. Il frontend blocca via codice la combinazione non supportata (interruttore inbox disabilitato, motore bio ingrigito quando incompatibile).
+
+**File**: `backend/app/services/inbox_browser/*` (nuovo), `backend/app/services/scrape_inbox_browser.py` (nuovo), `backend/app/services/{browser_bio,campaign_orchestrator,global_contact_service,reservation,scrape_list}.py`, `backend/app/{api/campaigns,api/leads,models/follower}.py`, `backend/alembic/versions/031_inbox_browser_fields.py`, `frontend/app/campaigns/[id]/page.tsx`. Design: `docs/superpowers/specs/2026-08-09-inbox-listing-browser-design.md`. Piano: `docs/superpowers/plans/2026-08-09-inbox-listing-browser.md`.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |
