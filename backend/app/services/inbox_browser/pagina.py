@@ -92,6 +92,13 @@ _JS_HREF_THREAD = """() => [...document.querySelectorAll('a[href^="/"]')]
     .filter(e => e.getBoundingClientRect().left > 660)
     .map(e => e.getAttribute('href'))"""
 
+# Stesso filtro geometrico di _JS_RIGHE, ma solo il testo: serve a ri-risolvere
+# la riga per CONTENUTO immediatamente prima del click (vedi apri_riga).
+_JS_RIGHE_CONTENUTO = """() => [...document.querySelectorAll('div[role="button"], div[tabindex="0"], a')]
+    .filter(e => { const r = e.getBoundingClientRect();
+      return r.left < 660 && r.top > 150 && r.height > 50 && r.height < 130 && r.width > 250; })
+    .map(e => e.innerText)"""
+
 _JS_HEADER_THREAD = """() => {
     const t = [...document.querySelectorAll('span, div')]
       .filter(e => { const r = e.getBoundingClientRect();
@@ -148,19 +155,49 @@ async def leggi_righe_visibili(page, lingua: str, quante: int = 30) -> list[Riga
 async def apri_riga(page, indice: int, nome_atteso: str, lingua: str) -> str | None:
     """Apre la riga e ritorna lo username, oppure None se la verifica fallisce.
 
-    La riga viene ri-risolta QUI, immediatamente prima del click: mai riusare un
-    riferimento preso prima di una pausa.
+    La riga viene ri-risolta QUI, immediatamente prima del click — ma per
+    CONTENUTO (nome), non per indice: `human_click` fa `scroll_into_view_if_needed`
+    prima di ogni click (human_input.py:96-98), quindi ogni apertura scorre la
+    pagina. In un lotto letto in un colpo solo, buona parte delle righe sta sotto
+    la piega iniziale; quando il ciclo le raggiunge, l'indice geometrico di
+    QUELLA riga puo' essere cambiato per via degli scroll precedenti (lista
+    virtualizzata, vedi modulo docstring punto 1). Interrogare di nuovo il DOM
+    con lo stesso indice rischierebbe di risolvere un elemento diverso da quello
+    inteso. `indice` resta in firma solo come hint diagnostico nei log, non come
+    fonte di verita': se il nome non si trova fra le righe attualmente visibili,
+    si rinuncia senza cliccare — la riga rimane "non riconosciuta" e verra'
+    ritentata al giro successivo, esattamente come un mismatch post-click.
 
     `lingua` e' accettata per uniformita' di firma con `leggi_righe_visibili`
     (il chiamante ha gia' la lingua a portata di mano per quella chiamata), ma
     qui non serve: la verifica post-click confronta i nomi via `nome_combacia`,
     che normalizza senza dipendere dalla lingua dell'interfaccia.
     """
+    nome_target = normalizza_nome(nome_atteso)
+    if not nome_target:
+        logger.warning(f"[InboxBrowser] apri_riga: nome_atteso mancante (indice hint {indice}) — nessun click")
+        return None
+
+    testi_righe = await page.evaluate(_JS_RIGHE_CONTENUTO)
+    indice_effettivo = None
+    for i, testo in enumerate(testi_righe or []):
+        prima_riga = (testo or "").split("\n", 1)[0].strip()
+        if prima_riga and normalizza_nome(prima_riga) == nome_target:
+            indice_effettivo = i
+            break
+
+    if indice_effettivo is None:
+        logger.warning(
+            f"[InboxBrowser] riga non trovata al momento del click per {nome_atteso!r} "
+            f"(indice hint {indice}) — probabilmente scorsa fuori dal DOM virtualizzato"
+        )
+        return None
+
     handle = await page.evaluate_handle(
         """(idx) => [...document.querySelectorAll('div[role="button"], div[tabindex="0"], a')]
              .filter(e => { const r = e.getBoundingClientRect();
                return r.left < 660 && r.top > 150 && r.height > 50 && r.height < 130 && r.width > 250; })[idx] || null""",
-        indice,
+        indice_effettivo,
     )
     elemento = handle.as_element()
     if elemento is None:
