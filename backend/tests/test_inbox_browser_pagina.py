@@ -143,6 +143,70 @@ async def test_con_verifica_post_click_apri_riga_rinuncia_alla_riga(monkeypatch)
     assert risultato is None
 
 
+# ── QA Task 15: il pannello del thread può arrivare dopo il primo controllo ──
+class _FakePageHeaderLento:
+    """Simula il proxy reale misurato in QA: l'header e' vuoto ai primi
+    controlli e compare solo al terzo (pattern osservato: vuoto a 500ms,
+    popolato a 1000ms). Con un'attesa fissa la riga sarebbe scartata come
+    'lista riordinata' anche se il nome combacia."""
+
+    def __init__(self, header_dopo_n_letture: int, header_finale: list[str]):
+        self._letture = 0
+        self._soglia = header_dopo_n_letture
+        self._header_finale = header_finale
+
+    async def evaluate_handle(self, script, indice):
+        return _FakeHandle(_FakeElemento())
+
+    async def evaluate(self, script, *args):
+        self._letture += 1
+        return self._header_finale if self._letture >= self._soglia else []
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_header_lento_ma_entro_le_attese_apri_riga_riesce(monkeypatch):
+    """QA Task 15 — bug reale trovato con l'account primero_azienda_cbd: sul
+    proxy reale il pannello del thread compare spesso dopo 1-2s, non entro
+    l'unica attesa fissa che c'era prima (1.5s) — verifiche fallite in
+    silenzio su righe in realta' corrette. Con la pazienza crescente (fino a
+    3s, ma si esce appena l'header compare) l'apertura riesce comunque."""
+    from app.services.inbox_browser import pagina
+
+    async def human_click_ok(page, elemento):
+        return None
+
+    monkeypatch.setattr(pagina.human_input, "human_click", human_click_ok)
+    monkeypatch.setattr(pagina, "estrai_username_thread", lambda href, propri: "tuscanyhemp")
+
+    # header vuoto al 1° controllo, popolato dal 2° in poi (equivalente a
+    # "vuoto a 500ms, presente a 1000ms" misurato dal vivo).
+    page = _FakePageHeaderLento(header_dopo_n_letture=2, header_finale=["Tuscanyhemp"])
+    risultato = await apri_riga(page, indice=0, nome_atteso="Tuscanyhemp", lingua="it")
+
+    assert risultato == "tuscanyhemp"
+
+
+@pytest.mark.asyncio
+async def test_header_mai_arrivato_apri_riga_rinuncia_comunque(monkeypatch):
+    """Ramo negativo: se l'header non arriva MAI entro le attese, si rinuncia
+    ancora — la pazienza in piu' non trasforma la verifica in un'attesa
+    infinita ne' toglie la protezione contro un vero disallineamento."""
+    from app.services.inbox_browser import pagina
+
+    async def human_click_ok(page, elemento):
+        return None
+
+    monkeypatch.setattr(pagina.human_input, "human_click", human_click_ok)
+
+    page = _FakePageHeaderLento(header_dopo_n_letture=999, header_finale=["Qualcuno Altro"])
+    risultato = await apri_riga(page, indice=0, nome_atteso="Tuscanyhemp", lingua="it")
+
+    assert risultato is None
+
+
 # ── decidi_fine_lista: falliti nella finestra, non cumulativi di sessione ──
 class _FakePageAttese:
     async def wait_for_timeout(self, ms):

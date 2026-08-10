@@ -43,6 +43,10 @@ PASSO_SCROLL_MAX = 0.8
 # Attese a pazienza crescente prima di dichiarare qualcosa sulla fine lista.
 ATTESE_S = (1, 2, 4, 8, 16)
 
+# Attese a pazienza crescente per il pannello del thread dopo il click (vedi
+# apri_riga). Totale 3s: il caso rapido esce all'attesa piu' corta.
+_ATTESE_HEADER_S = (0.5, 1.0, 1.5)
+
 _JS_RIGHE = """(nRighe) => {
     const righe = [...document.querySelectorAll('div[role="button"], div[tabindex="0"], a')]
       .filter(e => { const r = e.getBoundingClientRect();
@@ -163,9 +167,21 @@ async def apri_riga(page, indice: int, nome_atteso: str, lingua: str) -> str | N
         return None
 
     await human_input.human_click(page, elemento)
-    await page.wait_for_timeout(1500)
 
-    header = await page.evaluate(_JS_HEADER_THREAD)
+    # Pazienza crescente (stesso principio di decidi_fine_lista): un'attesa fissa
+    # di 1.5s bastava sulla latenza misurata nel Task 0, ma sul proxy reale
+    # dell'account misurato in QA (Task 15) il pannello del thread arriva spesso
+    # fra 1 e 2s — con l'attesa fissa quel margine stretto faceva scartare come
+    # "lista riordinata" molte righe in realta' corrette (0-3/5 aperture riuscite
+    # a seconda del giro). Si esce appena l'header compare, quindi il caso rapido
+    # resta rapido; il caso lento ora ha 3s invece di 1.5s prima di arrendersi.
+    header: list = []
+    for attesa_s in _ATTESE_HEADER_S:
+        await page.wait_for_timeout(int(attesa_s * 1000))
+        header = await page.evaluate(_JS_HEADER_THREAD)
+        if header:
+            break
+
     nome_trovato = header[0] if header else None
     if not nome_combacia(nome_atteso, nome_trovato):
         logger.warning(
