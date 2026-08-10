@@ -36,6 +36,7 @@ from app.models.message import Message, MessageStatus
 from app.models.activity_log import ActivityLog
 from app.models.global_contact import GlobalContact
 from app.services import account_manager
+from app.services.global_contact_service import targa_ammessa_in_anagrafica
 from app.services import account_lease, reservation
 from app.services.account_manager import get_warmup_limit
 from app.services.follower_workability import (
@@ -1514,6 +1515,12 @@ async def _mark_globally_contacted(
     account=None,
     campaign_name: str | None = None,
 ) -> None:
+    if not targa_ammessa_in_anagrafica(ig_user_id):
+        # I1: stesso presidio di upsert_lead (global_contact_service) e di
+        # reservation.try_reserve — una targa provvisoria del motore inbox
+        # browser non deve mai entrare nell'anagrafica cross-campagna.
+        logger.warning(f"[GlobalContact] ig_user_id {ig_user_id}: targa non ammessa in anagrafica — nessuna scrittura")
+        return
     now = datetime.utcnow()
     history_entry = {
         "campaign_id": campaign_id,

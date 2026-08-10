@@ -236,6 +236,8 @@ def _make_campaign(
     inbox_engine: str = "browser",
     scrape_mode: str = "dm_threads",
     messaging_enabled: bool = False,
+    bio_engine: str = "api",
+    enrichment_level: str = "none",
 ) -> Campaign:
     return Campaign(
         id=str(uuid.uuid4()),
@@ -247,6 +249,8 @@ def _make_campaign(
         scrape_cursor=scrape_cursor,
         status=status,
         messaging_enabled=messaging_enabled,
+        bio_engine=bio_engine,
+        enrichment_level=enrichment_level,
     )
 
 
@@ -294,6 +298,11 @@ def test_same_engine_patch_preserves_cursor(client, _temp_db):
     This is the key idempotency contract: re-setting the same engine must not
     destroy progress. If cursor is reset here, a UI that always sends the full
     update payload would silently lose the scraping position.
+
+    bio_engine/enrichment_level are seeded 'browser'/'contacts' (not the model
+    default 'api'/'none') so the final combo stays valid under the Task-7 gate
+    on valida_combinazione_motori — this test is about cursor idempotency, not
+    about the gate, and must not trip it as a side effect.
     """
     _, sf = _temp_db
     camp = _make_campaign(
@@ -301,6 +310,8 @@ def test_same_engine_patch_preserves_cursor(client, _temp_db):
         status=CampaignStatus.paused,
         scrape_cursor="ABC",
         inbox_engine="browser",
+        bio_engine="browser",
+        enrichment_level="contacts",
     )
     camp_id = camp.id
 
@@ -455,6 +466,10 @@ def test_engine_switch_does_not_clobber_name(client, _temp_db):
     Set name='Original Name' first. Then PUT inbox_engine='api' only.
     The name must survive — update_campaign applies fields individually
     (if data.name is not None) so an omitted name must not be cleared.
+
+    bio_engine/enrichment_level are set to 'browser'/'contacts' at creation
+    so inbox_engine='browser' is a valid combo under the Task-7 gate — this
+    test is about name preservation, not about the gate.
     """
     _, sf = _temp_db
 
@@ -467,6 +482,8 @@ def test_engine_switch_does_not_clobber_name(client, _temp_db):
             "target_username": "some_target",
             "messaging_enabled": False,
             "inbox_engine": "browser",
+            "bio_engine": "browser",
+            "enrichment_level": "contacts",
         },
     )
     assert resp_create.status_code == 201, resp_create.text
@@ -491,6 +508,10 @@ def test_engine_switch_does_not_clobber_template(client, _temp_db):
     Create campaign with base_message_template set. Then PUT inbox_engine only.
     Template must survive — base_message_template uses model_fields_set guard
     so it is only written if explicitly included in the request.
+
+    bio_engine/enrichment_level are set to 'browser'/'contacts' at creation
+    so inbox_engine='browser' is a valid combo under the Task-7 gate — this
+    test is about template preservation, not about the gate.
     """
     _, sf = _temp_db
 
@@ -503,6 +524,8 @@ def test_engine_switch_does_not_clobber_template(client, _temp_db):
             "messaging_enabled": True,
             "base_message_template": "Hello this is my outreach message for you",
             "inbox_engine": "browser",
+            "bio_engine": "browser",
+            "enrichment_level": "contacts",
         },
     )
     assert resp_create.status_code == 201, resp_create.text
@@ -566,6 +589,11 @@ def test_engine_switch_in_ready_with_existing_cursor_resets_it(client, _temp_db)
     """
     A campaign in 'ready' state can have a leftover cursor from a previous
     listing phase. Switching engine in ready must STILL reset the cursor.
+
+    bio_engine/enrichment_level are seeded 'browser'/'contacts' up front so
+    that switching inbox_engine to 'browser' lands on a combo the Task-7 gate
+    (valida_combinazione_motori) accepts — this test is about cursor reset,
+    not about the gate.
     """
     _, sf = _temp_db
     camp = _make_campaign(
@@ -573,6 +601,8 @@ def test_engine_switch_in_ready_with_existing_cursor_resets_it(client, _temp_db)
         status=CampaignStatus.ready,
         scrape_cursor="LEFTOVER_CURSOR",
         inbox_engine="api",
+        bio_engine="browser",
+        enrichment_level="contacts",
     )
     camp_id = camp.id
 

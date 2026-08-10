@@ -476,6 +476,30 @@ def contatti_richiesti(campaign, profilo=None) -> bool:
     return True
 
 
+def decidi_sostituzione_targa(targa_attuale: int | None, pk_vero) -> str:
+    """'sostituisci' | 'invariata' | 'identita_cambiata'.
+
+    Il terzo esito e' il caso peggiore del modulo inbox browser: il contatto ha
+    gia' una targa VERA e Instagram ne restituisce una DIVERSA. Significa che lo
+    username ha cambiato proprietario (rename + riassegnazione), quindi stiamo
+    guardando il profilo di un estraneo. Senza questo controllo ne salveremmo bio
+    e contatti sulla scheda sbagliata e gli manderemmo il DM: nessun passaggio
+    solleva un errore da solo, perche' il profilo esiste davvero e lo username
+    combacia con quello richiesto (la guardia a :261-262 non scatta).
+    """
+    from app.services.inbox_browser.targa import e_provvisoria
+
+    try:
+        pk = int(pk_vero)
+    except (TypeError, ValueError):
+        return "invariata"
+    if e_provvisoria(targa_attuale):
+        return "sostituisci"
+    if targa_attuale != pk:
+        return "identita_cambiata"
+    return "invariata"
+
+
 async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -> tuple[str, Exception | None]:
     """Come `fetch_and_store_bio` ma via browser. Scrive gli STESSI campi Follower +
     upsert_lead. NON consuma il cap API (nessun user_info_v1).
@@ -513,6 +537,66 @@ async def fetch_and_store_bio_browser(follower, campaign, db, browser_session) -
         return "error", Exception(f"web_profile_info HTTP {st}")
 
     shim = web_user_to_shim(user)
+
+    # Verifica identita' PRIMA di scrivere qualunque campo (bio, contatti, ecc.) o di
+    # fare la richiesta /info/ extra: se lo username e' stato riassegnato dopo un
+    # rename, quello che stiamo guardando e' il profilo di un estraneo. Deve stare
+    # qui, non vicino al rilascio del lock, altrimenti i campi bio/contatti scritti
+    # sotto finirebbero comunque nel commit anche nel ramo 'identita_cambiata' --
+    # esattamente il "non scrivo nulla" che questo controllo deve garantire.
+    esito_targa = decidi_sostituzione_targa(follower.ig_user_id, shim.pk)
+    if esito_targa == "identita_cambiata":
+        logger.error(
+            f"[BioBrowser] @{follower.username}: pk diverso da quello registrato "
+            f"({follower.ig_user_id} -> {shim.pk}). Username riassegnato dopo un rename: "
+            "non scrivo nulla."
+        )
+        follower.status = FollowerStatus.skipped
+        follower.skip_reason = "identita_cambiata"
+        follower.locked_by_account_id = None
+        follower.locked_at = None
+        await db.commit()
+        return "skipped", None
+    if esito_targa == "sostituisci":
+        # C2: prima di scrivere la targa vera, verifica che nessun'ALTRA riga
+        # della stessa campagna la abbia gia' (username con la chiocciola gia'
+        # in DB, vedi targa.py, o un rename riassegnato altrove). Senza questo
+        # controllo il commit in fondo a questa funzione solleva IntegrityError
+        # su UniqueConstraint(campaign_id, ig_user_id): il loop batch ripesca la
+        # STESSA riga pending ad ogni giro (limit(1) senza ORDER BY) e la Fase
+        # Bio si blocca per sempre su questa campagna.
+        from sqlalchemy import select
+        from app.models.follower import Follower
+
+        bersaglio = (await db.execute(
+            select(Follower).where(
+                Follower.campaign_id == follower.campaign_id,
+                Follower.ig_user_id == int(shim.pk),
+                Follower.id != follower.id,
+            )
+        )).scalar_one_or_none()
+        if bersaglio is not None:
+            # Stessa scelta di design del ramo 'identita_cambiata' sopra: skip +
+            # segnalazione, MAI un merge automatico "indovinato" fra due righe —
+            # mescolare bio/contatti senza sapere quale riga sia affidabile
+            # rischierebbe di scrivere dati sbagliati sulla scheda sbagliata.
+            logger.error(
+                f"[BioBrowser] @{follower.username}: la targa vera {shim.pk} e' gia' presente "
+                f"su un'altra riga della campagna (@{bersaglio.username}). Probabile username "
+                "con la chiocciola in DB o rename riassegnato. Non fondo automaticamente: skip."
+            )
+            follower.status = FollowerStatus.skipped
+            follower.skip_reason = "targa_gia_presente_su_altra_riga"
+            follower.locked_by_account_id = None
+            follower.locked_at = None
+            await db.commit()
+            return "skipped", None
+
+        # NELLO STESSO commit che rilascia il lock (in fondo a questa funzione): se
+        # avvenisse dopo, esisterebbe una finestra in cui un worker DM claima una
+        # riga gia' mandabile con la targa ancora provvisoria e prenota la chiave
+        # sbagliata. upsert_lead piu' sotto legge gia' la targa vera.
+        follower.ig_user_id = int(shim.pk)
 
     # Arricchimento contatti: web_profile_info NON espone email/telefono business
     # (business_email=null). Li prendiamo da /api/v1/users/{pk}/info/ (public_email/
@@ -1361,6 +1445,19 @@ async def _scrape_batch(campaign, db, browser_session, count: int, account_id: s
             outcome, err = await fetch_and_store_bio_browser(follower, campaign, db, browser_session)
         except Exception as e:
             logger.warning(f"[BioBrowser] batch: errore inatteso su @{follower.username} ({e}) — stop batch")
+            # C2 Parte 2, difesa in profondita': senza questa marcatura, un
+            # errore imprevisto (non solo l'IntegrityError che la Parte 1
+            # previene) lascia il follower 'pending' e il prossimo giro lo
+            # ripesca IDENTICO (limit(1) senza ORDER BY) -> stesso errore ->
+            # loop infinito sulla stessa riga, batch dopo batch.
+            await db.rollback()
+            try:
+                follower.status = FollowerStatus.skipped
+                follower.skip_reason = "browser_errore_inatteso"
+                follower.updated_at = datetime.utcnow()
+                await db.commit()
+            except Exception:
+                await db.rollback()
             break
 
         if outcome == "done":

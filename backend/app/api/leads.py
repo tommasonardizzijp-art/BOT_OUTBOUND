@@ -370,8 +370,11 @@ async def export_leads_csv(
 
     for row in rows:
         lead = _row_to_lead(row)
+        # Le targhe provvisorie non escono in un file che si apre in Excel:
+        # un numero negativo nella colonna identificativo e' solo confusione.
+        ig_esportabile = lead.ig_user_id if (lead.ig_user_id or 0) > 0 else ""
         writer.writerow({
-            "ig_user_id": lead.ig_user_id,
+            "ig_user_id": ig_esportabile,
             "username": lead.username or "",
             "full_name": lead.full_name or "",
             "biography": (lead.biography or "").replace("\n", " ").replace("\r", " ").replace("\t", " "),

@@ -58,6 +58,20 @@ def _load_json(raw, default):
         return default
 
 
+def targa_ammessa_in_anagrafica(ig_user_id: int | None) -> bool:
+    """L'anagrafica globale accetta solo pk Instagram reali.
+
+    Le targhe provvisorie del motore inbox browser (negative) non devono entrare:
+    la stessa persona raccolta via API avrebbe una chiave diversa, e la protezione
+    contro il doppio DM cross-campagna non la riconoscerebbe.
+
+    Difesa in profondita': il gate di configurazione (inbox_browser/gate.py) gia'
+    impedisce che un contatto arrivi qui senza arricchimento, ma quel presidio e'
+    gia' saltato una volta in revisione perche' era ancorato al campo sbagliato.
+    """
+    return ig_user_id is not None and ig_user_id > 0
+
+
 async def upsert_lead(
     db,
     *,
@@ -70,6 +84,12 @@ async def upsert_lead(
     account,
 ) -> None:
     """Insert/merge a scraped profile as a lead. Best-effort; never raises fatally."""
+    if not targa_ammessa_in_anagrafica(ig_user_id):
+        logger.warning(
+            f"[GlobalContact] @{username}: identificativo provvisorio ({ig_user_id}), "
+            "lead non registrato in anagrafica — il contatto non e' ancora stato arricchito"
+        )
+        return
     try:
         now = datetime.utcnow()
         source_entry = {

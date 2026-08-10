@@ -50,6 +50,22 @@ async def _list_page_delay() -> None:
     await asyncio.sleep(delay)
 
 
+async def _dispatch_inbox(campaign_id: str, db, campaign) -> int | None:
+    """Bivio fra i due motori di raccolta inbox.
+
+    'api' (default) va dove e' sempre andato: run_inbox_list resta INTOCCATO.
+    'browser' va al motore nuovo, che ha ritmo, pause e criteri tutti suoi.
+
+    Entrambi rispettano lo stesso contratto: secondi di defer al session-break,
+    None se completata o interrotta.
+    """
+    if getattr(campaign, "inbox_engine", "api") == "browser":
+        from app.services.scrape_inbox_browser import run_inbox_browser_list
+        return await run_inbox_browser_list(campaign_id, db, campaign)
+    from app.services.scrape_inbox import run_inbox_list
+    return await run_inbox_list(campaign_id, db, campaign)
+
+
 async def list_followers(campaign_id: str) -> int | None:
     """Entry point Fase Lista. Chiamata dal worker.
 
@@ -79,8 +95,7 @@ async def list_followers(campaign_id: str) -> int | None:
             emit_event(campaign_id, "scrape_resume", "Pausa lista terminata, ripresa")
 
         if getattr(campaign, "scrape_mode", "followers") == "dm_threads":
-            from app.services.scrape_inbox import run_inbox_list
-            return await run_inbox_list(campaign_id, db, campaign)
+            return await _dispatch_inbox(campaign_id, db, campaign)
 
         scrape_mode = getattr(campaign, "scrape_mode", "followers")
         mode_label = "following" if scrape_mode == "following" else "follower"

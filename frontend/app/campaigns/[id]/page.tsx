@@ -733,7 +733,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
 
   const handleInboxEngineSwitch = async (newEngine: 'browser' | 'api') => {
     if (!campaign) return
-    const current = campaign.inbox_engine ?? 'browser'
+    const current = campaign.inbox_engine ?? 'api'
     if (newEngine === current) return
     setSwitchingEngine(true)
     try {
@@ -1063,8 +1063,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <div>
             <p className="text-sm text-gray-300 font-medium">Engine estrazione inbox</p>
             <p className="text-xs text-gray-500 mt-0.5">
-              L&apos;inbox dei DM già avviati si legge via API. Il motore browser è stato rimosso
-              (la lista web dei DM non espone username/pk).
+              API (veloce, consuma cap) o Browser (prudente, no cap) per leggere l&apos;inbox dei DM già avviati.
             </p>
           </div>
           <div className="flex gap-3">
@@ -1073,22 +1072,26 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               disabled={switchingEngine}
               onClick={() => handleInboxEngineSwitch('api')}
               className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
-                campaign.inbox_engine === 'api'
+                (campaign.inbox_engine ?? 'api') === 'api'
                   ? 'bg-purple-600/20 border-purple-500 text-purple-300'
                   : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
               }`}
             >
-              ⚡ API
-              <span className="block text-xs font-normal mt-0.5 opacity-70">Unico motore supportato per l&apos;inbox</span>
+              ⚡ API (veloce)
+              <span className="block text-xs font-normal mt-0.5 opacity-70">Consuma il cap lookup/giorno</span>
             </button>
             <button
               type="button"
-              disabled
-              title="L'estrazione dell'inbox usa sempre l'API: il motore browser è stato rimosso."
-              className="flex-1 py-2 px-3 rounded-lg border text-sm font-medium bg-gray-800 border-gray-700 text-gray-500 opacity-50 cursor-not-allowed"
+              disabled={switchingEngine}
+              onClick={() => handleInboxEngineSwitch('browser')}
+              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
+                campaign.inbox_engine === 'browser'
+                  ? 'bg-purple-600/20 border-purple-500 text-purple-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
             >
-              🛡️ Browser (non disponibile)
-              <span className="block text-xs font-normal mt-0.5 opacity-70">Deprecato — l&apos;inbox usa sempre l&apos;API</span>
+              🛡️ Browser (prudente)
+              <span className="block text-xs font-normal mt-0.5 opacity-70">Nessun consumo del cap API</span>
             </button>
           </div>
           {switchingEngine && (
@@ -1167,9 +1170,12 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           <div className="flex gap-3">
             <button
               type="button"
-              disabled={switchingBioEngine}
+              disabled={switchingBioEngine || (campaign.inbox_engine ?? 'api') === 'browser'}
+              title={(campaign.inbox_engine ?? 'api') === 'browser'
+                ? "Con la raccolta inbox via browser l'arricchimento deve avvenire via browser: quello via API interroga Instagram con l'identificativo numerico, che sui contatti appena raccolti non esiste ancora."
+                : undefined}
               onClick={() => handleBioEngineSwitch('api')}
-              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
+              className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                 (campaign.bio_engine ?? 'api') === 'api'
                   ? 'bg-purple-600/20 border-purple-500 text-purple-300'
                   : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
@@ -2227,7 +2233,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                     </>}
                     {campaign.scrape_mode === 'dm_threads' && <>
                       <span className="text-gray-500">Engine inbox</span>
-                      <span className="text-gray-400">{campaign.inbox_engine ?? 'browser'}</span>
+                      <span className="text-gray-400">{campaign.inbox_engine ?? 'api'}</span>
                     </>}
                   </div>
                 </div>
