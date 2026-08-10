@@ -95,6 +95,26 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
     session_started = datetime.utcnow()
     session_budget_s = random.uniform(DURATA_SESSIONE_MIN, DURATA_SESSIONE_MAX)
 
+    async def _deve_fermarsi() -> str | None:
+        """Kill-switch, stato campagna, motore ancora nostro: 'halted' | 'status'
+        | 'motore' | None. Va richiamato SIA in cima al lotto SIA dentro il for
+        di ogni riga (I2): con `campiona_pausa` che arriva fino a 2-5 minuti per
+        riga e un lotto di 30 righe, controllare solo in cima al while farebbe
+        impiegare diversi minuti al kill-switch prima di fermare davvero il
+        browser — la spec chiede stop immediato."""
+        if await is_halted(db):
+            return "halted"
+        await db.refresh(campaign)
+        if campaign.status not in (CampaignStatus.listing, CampaignStatus.listing_break):
+            logger.info(f"[InboxBrowser] Stato '{campaign.status.value}' — interrotto a {already}")
+            return "status"
+        if not motore_ancora_nostro(campaign):
+            logger.info("[InboxBrowser] motore cambiato durante la sessione — esco pulito")
+            emit_event(campaign_id, "scrape_stopped",
+                       "Motore inbox cambiato durante la raccolta: sessione interrotta", level="warn")
+            return "motore"
+        return None
+
     try:
         # _single_inbox_account puo' sollevare ScrapeBudgetError (0 o 2+ account
         # inbox attivi): DEVE stare dentro il try, altrimenti quell'eccezione
@@ -132,16 +152,10 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
         drained = False
 
         while True:
-            if await is_halted(db):
+            esito_stop = await _deve_fermarsi()
+            if esito_stop == "halted":
                 raise BotHaltedError("kill-switch")
-            await db.refresh(campaign)
-            if campaign.status not in (CampaignStatus.listing, CampaignStatus.listing_break):
-                logger.info(f"[InboxBrowser] Stato '{campaign.status.value}' — interrotto a {already}")
-                return None
-            if not motore_ancora_nostro(campaign):
-                logger.info("[InboxBrowser] motore cambiato durante la sessione — esco pulito")
-                emit_event(campaign_id, "scrape_stopped",
-                           "Motore inbox cambiato durante la raccolta: sessione interrotta", level="warn")
+            if esito_stop is not None:
                 return None
             if campaign.list_target and already >= campaign.list_target:
                 logger.info(f"[InboxBrowser] Target {campaign.list_target} raggiunto ({already})")
@@ -149,6 +163,11 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
 
             righe = await leggi_righe_visibili(page, LINGUA)
             for riga in righe:
+                esito_stop = await _deve_fermarsi()
+                if esito_stop == "halted":
+                    raise BotHaltedError("kill-switch")
+                if esito_stop is not None:
+                    return None
                 if riga.non_letta:
                     # Preserva il badge dei non letti (decisione di Tommaso): si
                     # salta SENZA aprire e senza contare nel riconoscimento, la
