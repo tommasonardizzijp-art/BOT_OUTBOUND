@@ -180,3 +180,95 @@ come limite misurato, non nascosto. Da capire in M1 se dipende dal tipo di ultim
 **Step 1b: aprire UNA chat dell'allowlist** e rifare il dump sul pannello conversazione.
 Senza, `JS_TAIL`, `TICK_SEL` e `HISTORY_SEL` restano non verificati e **nessun invio
 può partire**: sarebbe un invio con la guardia opt-out non provata.
+
+## PoC-4 — pannello info-contatto, liste/filtri, rilevamento gruppo (09-10/08/2026)
+
+> Data rilevazione: **2026-08-09/10** · Numero: cliente reale Primero · Modalità: **sola lettura,
+> nessun invio** · Sessione: `headless=True`
+> Script: `backend/scripts/poc_wa/poc4_info_panel.py` (nuovo, stile M0)
+> Dump grezzo: `backend/scripts/poc_wa/artifacts/poc4_info_panel.json`
+> Campione: **20 chat** (12 dalla lista visibile iniziale + 8 dopo scroll di 6 "pagine" da 800px)
+
+### Pannello info-contatto — VERIFICATO (era un buco totale del catalogo prima di questo giro)
+
+| Elemento | Selettore | Copertura/note |
+|---|---|---|
+| Apertura pannello | click su `header[data-testid='conversation-header']` o `#main header` | fallback a catena: uno dei due ha sempre agganciato, non è tracciato quale dei due per ogni caso |
+| Contenitore pannello | `[data-testid='drawer-right']` | **19/20 = 95%** dei casi in cui il pannello è stato trovato; unico selettore che ha mai agganciato |
+| Candidati mai necessari | `[data-testid='contact-info-drawer']`, `div[role='complementary']`, `aside` | 0 volte usati, tenerli solo come nota storica |
+| Numero di telefono | primo match nel testo del pannello, regex `(\+?\d[\d\s\-\(\)]{7,}\d)` | pattern osservato: `+39 XXX XXX XXXX` |
+
+**Leggibilità del numero: 14/20 = 70% sul totale campione, ma 100% sulle chat 1:1 vere e 0%
+sui gruppi/liste broadcast interne.** Le 6 chat senza numero leggibile erano, in 5 casi su 6,
+gruppi/liste aziendali Primero riconoscibili dal nome (`PRIMERO FARM`, `Primero Negozi`,
+`CONSEGNE DOMICILIO`, `SPEDIZIONI`, `ORDINI VENDITORI PRIMERO` — tutto-maiuscolo o collettivo,
+non un nome di persona). **Comportamento corretto del pannello, non un bug**: un gruppo non ha
+un numero singolo da mostrare.
+
+### Trappola grave: l'indice assoluto di riga non regge un'apertura in sequenza
+
+Iterando `[role='row']` per indice preso da uno scan iniziale, dopo alcune chat aperte gli
+indici **non puntano più alla chat attesa**. Evidenza: nel sotto-campione preso dopo lo
+scroll, il titolo letto in sidebar **prima** di aprire la chat non corrisponde al numero
+letto nel pannello **dopo** averla aperta, in 4-5 casi su 8 consecutivi — esempio osservato
+(numeri mascherati, P12): titolo sidebar `+39 366 •••• •89`, pannello aperto mostra
+`+39 334 •••• •60` — due numeri diversi, stesso indice.
+
+**IPOTESI** più probabile: aprire una chat la segna come "letta" e WhatsApp la riordina nella
+lista per ultima attività, shiftando gli indici di tutte le righe successive. È la stessa
+classe di rischio già nota nel catalogo per la virtualizzazione (vedi sopra), ma qui si
+applica anche al caso "apro N chat in sequenza per indice", non solo allo scroll.
+
+**Conseguenza per la Fase A (auto-discover)**: l'indice assoluto preso da uno scan fatto a
+inizio giro **non è affidabile** per aprire chat una alla volta in un loop lungo. Serve
+verificare il match (confrontare nome/numero mostrato nel pannello appena aperto con quello
+atteso) o rifare uno scan fresco prima di ogni apertura.
+
+### Liste/etichette (barra filtri) — VERIFICATO, ma non è quello che serve
+
+Selettore: `div[role='tablist']`. Testo letto: `"Tutte\nDa leggere\n12\nPreferiti"`.
+
+Questi sono i **filtri standard** di WhatsApp Web (Tutte/Non lette/Preferiti), **non** le
+etichette personalizzate di WhatsApp Business (i tag custom assegnabili ai contatti). Il PoC
+verifica che esiste una barra filtri pilotabile su web, ma **NON verifica** se le etichette
+custom del negozio (se ne hanno) sono visibili/filtrabili da qui: resta un buco separato, da
+aprire a parte solo se il design ne avrà bisogno.
+
+### Riconoscere un gruppo — IPOTESI da validare, la regex ovvia non basta
+
+Euristica provata: cercare nel testo di header/pannello un pattern tipo "N partecipanti" / "N
+membri" / "N iscritti" (`(\d+)\s*(partecipant|membr|iscritt)`). **Recall bassa**: sulle 6 chat
+del campione che erano in realtà gruppi/liste aziendali, la regex ne ha segnalate
+correttamente solo **1/6**. Non ancora investigato se il testo reale del pannello gruppo usa
+una formulazione diversa o una struttura che la regex non intercetta.
+
+Segnale alternativo emerso dai dati: **l'assenza di numero leggibile nel pannello combinata
+con un nome di chat tutto-maiuscolo o collettivo** è stata, in pratica, un discriminante
+migliore della regex sui partecipanti — ma è un'osservazione post-hoc sul campione, non un
+selettore verificato. Da validare nel prossimo giro; l'icona avatar (tipicamente diversa tra
+gruppo e contatto singolo) non è stata ancora cercata come selettore.
+
+### Secondi per chat — VERIFICATO
+
+Media misurata: **5.258,6 ms/chat** (~5,3s), range 3.496–8.691 ms sul campione di 20. Scroll
+di 6 "pagine" da 800px: **3.927,5 ms totali** (~655ms a scroll). Le righe renderizzate nel DOM
+restano stabili (67 prima, 66 dopo): virtualizzazione, non cresce il totale renderizzato, la
+finestra visibile trasla soltanto.
+
+Totale chat dichiarate per **questo** numero (Primero), letto da `[role='grid'][aria-rowcount]`:
+**291** (misurato con uno script separato, stesso giorno). Stima: uno scan completo di 291
+chat a questo ritmo costerebbe **291 × 5,3s ≈ 26 minuti** — fattibile in un solo batch, non
+ore. **291 non è generalizzabile**: è il totale di questo numero specifico; il catalogo M0
+originale (27/07) aveva misurato 485 chat su un numero diverso.
+
+## Prossimo passo dopo PoC-4
+
+Lo Step 1b citato sopra (JS_TAIL/TICK_SEL/HISTORY_SEL sul pannello conversazione) resta
+un passo distinto, già coperto — PoC-4 ha misurato il **pannello info-contatto**, non quello.
+Ciò che resta aperto per la Fase A:
+1. **verifica del match** dopo apertura per indice (o riscan prima di ogni apertura), per
+   chiudere la trappola dello shift di indice;
+2. validare il discriminante "numero assente + nome tutto-maiuscolo/collettivo" per i gruppi
+   su un campione più grande, ed eventualmente cercare il selettore dell'icona avatar;
+3. verificare se le etichette custom di WhatsApp Business sono leggibili da web, solo se il
+   design della Fase A arriva a dipendere da quelle e non dai filtri standard.
