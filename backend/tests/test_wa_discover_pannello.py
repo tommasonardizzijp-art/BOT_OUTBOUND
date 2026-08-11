@@ -296,3 +296,53 @@ async def test_riordino_e_gruppo_non_sono_lo_stesso_esito():
         "un gruppo verificato deve essere salvabile: senza, la Fase A perde "
         "tutti i gruppi in silenzio"
     )
+
+
+# --- Header stale e iniziali dell'avatar (collaudo 11/08) ---
+
+def test_il_nome_si_cerca_fra_TUTTE_le_righe_dell_header():
+    """Due difetti veri, misurati sul DOM di Primero l'11/08.
+
+    1) Per un contatto senza foto profilo, WhatsApp mette le INIZIALI come primo
+       nodo di testo dell'header: leggendo solo la prima riga si confronta
+       'Jack Santini - Edicola Tiburtina' con 'JS'.
+    2) L'header resta quello della chat PRECEDENTE per qualche istante dopo il
+       click -- e su WhatsApp l'URL non cambia mai (resta web.whatsapp.com),
+       quindi il trucco usato dal motore Instagram (aspettare il cambio di URL)
+       qui non e' disponibile.
+
+    Cercare il titolo atteso fra TUTTE le righe risolve il primo caso e, per il
+    secondo, fa fallire il confronto finche' l'header e' davvero stale -- che e'
+    il comportamento voluto: si aspetta, non si accetta la persona sbagliata.
+    """
+    from app.services.wa_discover.pannello import titolo_da_header
+
+    header_con_iniziali = "JS\nJack Santini - Edicola Tiburtina\nonline"
+    assert titolo_da_header(header_con_iniziali, "Jack Santini - Edicola Tiburtina") \
+        == "Jack Santini - Edicola Tiburtina"
+
+
+def test_header_stale_non_combacia_col_titolo_atteso():
+    """Se l'header e' ancora quello della chat precedente, nessuna riga combacia:
+    la verifica deve fallire, non accontentarsi."""
+    from app.services.wa_discover.pannello import titolo_da_header
+
+    header_vecchio = "JS\nJack Santini - Edicola Tiburtina\nonline"
+    assert titolo_da_header(header_vecchio, "Luca Videomaker") != "Luca Videomaker"
+
+
+def test_senza_combaciare_ritorna_qualcosa_di_leggibile_per_il_log():
+    """Quando non combacia, il log deve dire COSA si e' aperto: 'JS' non aiuta a
+    capire, il nome si'."""
+    from app.services.wa_discover.pannello import titolo_da_header
+
+    trovato = titolo_da_header("JS\nJack Santini - Edicola Tiburtina\nonline",
+                               "Luca Videomaker")
+    assert trovato == "Jack Santini - Edicola Tiburtina"
+
+
+def test_header_vuoto_non_inventa_niente():
+    from app.services.wa_discover.pannello import titolo_da_header
+
+    assert titolo_da_header("", "Fulvio") is None
+    assert titolo_da_header(None, "Fulvio") is None

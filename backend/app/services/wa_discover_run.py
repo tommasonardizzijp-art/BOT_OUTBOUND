@@ -48,7 +48,7 @@ from app.services import bot_state_service, wa_profile_lock
 from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
 from app.services.wa_discover import classifica, pannello, salvataggio, sidebar
 from app.services.wa_discover.sincronizzazione import (
-    SOGLIA_DEFAULT, leggi_percentuale, puo_scansionare,
+    SOGLIA_DEFAULT, leggi_percentuale, lista_utilizzabile, puo_scansionare,
 )
 from app.utils.events import emit as emit_event
 
@@ -170,6 +170,23 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
         return esito
     logger.info(f"[WaDiscover] {number_id}: gate sync ok -- {motivo_sync}")
 
+    # SECONDA RETE, dopo il collaudo fallito dell'11/08: si scansiona solo con
+    # la sidebar scoperta. Un pannello rimasto aperto (Impostazioni, info
+    # contatto) riduce le righe esposte da 65 a 5 e impedisce a qualunque click
+    # di aprire una chat -- e non solleva nessun errore: il giro finisce "dopo
+    # stallo" con una manciata di chat su 291, che sembra un problema di
+    # scorrimento e invece e' una tenda davanti alla lista. Il gate qui sopra ha
+    # gia' il dovere di richiudere cio' che apre; questo controllo esiste perche'
+    # quel dovere puo' fallire, e fallire in silenzio e' il modo peggiore.
+    if not await lista_utilizzabile(page):
+        motivo = ("un pannello e' rimasto aperto sopra la lista chat: con la "
+                  "sidebar coperta lo scan vedrebbe una frazione delle chat e la "
+                  "dichiarerebbe completa")
+        logger.error(f"[WaDiscover] {number_id}: scan non avviato -- {motivo}")
+        emit_event(number_id, "wa_discover_skipped", motivo, level="error")
+        esito["motivo"] = "sidebar_coperta"
+        return esito
+
     # Il totale dichiarato si legge PRIMA di scorrere qualunque cosa: e' il
     # termine di paragone con cui, a fine giro, ci si accorge di una
     # raccolta parziale invece di chiamarla "completata".
@@ -272,7 +289,8 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
     return esito
 
 
-async def esegui_discover_run(number_id: str, *, soglia_sync: int = SOGLIA_DEFAULT) -> dict:
+async def esegui_discover_run(number_id: str, *, soglia_sync: int = SOGLIA_DEFAULT,
+                              headless: bool = True) -> dict:
     """Un giro di scansione Fase A per UN numero WhatsApp gia' onboardato.
 
     Governo del profilo ricalcato su wa_worker.esegui_mini_sessione (lock,
@@ -311,9 +329,25 @@ async def esegui_discover_run(number_id: str, *, soglia_sync: int = SOGLIA_DEFAU
             from app.browser.whatsapp_page import WhatsAppWebPage
             from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
 
-            async with _open_wa_browser(number_id, headless=True, proxy_url=proxy_url) as context:
+            async with _open_wa_browser(number_id, headless=headless,
+                                        proxy_url=proxy_url) as context:
                 page = await context.new_page()
-                await page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
+                # `commit` e non `domcontentloaded`, con timeout largo: misurato
+                # l'11/08 col PoC-5, il browser IN FINESTRA impiega 5-10s prima
+                # che la UI sia usabile e il goto con domcontentloaded a 30s
+                # (il default) FALLISCE. WhatsApp Web continua a caricare
+                # risorse ben oltre il primo rendering: si aspetta la comparsa
+                # della UI vera, con pazienza crescente, non un evento del
+                # documento.
+                await page.goto(WHATSAPP_WEB_URL, wait_until="commit", timeout=120_000)
+                for attesa_s in (3, 5, 10, 20, 30):
+                    await page.wait_for_timeout(attesa_s * 1000)
+                    pronta = await page.evaluate(
+                        "() => !!(document.querySelector('#pane-side') "
+                        "|| document.querySelector('canvas'))"
+                    )
+                    if pronta:
+                        break
 
                 pom = WhatsAppWebPage(page)
                 segnale = await pom.session_state()

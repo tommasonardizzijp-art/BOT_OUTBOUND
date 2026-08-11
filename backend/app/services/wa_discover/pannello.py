@@ -45,7 +45,7 @@ SEL_DRAWER_INFO = "[data-testid='drawer-right']"
 # _ATTESE_HEADER_S in inbox_browser.pagina: un'attesa fissa scartava come
 # "lista riordinata" righe in realta' corrette perche' il pannello arrivava
 # dopo 1-2s. Valori identici: stesso fenomeno, stessa soluzione gia' pagata.
-_ATTESE_HEADER_S = (0.5, 1.0, 1.5)
+_ATTESE_HEADER_S = (0.8, 1.5, 2.5, 3.0)
 # Il pannello info costa di piu' ad aprirsi dell'header (misurato PoC-4: 5,3s
 # medi, coda 3,5-8,7s): la progressione copre quella coda senza bloccare il
 # caso rapido, che esce alla prima lettura non vuota.
@@ -119,14 +119,36 @@ def numero_dal_pannello(testo: str | None) -> str | None:
     return None
 
 
-def _prima_riga(testo: str | None) -> str | None:
-    """La prima riga non vuota: l'header/il pannello portano il nome sulla
-    prima riga e sotto stato/descrizione, che non c'entrano col confronto."""
-    for riga in (testo or "").split("\n"):
-        riga = riga.strip()
-        if riga:
+def titolo_da_header(testo: str | None, atteso: str | None) -> str | None:
+    """Il nome della chat aperta, cercato fra TUTTE le righe dell'header.
+
+    Non "la prima riga", ed e' una correzione pagata sul campo (collaudo 11/08,
+    due difetti distinti che producevano lo stesso sintomo):
+
+    1. Per un contatto senza foto profilo WhatsApp mette le INIZIALI come primo
+       nodo di testo. Leggendo solo la prima riga si confrontava
+       'Jack Santini - Edicola Tiburtina' con 'JS', e la riga veniva scartata
+       come "si e' aperta un'altra persona".
+    2. L'header resta quello della chat PRECEDENTE per qualche istante dopo il
+       click. Su Instagram il motore aspetta il cambio di URL, ma su WhatsApp
+       l'URL non cambia mai (resta web.whatsapp.com, verificato): quel trucco
+       qui non e' disponibile.
+
+    Cercare l'atteso fra tutte le righe risolve il primo caso, e per il secondo
+    fa la cosa giusta: finche' l'header e' stale nessuna riga combacia, quindi
+    la verifica fallisce e si continua ad aspettare invece di accettare la
+    persona sbagliata.
+
+    Quando nulla combacia ritorna comunque la riga piu' lunga, che serve al log:
+    "aperto 'JS'" non dice niente a chi legge, "aperto 'Jack Santini'" si'.
+    """
+    righe = [r.strip() for r in (testo or "").split("\n") if r.strip()]
+    if not righe:
+        return None
+    for riga in righe:
+        if titolo_combacia(atteso, riga):
             return riga
-    return None
+    return max(righe, key=len)
 
 
 # Titoli delle righe attualmente nel DOM, per la risoluzione per CONTENUTO
@@ -224,7 +246,7 @@ async def apri_e_leggi(page, titolo_atteso: str | None) -> EsitoApertura:
     titolo_trovato = None
     for attesa_s in _ATTESE_HEADER_S:
         await page.wait_for_timeout(int(attesa_s * 1000))
-        candidato = _prima_riga(await page.evaluate(_JS_TESTO_ELEMENTO, SEL_HEADER))
+        candidato = titolo_da_header(await page.evaluate(_JS_TESTO_ELEMENTO, SEL_HEADER), titolo_atteso)
         if candidato:
             titolo_trovato = candidato
             if titolo_combacia(titolo_atteso, candidato):

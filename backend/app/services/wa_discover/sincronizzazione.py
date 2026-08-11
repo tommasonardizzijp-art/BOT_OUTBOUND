@@ -140,13 +140,63 @@ async def leggi_percentuale(page) -> int | None:
         logger.warning(f"[WaDiscover] lettura sincronizzazione fallita: {exc}")
         return None
     finally:
-        # Si richiude sempre, anche se la lettura e' fallita: lasciare
-        # Impostazioni aperto coprirebbe la lista chat per tutto il giro.
-        try:
-            await page.keyboard.press("Escape")
-            await page.wait_for_timeout(400)
-        except Exception:
-            pass
+        await _richiudi_pannello(page)
+
+
+# Quanti tentativi di chiusura prima di arrendersi. Uno solo NON basta: e' la
+# causa del collaudo fallito dell'11/08 (vedi _richiudi_pannello).
+_TENTATIVI_CHIUSURA = 4
+
+_JS_DRAWER_APERTI = """() => [...document.querySelectorAll('[data-testid]')]
+    .map(e => e.getAttribute('data-testid'))
+    .filter(t => t && t.startsWith('drawer'))"""
+
+
+async def _richiudi_pannello(page) -> bool:
+    """Riporta la pagina a uno stato pulito dopo aver aperto Impostazioni.
+
+    Prima si prova con Escape, che nel caso normale basta. Se non basta si
+    RICARICA la pagina, e non e' un accanimento: il collaudo dell'11/08 e' stato
+    perso interamente perche' il pannello restava aperto -- a volte navigando in
+    una sottopagina -- e con quel pannello davanti la sidebar espone una
+    frazione delle righe e nessun click apre una chat. Il gate scritto per
+    proteggere lo scan diventava la cosa che lo rompeva, in silenzio: il giro
+    finiva "dopo stallo" con 1 chat su 291, senza un solo errore.
+
+    Il reload costa 5-10 secondi UNA volta per giro (uno scan dura decine di
+    minuti) e garantisce cio' che nessuna sequenza di Escape puo' garantire: una
+    UI in stato iniziale. Si e' scelto un rimedio certo invece di un rimedio
+    elegante, perche' qui il modo di fallire e' invisibile.
+
+    NOTA su cosa NON usare come segnale: i `data-testid` che iniziano per
+    "drawer" NON dicono se un pannello e' aperto -- drawer-fullscreen,
+    drawer-left e drawer-middle sono presenti anche a UI pulita (misurato,
+    probe dell'11/08). Costruirci sopra un controllo produce un falso positivo
+    permanente: lo scan non parte mai.
+    """
+    try:
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(500)
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+    # Il reload e' la garanzia, non l'eccezione: dopo aver aperto un pannello
+    # non c'e' modo affidabile di sapere da fuori se si e' davvero richiuso.
+    try:
+        await page.reload(wait_until="commit", timeout=120_000)
+        for attesa_s in (3, 5, 10, 20):
+            await page.wait_for_timeout(attesa_s * 1000)
+            if await page.evaluate("() => !!document.querySelector('#pane-side')"):
+                return True
+        logger.error(
+            "[WaDiscover] dopo il reload la lista chat non e' ricomparsa: "
+            "lo scan non puo' partire su una pagina in questo stato")
+        return False
+    except Exception as exc:
+        logger.error(f"[WaDiscover] reload dopo il gate fallito: {exc}")
+        return False
 
 
 def puo_scansionare(percentuale: int | None, soglia: int = SOGLIA_DEFAULT) -> tuple[bool, str]:
@@ -160,3 +210,42 @@ def puo_scansionare(percentuale: int | None, soglia: int = SOGLIA_DEFAULT) -> tu
     return False, (f"sincronizzazione al {percentuale}%, sotto la soglia del {soglia}%: "
                    "scansionare ora raccoglierebbe una parte delle chat e la "
                    "dichiarerebbe completa")
+
+
+async def lista_utilizzabile(page) -> bool:
+    """True se la lista chat e' presente e non coperta da un pannello.
+
+    Il segnale e' FUNZIONALE, non strutturale: si guarda se #pane-side esiste e
+    se le sue righe sono raggiungibili da un click (elementFromPoint restituisce
+    un nodo dentro la lista, non un pannello sovrapposto). E' l'unica cosa che
+    conti davvero per lo scan.
+
+    Cosa NON usare, perche' gia' provato e sbagliato: i `data-testid` che
+    iniziano per "drawer" sono presenti anche a UI pulita (drawer-fullscreen,
+    drawer-left, drawer-middle -- misurato l'11/08). Un controllo costruito su
+    quelli non trova un pannello aperto: trova il DOM normale di WhatsApp, e
+    impedisce allo scan di partire per sempre.
+    """
+    try:
+        return bool(await page.evaluate("""() => {
+            const pane = document.querySelector('#pane-side');
+            if (!pane) return false;
+            const righe = pane.querySelectorAll("[role='row']");
+            if (!righe.length) return false;
+            // La prima riga con area visibile deve essere davvero in cima allo
+            // stack: se sopra c'e' un pannello, elementFromPoint restituisce
+            // quello e il click finirebbe li'.
+            for (const r of righe) {
+                const box = r.getBoundingClientRect();
+                if (box.width < 10 || box.height < 10) continue;
+                if (box.top < 0 || box.top > window.innerHeight - 20) continue;
+                const sopra = document.elementFromPoint(
+                    box.left + box.width / 2, box.top + box.height / 2);
+                return !!(sopra && pane.contains(sopra));
+            }
+            return false;
+        }"""))
+    except Exception:
+        # Non si riesce nemmeno a interrogare il DOM: non si dichiara
+        # utilizzabile cio' che non si e' potuto guardare.
+        return False
