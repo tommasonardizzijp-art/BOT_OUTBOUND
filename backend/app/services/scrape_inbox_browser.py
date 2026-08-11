@@ -31,13 +31,17 @@ from app.models.campaign import CampaignStatus
 from app.models.follower import Follower
 from app.services.bot_state_service import is_halted
 from app.services.inbox_browser.pagina import (
-    RigaVisibile, apri_riga, decidi_fine_lista, leggi_righe_visibili,
+    RigaVisibile, apri_riga, decidi_fine_lista, lancia, leggi_righe_visibili,
 )
 from app.services.inbox_browser.riconoscimento import ArchivioNomi, ContatoreZona
 from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
 from app.services.inbox_browser.salvataggio import DatiContatto, salva_contatto
+from app.services.inbox_browser.segnalibro import (
+    nuovo_cursore, riga_da_saltare, soglia_in_ore,
+)
 from app.services.inbox_browser.testo import (
-    e_segnaposto, estrai_data_thread, estrai_ultimo_messaggio, normalizza_nome,
+    analizza_riga_lista, e_segnaposto, estrai_data_thread, estrai_ultimo_messaggio,
+    eta_riga_in_ore, normalizza_nome,
 )
 from app.services.scrape_inbox import _single_inbox_account   # sola lettura DB
 from app.services.scraper import is_challenge_exception, isolate_challenged_account
@@ -174,6 +178,23 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
         contatore = ContatoreZona()
 
         drained = False
+        segnalibro_esaurito = False
+
+        # Modalita' segnalibro (Task 7-8): attributo RUNTIME impostato dal
+        # chiamante (Task 9), mai persistito — vale per una sessione sola.
+        # `soglia` e' calcolata una volta sola all'ingresso: il cursore non
+        # cambia durante la sessione corrente (lo aggiorna solo questa
+        # sessione, a fine giro, per la PROSSIMA), quindi ricalcolarla ogni
+        # giro non aggiungerebbe nulla.
+        salta_lavorate = bool(getattr(campaign, "inbox_salta_lavorate", False))
+        soglia = soglia_in_ore(getattr(campaign, "inbox_cursor_at", None), datetime.utcnow())
+        if salta_lavorate and soglia is None:
+            logger.info("[InboxBrowser] segnalibro chiesto ma nessun cursore: si legge tutto")
+        if salta_lavorate and soglia is not None:
+            emit_event(campaign_id, "scrape_start",
+                       f"Modalita' segnalibro: si attraversa senza aprire tutto cio' che e' "
+                       f"piu' recente di {soglia / 24:.1f} giorni fa")
+        lanci_a_vuoto = 0
 
         # Righe accumulate dal campionamento DURANTE il gesto di scorrimento
         # (Task 4a): `decidi_fine_lista` ora legge la lista mentre scorre,
@@ -218,6 +239,9 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                 await raccogli(await leggi_righe_visibili(page, LINGUA))
             righe, righe_del_giro = righe_del_giro, []
 
+            righe_incontrate = 0
+            righe_saltate_segnalibro = 0
+
             for riga in righe:
                 esito_stop = await _deve_fermarsi()
                 if esito_stop == "halted":
@@ -242,6 +266,14 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                 if chiave:
                     viste_in_sessione.add(chiave)
 
+                righe_incontrate += 1
+                analizzata = analizza_riga_lista(riga.testo_grezzo, LINGUA)
+                if riga_da_saltare(analizzata.data_relativa, soglia, salta_lavorate):
+                    # Zona gia' lavorata: si attraversa e basta, niente
+                    # decisione, niente apertura, niente contatore di zona.
+                    righe_saltate_segnalibro += 1
+                    continue
+
                 riconosciuta_prima = archivio.e_riconosciuto(riga.nome)
                 ha_aperto = decide_se_aprire(riga.nome, archivio, contatore.zona)
                 if ha_aperto:
@@ -261,13 +293,35 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                         )
                         esito = await salva_contatto(db, campaign_id, dati)
                         archivio.aggiungi(riga.nome)
+                        # Il cursore segna quanto in basso si e' arrivati:
+                        # avanza per OGNI riga davvero lavorata (aperta e
+                        # verificata), non solo per i contatti nuovi — anche
+                        # un contatto gia' noto ma appena riaggiornato e'
+                        # comunque un punto vero della lista attraversato.
+                        eta = eta_riga_in_ore(analizzata.data_relativa, LINGUA)
+                        campaign.inbox_cursor_at = nuovo_cursore(
+                            campaign.inbox_cursor_at, eta, datetime.utcnow())
+                        campaign.inbox_cursor_updated_at = datetime.utcnow()
                         if esito == "creato":
                             already += 1
                             nuovi_in_sessione += 1
                             since_break += 1
                             campaign.total_followers = already
                             campaign.updated_at = datetime.utcnow()
-                            await db.commit()
+                        # Commit SEMPRE, non solo su 'creato'. La sessione ha
+                        # autoflush di default, quindi il prossimo
+                        # `_deve_fermarsi()` (db.refresh su ogni riga/giro)
+                        # avrebbe comunque flushato il cursore prima di
+                        # rileggerlo — verificato con un test dedicato che
+                        # esercita esattamente questo percorso (esito
+                        # 'aggiornato', nessun altro punto di commit prima
+                        # della fine sessione): il valore sopravvive anche
+                        # senza questo commit esplicito. Lo si fa comunque per
+                        # non dipendere da quel dettaglio implicito — un
+                        # domani con `autoflush=False` la stessa modifica
+                        # sparirebbe in silenzio.
+                        await db.commit()
+                        if esito == "creato":
                             emit_event(campaign_id, "scrape_batch",
                                        f"Inbox: {already}" + (f"/{campaign.list_target}" if campaign.list_target else ""))
                     # username None (verifica post-click fallita, o profilo sparito):
@@ -299,6 +353,33 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                 drained = nuovi_in_sessione == 0
                 break
 
+            # Se in questo giro non si e' fatto altro che saltare (e ce n'era
+            # almeno una da valutare), si sta attraversando la zona gia'
+            # lavorata: si copre distanza con un lancio invece che con uno
+            # scorrimento che campiona. La lettura qui non serve — per
+            # definizione quelle righe non vanno aperte — quindi il gesto
+            # puo' essere lungo. `righe_incontrate == 0` (niente di nuovo
+            # trovato: tutto gia' in viste_in_sessione) non conta come "solo
+            # saltate": ricade nel ramo normale sotto, che usa decidi_fine_lista
+            # per accorgersi se la lista e' davvero finita o solo virtualizzata
+            # oltre cio' che si e' gia' visto.
+            solo_saltate = (
+                salta_lavorate and righe_incontrate > 0
+                and righe_saltate_segnalibro == righe_incontrate
+            )
+            if solo_saltate:
+                lanci_a_vuoto += 1
+                if lanci_a_vuoto >= 40:
+                    logger.info(
+                        f"[InboxBrowser] 40 lanci senza incontrare una riga da lavorare: "
+                        f"la soglia del segnalibro ({soglia:.0f}h) copre tutta la lista"
+                    )
+                    segnalibro_esaurito = True
+                    break
+                await lancia(page)
+                continue
+            lanci_a_vuoto = 0
+
             # Esaurite le righe di questo giro: decidi_fine_lista fa lei scroll +
             # attese a pazienza crescente + la decisione finale (Task 8, gia'
             # corretta in review per contare i falliti nella FINESTRA di attesa,
@@ -325,7 +406,12 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
         campaign.status = CampaignStatus.ready
         campaign.updated_at = datetime.utcnow()
         await db.commit()
-        if drained:
+        if segnalibro_esaurito:
+            emit_event(campaign_id, "scrape_complete",
+                       "Modalita' segnalibro: nessuna chat piu' vecchia del segnalibro, "
+                       "niente da raccogliere. Rilancia senza la spunta per rivedere "
+                       "anche le chat piu' recenti.", level="warn")
+        elif drained:
             emit_event(campaign_id, "scrape_complete",
                        f"Nessun contatto nuovo in questa sessione ({already} totali in lista) — "
                        "rilanciare non serve finché non arrivano nuovi DM in entrata.", level="warn")
