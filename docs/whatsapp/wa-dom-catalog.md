@@ -261,14 +261,97 @@ chat a questo ritmo costerebbe **291 × 5,3s ≈ 26 minuti** — fattibile in un
 ore. **291 non è generalizzabile**: è il totale di questo numero specifico; il catalogo M0
 originale (27/07) aveva misurato 485 chat su un numero diverso.
 
-## Prossimo passo dopo PoC-4
+## PoC-5 — etichette Business, Liste, e quanto costa NON aprire una chat (11/08/2026)
+
+Script: `backend/scripts/poc_wa/poc5_etichette.py` (sola lettura, non headless). Due giri:
+`PRIMERO TEST` (WhatsApp **normale**) e il numero personale di Tommaso (WhatsApp
+**Business**, confermato dai marcatori: icona `storefront`, voci `Strumenti` e `Pubblicizza`
+in sidebar — Primero non le ha).
+
+### Le etichette Business esistono su Web, ma non dove le cercava il PoC-4
+
+Il primo giro ha censito solo ciò che era **già visibile** in sidebar e ha concluso
+"nessuna etichetta". **Conclusione sbagliata**, corretta nello stesso pomeriggio da un
+secondo giro che clicca le voci candidate e censisce **solo il DOM comparso dopo il click**
+(differenza prima/dopo, non l'intera pagina — altrimenti si raccolgono i nomi delle chat e
+si crede di aver guardato dentro un menu):
+
+| Percorso | Cosa compare |
+|---|---|
+| `Impostazioni` → | **"Strumenti business — Risposte rapide, etichette, catalogo"** |
+| `Strumenti` → | **"Liste — Gestisci persone e gruppi"** (icona `list-people`), Catalogo, Profilo business, Risposte rapide |
+| `Menu` → | Strumenti business, Liste, Catalogo, Nuovo gruppo, Messaggi importanti |
+
+Lezione di metodo, non aneddoto: **un menu chiuso è un buco nella misura, non un'assenza.**
+Un censimento della sola parte visibile risponde "non esiste" a una domanda a cui non ha
+guardato, ed è la stessa forma d'errore delle coordinate DOM cablate.
+
+### Perché il design "una lista per volta" (spec §5.3) resta comunque scartato
+
+Le etichette **esistono** nella UI Web, ma il perimetro per lista non regge lo stesso:
+
+1. **Primero è WhatsApp normale, non Business** — su quel numero le etichette non
+   esisteranno mai. È il cliente su cui si lavora oggi. (I clienti futuri saranno "quasi
+   tutti Business", per stima di Tommaso: quindi il filtro è un'estensione sensata, non una
+   fondazione.)
+2. **Le Liste non si sincronizzano su Web**: Tommaso le ha piene sul telefono, su Web
+   risultano **vuote** (osservato dal vivo l'11/08 su entrambi i numeri;
+   `candidati_lista` vuoto in tutti i giri, mentre la voce "Nuova lista" è presente).
+
+Conseguenza operativa: la Fase A scansiona **l'intera sidebar**, e il sottoinsieme scelto
+dall'operatore si esprime **in Fase B approvando** (lo spec lo prevede già: "selezionare È
+l'approvazione"). Il filtro per etichetta resta lavoro futuro, con il percorso ora noto.
+
+### Barre filtri: standard su entrambi, e diverse fra loro
+
+| Numero | `div[role='tablist']` |
+|---|---|
+| PRIMERO TEST | `Tutte / Da leggere / Preferiti` |
+| personale (Business) | `Tutte / Da leggere / Gruppi` |
+
+Sono i filtri **standard**, non le etichette (conferma del sospetto sollevato dopo PoC-4).
+Il tablist contiene anche i **badge numerici** dei non letti (`11`, `58`, `22`) mescolati
+alle voci: chi legge quel testo deve scartare i token puramente numerici, o scambia un
+contatore per una voce di menu.
+
+### Il titolo È il numero in una chat su tre — e quelle non costano 5,3s
+
+`ChatRow.title_is_number` (già esistente nel POM) misurato sulle righe in DOM:
+
+| Numero | titolo = numero | totale chat (`aria-rowcount`) |
+|---|---|---|
+| PRIMERO TEST | **26/67 = 39%** | 291 |
+| personale | 9/66 = 14% | 485 |
+
+**È il dato che ridimensiona il costo dello scan.** I 5,3s/chat del PoC-4 sono il costo di
+**aprire il pannello info**; una chat che ha già il numero nel titolo si risolve dalla sola
+sidebar. Su Primero significa che ~2 chat su 5 escono dal conto: lo scan completo sta
+sotto i 20 minuti, non 26.
+
+⚠️ **P12**: quel numero **non va salvato in chiaro** in `chat_title` (stessa regola che
+`WaContact.chat_title` già applica, `app/models/wa.py`) — va cifrato in `encrypted_phone` +
+`phone_hmac`. La percentuale alta rende questo un caso frequente, non un bordo.
+
+### Costo di avvio, misurato per sbaglio ma utile
+
+Il browser **in finestra** (non headless) impiega **5-10s** prima che la UI sia utilizzabile,
+e `page.goto(..., wait_until='domcontentloaded')` con il default di 30s **fallisce**: il
+primo giro è morto lì. Serve `wait_until='commit'` + attesa a pazienza crescente sulla
+comparsa di `#pane-side`.
+
+## Prossimo passo dopo PoC-4/PoC-5
 
 Lo Step 1b citato sopra (JS_TAIL/TICK_SEL/HISTORY_SEL sul pannello conversazione) resta
 un passo distinto, già coperto — PoC-4 ha misurato il **pannello info-contatto**, non quello.
 Ciò che resta aperto per la Fase A:
 1. **verifica del match** dopo apertura per indice (o riscan prima di ogni apertura), per
-   chiudere la trappola dello shift di indice;
+   chiudere la trappola dello shift di indice — il motore inbox Instagram l'ha già risolta
+   ri-risolvendo la riga **per contenuto** subito prima del click
+   (`app/services/inbox_browser/pagina.py`, `apri_riga`): da riusare, non da reinventare;
 2. validare il discriminante "numero assente + nome tutto-maiuscolo/collettivo" per i gruppi
-   su un campione più grande, ed eventualmente cercare il selettore dell'icona avatar;
-3. verificare se le etichette custom di WhatsApp Business sono leggibili da web, solo se il
-   design della Fase A arriva a dipendere da quelle e non dai filtri standard.
+   su un campione più grande, ed eventualmente cercare il selettore dell'icona avatar. I
+   titoli veri di Primero lo sostengono: `AZIENDA AGRICOLA PRIMERO`, `CONSEGNE DOMICILIO`,
+   `ORDINI VENDITORI PRIMERO`, `SPEDIZIONI`, `( INFO E BROADCAST)AMICI DELLA GALASSIA`;
+3. ~~verificare se le etichette custom di WhatsApp Business sono leggibili da web~~ —
+   **fatto in PoC-5**: esistono (`Impostazioni → Strumenti business`), ma il design non ci si
+   appoggia, per i due motivi sopra.
