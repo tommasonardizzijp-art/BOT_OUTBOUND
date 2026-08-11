@@ -859,8 +859,17 @@ concorrenti sulla stessa chat).
 - Test: `backend/tests/test_wa_discover_salvataggio.py`
 
 **Interfaces:**
-- Consuma: `classifica.RigaScoperta`, modello `WaDiscoveredChat`.
+- Consuma: `classifica.RigaScoperta`, `classifica.etichetta_visibile`, modello `WaDiscoveredChat`.
 - Produce: `async salva_scoperta(db, tenant_id, number_id, riga) -> str` (`'creata'|'aggiornata'`).
+
+⚠️ **Obbligatorio: `chat_title` si scrive passando da `etichetta_visibile`, mai dal titolo
+grezzo.** Esistono titoli che superano `titolo_e_numero` ma da cui `numero_dal_titolo` non
+ricava nulla (misurati: `+39 342 146 0077 99 88 77`, `123456789012345678`,
+`00 12 34 56 78 90 12 34 56 78` — troppe cifre per E.164). Scritti alla lettera darebbero
+una riga con `chat_title=None` **e** `phone_hmac=None`: entrambe le unique sono cieche sui
+NULL, quindi quella riga si duplicherebbe a ogni ri-scansione senza avere identità.
+`etichetta_visibile` restituisce una forma mascherata (`+39•••••077`) che rispetta P12 ed è
+deterministica, quindi la unique sul titolo torna a funzionare.
 
 **Il test che conta più di tutti:**
 
