@@ -35,7 +35,18 @@ TIPO_IGNOTO = "ignoto"
 
 @dataclass
 class RigaScoperta:
-    titolo: str | None          # None quando il titolo E' il numero (P12)
+    """Una chat scoperta, prima che il salvataggio decida come scriverla.
+
+    `titolo` e' il titolo GREZZO letto dalla sidebar, anche quando e' un numero
+    di telefono: NON va azzerato qui per rispettare P12. La mascheratura e'
+    responsabilita' di `etichetta_visibile`, che il salvataggio applica sempre.
+    Azzerarlo a monte butterebbe via l'informazione prima che qualcuno possa
+    mascherarla, e la riga finirebbe a DB con chat_title NULL e phone_hmac NULL
+    -- senza identita' per nessuna delle due unique, quindi duplicata a ogni
+    ri-scansione (vedi wa_discover/salvataggio.py). P12 si rispetta scrivendo
+    la maschera, non perdendo il dato.
+    """
+    titolo: str | None          # titolo grezzo dalla sidebar; maschera a valle
     numero: str | None          # E.164, gia' normalizzato
     numero_leggibile: bool
     tipo: str                   # TIPO_*
@@ -97,6 +108,22 @@ def etichetta_visibile(titolo: str | None, numero: str | None) -> str | None:
     # si maschera quello (forma canonica, stabile fra scansioni); altrimenti si
     # maschera il titolo grezzo, che e' comunque meglio di una riga anonima.
     return mask_phone(numero or t)
+
+
+def e_etichetta_mascherata(etichetta: str | None) -> bool:
+    """L'etichetta e' un segnaposto (numero mascherato), non un nome vero.
+
+    Serve alla fusione: un contatto non ancora in rubrica ha il numero come
+    titolo e viene salvato come '+39.....077'; quando il cliente lo salva in
+    rubrica, la ri-scansione porta il nome vero. Senza distinguere le due cose,
+    la regola "integra, non sovrascrive" terrebbe la maschera per sempre e in
+    Fase B l'operatore approverebbe una lista di maschere invece di nomi.
+
+    Il riconoscimento e' sulla forma prodotta da mask_phone (prefisso, puntini,
+    ultime cifre): non si tenta di indovinare altro.
+    """
+    testo = (etichetta or "").strip()
+    return bool(testo) and "•" in testo
 
 
 def tipo_da_segnali(*, numero_leggibile: bool, testo_pannello: str | None,

@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import re
 
+from loguru import logger
+
 # Una percentuale plausibile: 0-100. Il filtro sul range non e' pedanteria --
 # 'IT01879020517A2026%' e' un nome di file vero visto nella sidebar, e senza
 # limite superiore diventerebbe una sincronizzazione al 2026%.
@@ -96,6 +98,55 @@ def percentuale_da_testi(testi: list[str] | None) -> int | None:
             if valore is not None:
                 return valore
     return None
+
+
+# Il pannello con la percentuale sta DENTRO Impostazioni: nella sidebar nuda
+# non c'e' (verificato nel PoC-5 -- il primo censimento, che guardava solo cio'
+# che era gia' visibile, non trovo' nessuna percentuale; comparve solo dopo il
+# click su Impostazioni). Leggere document.body.innerText senza aprire nulla
+# quindi non trova mai niente: il gate direbbe sempre "non lo so" e lascerebbe
+# sempre passare, cioe' non sarebbe un gate.
+_SEL_IMPOSTAZIONI = "[aria-label='Impostazioni'], [aria-label='Settings']"
+_JS_TESTI_PAGINA = """() => [...document.querySelectorAll('span, div, p')]
+    .filter(e => e.children.length === 0)
+    .map(e => (e.textContent || '').trim())
+    .filter(t => t && t.length < 200)"""
+
+
+async def leggi_percentuale(page) -> int | None:
+    """Apre Impostazioni, legge la percentuale di sincronizzazione, richiude.
+
+    Sola lettura: aprire un pannello non modifica niente. Se Impostazioni non
+    si apre (o non espone la percentuale) si ritorna None, che `puo_scansionare`
+    tratta come "non lo so" e non come "fermo" -- ma il chiamante deve sapere
+    che quel None puo' voler dire tre cose diverse: sincronizzazione finita,
+    pannello non trovato, oppure UI cambiata. Il motivo restituito dal gate lo
+    dichiara, ed e' il primo posto da guardare se una raccolta esce corta.
+    """
+    try:
+        voce = page.locator(_SEL_IMPOSTAZIONI).first
+        if not await voce.count():
+            logger.warning(
+                "[WaDiscover] voce Impostazioni non trovata: percentuale di "
+                "sincronizzazione non leggibile"
+            )
+            return None
+        await voce.click(timeout=4000)
+        await page.wait_for_timeout(1500)
+        testi = await page.evaluate(_JS_TESTI_PAGINA)
+        percentuale = percentuale_da_testi(testi)
+        return percentuale
+    except Exception as exc:
+        logger.warning(f"[WaDiscover] lettura sincronizzazione fallita: {exc}")
+        return None
+    finally:
+        # Si richiude sempre, anche se la lettura e' fallita: lasciare
+        # Impostazioni aperto coprirebbe la lista chat per tutto il giro.
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(400)
+        except Exception:
+            pass
 
 
 def puo_scansionare(percentuale: int | None, soglia: int = SOGLIA_DEFAULT) -> tuple[bool, str]:
