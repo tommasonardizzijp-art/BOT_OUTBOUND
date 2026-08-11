@@ -47,9 +47,23 @@ from app.services.inbox_browser.testo import (
     analizza_riga_lista, estrai_username_thread, normalizza_nome,
 )
 
-# Sotto una schermata: sopra il buffer renderizzato si perdono righe in silenzio.
-PASSO_SCROLL_MIN = 0.6
-PASSO_SCROLL_MAX = 0.8
+# Il passo non e' piu' limitato dal buffer: `scorri_leggendo` campiona durante
+# il gesto (vedi PX_FRA_LETTURE), quindi nessuna riga passa senza essere vista.
+# Un gesto umano misurato copre da 6 a 25 schermate; qui si resta a 2-4, che
+# gia' dimezza il numero di giri e quindi le righe riesaminate (Task 2).
+# USATE SOLO da `scorri_leggendo`: `scorri` (senza campionamento) ha le sue
+# costanti separate qui sotto apposta, per non far ereditare un passo grande
+# senza lettura a chi la chiama ancora direttamente (scripts diagnostici, fra
+# cui l'harness di misura del Task 12 — che in Fase B scrive su un account di
+# produzione: un passo grande e cieco li' significherebbe perdere contatti
+# veri in silenzio, esattamente il difetto che questo task elimina altrove).
+PASSO_SCROLL_MIN = 2.0
+PASSO_SCROLL_MAX = 4.0
+
+# Sotto una schermata: senza campionamento, sopra il buffer renderizzato le
+# righe si perdono in silenzio. Usate solo da `scorri`.
+PASSO_SCROLL_SENZA_LETTURA_MIN = 0.6
+PASSO_SCROLL_SENZA_LETTURA_MAX = 0.8
 
 # Il nome del thread sta nella parte SINISTRA della colonna di destra (misurato:
 # x=544 con bordo a 471 e finestra larga 1280). Oltre questa frazione ci sono i
@@ -519,20 +533,73 @@ async def apri_riga(
     return None
 
 
+# Ogni quanti pixel di scorrimento si rilegge la lista. Un terzo del buffer
+# renderizzato (~13 righe da 72px con finestra alta 940): abbastanza fitto da
+# non lasciar passare nessuna riga, abbastanza raro da non pesare. Leggere costa
+# lo 0.06% del tempo di sessione (misurato l'11/08: 1.0s su 1727).
+PX_FRA_LETTURE = 250
+
+
+async def scorri_leggendo(page, lingua: str, su_righe) -> StatoScorrimento:
+    """Un gesto di scorrimento che campiona la lista MENTRE si muove.
+
+    Il limite di 0.6-0.8 schermate per gesto non veniva da Instagram: veniva
+    dal fatto che le righe si leggevano solo a gesto finito, e quelle
+    attraversate nel mezzo non erano piu' nel DOM. Campionando ogni
+    PX_FRA_LETTURE pixel il limite cade, e il gesto puo' andare alla velocita'
+    misurata su una mano vera.
+
+    `su_righe` viene chiamata con le righe viste a ogni campionamento; spetta
+    al chiamante deduplicare (il motore lo fa con la memoria di sessione). Il
+    primo campionamento avviene PRIMA di muovere la rotella: la funzione non fa
+    affidamento su una lettura precedente del chiamante, altrimenti le righe
+    visibili nella posizione di partenza sfuggirebbero a chi la chiama isolata.
+    """
+    await su_righe(await leggi_righe_visibili(page, lingua))
+
+    _righe, _viewport, bordo = await _leggi_righe_grezze(page)
+    candidati = await page.evaluate(_JS_CANDIDATI)
+    indice = scegli_contenitore(candidati, bordo)
+    if indice is None:
+        logger.warning(
+            f"[InboxBrowser] contenitore della lista non riconosciuto "
+            f"(bordo {bordo}) — nessuno scorrimento"
+        )
+        return StatoScorrimento(altezza=None, al_fondo=False)
+
+    box = candidati[indice]
+    frazione = random.uniform(PASSO_SCROLL_MIN, PASSO_SCROLL_MAX)
+    px = int(box["clientHeight"] * frazione)
+
+    x = box["left"] + box["w"] * random.uniform(0.3, 0.7)
+    y = box["top"] + box["h"] * random.uniform(0.3, 0.7)
+    await page.mouse.move(x, y, steps=random.randint(5, 15))
+
+    percorso_da_ultima_lettura = 0
+    for delta, pausa in piano_scroll(px):
+        await page.mouse.wheel(0, delta)
+        await page.wait_for_timeout(int(pausa * 1000))
+        percorso_da_ultima_lettura += abs(delta)
+        if percorso_da_ultima_lettura >= PX_FRA_LETTURE:
+            percorso_da_ultima_lettura = 0
+            await su_righe(await leggi_righe_visibili(page, lingua))
+
+    await su_righe(await leggi_righe_visibili(page, lingua))
+
+    stato = await page.evaluate(_JS_STATO_CONTENITORE, indice)
+    if stato is None:
+        return StatoScorrimento(altezza=None, al_fondo=False)
+    return StatoScorrimento(altezza=stato["altezza"], al_fondo=stato["alFondo"])
+
+
 async def scorri(page) -> StatoScorrimento:
-    """Un passo di scorrimento, sempre inferiore a una schermata.
+    """Un passo di scorrimento SENZA campionamento delle righe.
 
-    Si scorre con la ROTELLA sul contenitore della lista, non assegnando
-    `scrollTop`. Due motivi, tutti e due misurati il 10/08:
-
-    1. l'assegnazione diretta e' un salto istantaneo di mezza schermata, una
-       firma che nessun dito produce; la rotella genera la sequenza di eventi
-       wheel che un trackpad genererebbe davvero (vedi `piano_scroll`);
-    2. il contenitore va scelto, non indovinato: a chat aperta il pannello
-       della conversazione ha lo scrollHeight piu' grande, e la versione
-       precedente finiva per scrollare quello — lista ferma per sempre,
-       nessun errore, campagna chiusa come "piantata" con migliaia di chat
-       mai lette.
+    Il ciclo del motore non la usa piu' (vedi `decidi_fine_lista`, che scorre
+    con `scorri_leggendo` per non perdere le righe attraversate): resta per gli
+    script diagnostici (`scripts/supervisione_inbox_browser.py`,
+    `scripts/probe_inbox_web_apri_riga.py`) che la chiamano direttamente e non
+    hanno bisogno di raccogliere righe, solo di far avanzare la lista.
     """
     _righe, _viewport, bordo = await _leggi_righe_grezze(page)
     candidati = await page.evaluate(_JS_CANDIDATI)
@@ -545,11 +612,9 @@ async def scorri(page) -> StatoScorrimento:
         return StatoScorrimento(altezza=None, al_fondo=False)
 
     box = candidati[indice]
-    frazione = random.uniform(PASSO_SCROLL_MIN, PASSO_SCROLL_MAX)
+    frazione = random.uniform(PASSO_SCROLL_SENZA_LETTURA_MIN, PASSO_SCROLL_SENZA_LETTURA_MAX)
     px = int(box["clientHeight"] * frazione)
 
-    # Il puntatore deve stare SOPRA la lista: la rotella scorre l'elemento
-    # sotto il mouse, non quello "selezionato".
     x = box["left"] + box["w"] * random.uniform(0.3, 0.7)
     y = box["top"] + box["h"] * random.uniform(0.3, 0.7)
     await page.mouse.move(x, y, steps=random.randint(5, 15))
@@ -582,7 +647,7 @@ def decidi_da_segnali(
     return "fine" if al_fondo else "piantato"
 
 
-async def decidi_fine_lista(page, falliti_inbox: list) -> str:
+async def decidi_fine_lista(page, falliti_inbox: list, lingua: str, su_righe) -> str:
     """Un giro di scorrimento con attese a pazienza crescente: se l'altezza non
     cresce con NESSUna delle attese, solo allora si dichiarano esaurite (le
     attese sono qui, non nella funzione pura, perche' richiedono il browser).
@@ -592,13 +657,21 @@ async def decidi_fine_lista(page, falliti_inbox: list) -> str:
     misura solo il DELTA da quando si e' entrati in questa chiamata, altrimenti
     un fallimento isolato all'inizio della sessione marcherebbe 'piantato'
     ogni fine-lista successiva per il resto della sessione.
+
+    Lo scorrimento usa `scorri_leggendo`, non un `scorri` cieco: e' questa
+    funzione che compie il vero avanzamento della lista nel ciclo del motore
+    (il chiamante processa solo le righe che `su_righe` accumula), quindi e'
+    qui che le righe attraversate andrebbero perse in silenzio se il gesto non
+    campionasse durante il movimento. `lingua` e `su_righe` sono obbligatori
+    apposta: un default silenzioso che dimentica la lettura sarebbe il tipo di
+    errore che questa funzione esiste per evitare.
     """
     baseline_falliti = len(falliti_inbox)
-    stato = await scorri(page)
+    stato = await scorri_leggendo(page, lingua, su_righe)
     altezza_prima = stato.altezza
     for attesa_s in ATTESE_S:
         await page.wait_for_timeout(int(attesa_s * 1000))
-        stato = await scorri(page)
+        stato = await scorri_leggendo(page, lingua, su_righe)
         if stato.altezza is not None and altezza_prima is not None and stato.altezza > altezza_prima:
             return "continua"
         altezza_prima = stato.altezza

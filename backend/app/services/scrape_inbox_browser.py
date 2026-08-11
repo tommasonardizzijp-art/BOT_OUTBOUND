@@ -31,7 +31,7 @@ from app.models.campaign import CampaignStatus
 from app.models.follower import Follower
 from app.services.bot_state_service import is_halted
 from app.services.inbox_browser.pagina import (
-    apri_riga, decidi_fine_lista, leggi_righe_visibili,
+    RigaVisibile, apri_riga, decidi_fine_lista, leggi_righe_visibili,
 )
 from app.services.inbox_browser.riconoscimento import ArchivioNomi, ContatoreZona
 from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
@@ -175,6 +175,35 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
 
         drained = False
 
+        # Righe accumulate dal campionamento DURANTE il gesto di scorrimento
+        # (Task 4a): `decidi_fine_lista` ora legge la lista mentre scorre,
+        # invece di scorrere alla cieca e lasciare che il giro successivo
+        # rilegga da capo. Sul primo giro e' vuoto: nessuno scorrimento e'
+        # ancora avvenuto, quindi si legge la posizione di partenza a parte.
+        #
+        # Le righe campionate nel PRIMO scorrimento di `decidi_fine_lista`
+        # possono restare in coda fino a ~31s prima di essere processate, se
+        # servono tutti i retry di ATTESE_S per dichiarare "continua". Prima
+        # di Task 4a la finestra fra lettura e click era di un giro solo. Il
+        # rischio esiste gia' ed e' gestito: `apri_riga` ri-risolve la riga
+        # per NOME al momento del click, non per indice DOM (vedi la sua
+        # docstring) — una riga stantia diventa "non trovata, riprovo al
+        # giro dopo", mai un click sulla persona sbagliata.
+        righe_del_giro: list[RigaVisibile] = []
+
+        async def raccogli(righe_viste: list[RigaVisibile]) -> None:
+            for r in righe_viste:
+                chiave = normalizza_nome(r.nome)
+                # Senza chiave (es. nome fatto solo di emoji, che
+                # normalizza_nome scarta) non si puo' sapere se e' gia' stata
+                # vista: va trattata come nuova SEMPRE, stesso contratto di
+                # `gia_esaminata` (Task 2) — il contrario la zittirebbe per
+                # tutta la sessione, bug trovato dal QA su un nome-solo-emoji.
+                if not chiave or chiave not in viste_in_sessione:
+                    righe_del_giro.append(r)
+
+        lista_esaurita = False
+
         while True:
             esito_stop = await _deve_fermarsi()
             if esito_stop == "halted":
@@ -185,7 +214,10 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                 logger.info(f"[InboxBrowser] Target {campaign.list_target} raggiunto ({already})")
                 break
 
-            righe = await leggi_righe_visibili(page, LINGUA)
+            if not righe_del_giro:
+                await raccogli(await leggi_righe_visibili(page, LINGUA))
+            righe, righe_del_giro = righe_del_giro, []
+
             for riga in righe:
                 esito_stop = await _deve_fermarsi()
                 if esito_stop == "halted":
@@ -260,20 +292,35 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                     emit_event(campaign_id, "scrape_break", f"Pausa inbox {int(minutes)} min dopo {already}")
                     return seconds
 
-            # Esaurite le righe visibili in questo giro: decidi_fine_lista fa lei
-            # scroll + attese a pazienza crescente + la decisione finale (Task 8,
-            # gia' corretta in review per contare i falliti nella FINESTRA di
-            # attesa, non cumulativi di sessione — non reimplementare qui).
-            decisione = await decidi_fine_lista(page, falliti_inbox)
+            if lista_esaurita:
+                # Ultimo giro gia' concesso dopo "fine" (vedi sotto): le righe
+                # scoperte dal gesto che ha portato alla fine lista sono state
+                # processate qui sopra. Nessun altro scroll da fare.
+                drained = nuovi_in_sessione == 0
+                break
+
+            # Esaurite le righe di questo giro: decidi_fine_lista fa lei scroll +
+            # attese a pazienza crescente + la decisione finale (Task 8, gia'
+            # corretta in review per contare i falliti nella FINESTRA di attesa,
+            # non cumulativi di sessione — non reimplementare qui). Lo
+            # scorrimento campiona le righe che attraversa (Task 4a) e le versa
+            # in `raccogli`: il giro successivo le processa senza rileggere da
+            # capo — e senza aver perso quelle di mezzo che il vecchio scroll
+            # cieco lasciava fuori dal DOM virtualizzato.
+            decisione = await decidi_fine_lista(page, falliti_inbox, LINGUA, raccogli)
             if decisione == "continua":
                 continue
             if decisione == "piantato":
                 raise ScraperError(
                     "Lista inbox piantata: richieste fallite verso gli endpoint inbox durante l'attesa"
                 )
-            # decisione == "fine"
-            drained = nuovi_in_sessione == 0
-            break
+            # decisione == "fine": il gesto che l'ha decisa puo' aver campionato
+            # righe nuove proprio mentre confermava che la lista non cresce piu'
+            # (bug trovato dal QA: 29 contatti persi in un colpo solo perche' il
+            # ciclo usciva subito senza mai riconsumare `righe_del_giro`). Si
+            # concede un ultimo giro per processarle, POI si esce.
+            lista_esaurita = True
+            continue
 
         campaign.status = CampaignStatus.ready
         campaign.updated_at = datetime.utcnow()

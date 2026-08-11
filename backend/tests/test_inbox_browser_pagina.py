@@ -25,9 +25,17 @@ def test_nome_mancante_non_combacia_mai():
 
 
 # ── passo di scorrimento ───────────────────────────────────────────────────
-def test_il_passo_non_supera_una_schermata():
-    """Sopra il buffer renderizzato le righe si perdono IN SILENZIO."""
-    assert PASSO_SCROLL_MAX <= 0.8
+def test_il_passo_e_grande_ma_la_lettura_campiona_durante_il_gesto():
+    """Il vecchio vincolo — mai piu' di una schermata — proteggeva dalle righe
+    perse quando si leggeva solo a fine gesto. Ora si campiona ogni
+    PX_FRA_LETTURE pixel, quindi il passo puo' crescere; ma il campionamento
+    deve restare piu' fitto del buffer renderizzato, se no il vincolo torna
+    valido e nessuno se ne accorge."""
+    from app.services.inbox_browser.pagina import PX_FRA_LETTURE
+
+    altezza_riga, righe_nel_buffer = 72, 13
+    assert PX_FRA_LETTURE < altezza_riga * righe_nel_buffer / 2
+    assert PASSO_SCROLL_MAX > 1.0
 
 
 # ── fine lista / lento / piantato ──────────────────────────────────────────
@@ -495,15 +503,135 @@ async def test_decidi_fine_lista_ignora_falliti_precedenti_alla_finestra(monkeyp
     per il resto della sessione e ogni fine-lista vera diventa un falso allarme."""
     from app.services.inbox_browser import pagina
 
-    async def scorri_ferma(_page):
+    async def scorri_leggendo_fermo(_page, _lingua, _su_righe):
         return StatoScorrimento(altezza=5112, al_fondo=True)   # mai cresce: nessun nuovo caricamento
 
-    monkeypatch.setattr(pagina, "scorri", scorri_ferma)
+    monkeypatch.setattr(pagina, "scorri_leggendo", scorri_leggendo_fermo)
 
     # Fallimenti gia' presenti PRIMA di entrare in decidi_fine_lista (simula un
     # hiccup avvenuto molto prima nella sessione).
     falliti_inbox = ["errore-vecchio-1", "errore-vecchio-2", "errore-vecchio-3"]
 
-    esito = await decidi_fine_lista(_FakePageAttese(), falliti_inbox)
+    async def _ignora(_righe):
+        return None
+
+    esito = await decidi_fine_lista(_FakePageAttese(), falliti_inbox, "it", _ignora)
 
     assert esito == "fine"  # nessun fallimento NUOVO nella finestra di attesa
+
+
+# ── leggere durante il gesto ───────────────────────────────────────────────
+class _FakePageScroll:
+    """Finge una lista virtualizzata: tiene nel DOM solo le righe vicine alla
+    posizione corrente, come fa Instagram. Serve a dimostrare che leggendo solo
+    a gesto finito le righe intermedie non si vedono MAI."""
+
+    ALTEZZA_RIGA = 72
+    RIGHE_NEL_DOM = 13
+
+    def __init__(self, quante=200):
+        self.tutte = [f"Contatto {i}" for i in range(quante)]
+        self.scroll = 0
+        self.eventi = 0
+
+    @property
+    def url(self):
+        return "https://www.instagram.com/direct/inbox/"
+
+    async def evaluate(self, script, *args):
+        if "nonLetta" in script:
+            primo = self.scroll // self.ALTEZZA_RIGA
+            finestra = self.tutte[primo:primo + self.RIGHE_NEL_DOM]
+            return {
+                "viewport": {"w": 1920, "h": 940},
+                "righe": [
+                    {"indice": i, "testo": t, "left": 72, "right": 471,
+                     "top": 200 + i * self.ALTEZZA_RIGA, "w": 399,
+                     "nonLetta": False, "pallinoConferma": False}
+                    for i, t in enumerate(finestra)
+                ],
+            }
+        if "overflowY" in script and "idx" not in script:
+            return [{"left": 72, "right": 471, "top": 200, "w": 399, "h": 700,
+                     "scrollHeight": len(self.tutte) * self.ALTEZZA_RIGA,
+                     "clientHeight": 700, "scrollTop": self.scroll}]
+        if "idx" in script:
+            return {"altezza": len(self.tutte) * self.ALTEZZA_RIGA,
+                    "top": self.scroll, "visibile": 700, "alFondo": False}
+        return []
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+    class _Mouse:
+        def __init__(self, pagina):
+            self.pagina = pagina
+
+        async def move(self, x, y, steps=1):
+            return None
+
+        async def wheel(self, dx, dy):
+            self.pagina.scroll += int(dy)
+            self.pagina.eventi += 1
+
+    @property
+    def mouse(self):
+        return _FakePageScroll._Mouse(self)
+
+
+@pytest.mark.asyncio
+async def test_leggendo_solo_a_fine_gesto_le_righe_di_mezzo_spariscono():
+    """La prova del nove: senza campionamento, un gesto lungo attraversa righe
+    che nessuno vede mai. E' esattamente la perdita silenziosa che il limite di
+    0.7 schermate serviva a evitare.
+
+    Il secondo checkpoint resta sotto i ~2.700px (45 scatti x 60px) a cui il
+    gesto provvisorio pre-Task-3 e' ancora limitato: usare "Contatto 40" come
+    nel piano originale sarebbe borderline con questi parametri e renderebbe
+    il test dipendente dalla riuscita di Task 3, non ancora fatto a questo
+    punto del percorso critico (2 -> 4a -> 3)."""
+    from app.services.inbox_browser.pagina import piano_scroll
+
+    page = _FakePageScroll()
+    for delta, _ in piano_scroll(6000):
+        await page.mouse.wheel(0, delta)
+    righe = (await page.evaluate("nonLetta"))["righe"]
+    nomi_visti = {r["testo"] for r in righe}
+    assert "Contatto 5" not in nomi_visti     # attraversata e mai vista
+    assert "Contatto 15" not in nomi_visti
+
+
+@pytest.mark.asyncio
+async def test_scorrendo_e_leggendo_nessuna_riga_viene_persa():
+    from app.services.inbox_browser.pagina import scorri_leggendo
+
+    page = _FakePageScroll()
+    viste: set[str] = set()
+
+    async def raccogli(righe):
+        for r in righe:
+            viste.add(r.nome)
+
+    await scorri_leggendo(page, "it", raccogli)
+
+    attraversate = page.scroll // _FakePageScroll.ALTEZZA_RIGA
+    mancanti = [f"Contatto {i}" for i in range(attraversate) if f"Contatto {i}" not in viste]
+    assert not mancanti, f"{len(mancanti)} righe attraversate e mai viste: {mancanti[:6]}"
+
+
+@pytest.mark.asyncio
+async def test_il_campionamento_non_rallenta_il_gesto():
+    """Leggere costa 0.06% del tempo di sessione (misurato). Il numero di
+    letture deve restare proporzionale alla distanza, non agli eventi: una
+    lettura per evento wheel sarebbe 200 letture per gesto."""
+    from app.services.inbox_browser.pagina import PX_FRA_LETTURE, scorri_leggendo
+
+    page = _FakePageScroll()
+    letture = 0
+
+    async def conta(righe):
+        nonlocal letture
+        letture += 1
+
+    await scorri_leggendo(page, "it", conta)
+    assert letture <= (page.scroll // PX_FRA_LETTURE) + 2
