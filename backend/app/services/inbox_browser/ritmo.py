@@ -25,20 +25,25 @@ PARAMETRI: dict[str, dict] = {
     # a 1.35s. Misurato l'11/08: due stacchi si mangiavano il 24% di una
     # sessione da 30 minuti. Il session-break da 30-55 minuti, che e' la
     # pausa lunga vera, non e' toccato.
+    # Ritarato 11/08 sera (via libera esplicito di Tommaso, verifica sul campo
+    # Task 12): sessione live giudicata troppo lenta, troppe pause. Piena:
+    # probabilita' di sosta dimezzata, stacco dimezzato. Rapida: stacco
+    # rimosso del tutto (e' gia' zona nota, non merita la pausa "sono uscito
+    # a fare altro"), sosta confermata al 2.5% gia' in vigore.
     "piena": {
         "normale": (1.0, 4.0),
         "sosta": (10.0, 30.0),
-        "stacco": (90.0, 180.0),
-        "p_sosta": 0.10,
+        "stacco": (45.0, 90.0),
+        "p_sosta": 0.05,
         "p_stacco": 0.01,
     },
     # zona rapida: si attraversa cio' che e' gia' stato raccolto
     "rapida": {
         "normale": (0.4, 1.2),
         "sosta": (10.0, 30.0),
-        "stacco": (90.0, 180.0),
+        "stacco": (90.0, 180.0),   # valore ininfluente: p_stacco=0, mai estratto
         "p_sosta": 0.025,
-        "p_stacco": 0.01,
+        "p_stacco": 0.0,
     },
     # solo scorrimento: la riga e' gia' nota e NON viene aperta.
     # Qui non parte nessuna richiesta verso Instagram — nessun click, nessun
@@ -49,11 +54,15 @@ PARAMETRI: dict[str, dict] = {
     # nomi e poi si blocca cinque minuti a meta' lista.
     # Misurato l'11/08: 144 righe su 170 finivano qui, e si portavano via la
     # maggior parte dei 972s di sleep di una sessione da 18 minuti.
+    # Ritarato 11/08 sera insieme a piena/rapida: probabilita' di sosta
+    # portata all'1% (era 2.5%) e tempi ridotti ulteriormente — e' la zona
+    # dove Instagram non vede nulla (nessuna richiesta parte), quindi ogni
+    # secondo di sleep qui e' throughput perso senza comprare protezione.
     "scorrimento": {
-        "normale": (0.25, 0.9),
-        "sosta": (6.0, 18.0),
-        "stacco": (6.0, 18.0),   # mai estratto (p_stacco=0): la sosta e' il tetto
-        "p_sosta": 0.025,
+        "normale": (0.15, 0.5),
+        "sosta": (3.0, 8.0),
+        "stacco": (3.0, 8.0),   # mai estratto (p_stacco=0): la sosta e' il tetto
+        "p_sosta": 0.01,
         "p_stacco": 0.0,
     },
 }

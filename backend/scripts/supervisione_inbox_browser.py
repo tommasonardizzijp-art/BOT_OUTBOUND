@@ -152,6 +152,15 @@ def _instrumenta(diario):
 
     _sostituisci("gia_esaminata", gia_esaminata_strumentata)
 
+    campiona_pausa_reale = motore.campiona_pausa
+
+    def campiona_pausa_strumentata(*a, **kw):
+        r = campiona_pausa_reale(*a, **kw)
+        diario["tempi"]["pause"] += r
+        return r
+
+    _sostituisci("campiona_pausa", campiona_pausa_strumentata)
+
     riga_da_saltare_reale = motore.riga_da_saltare
 
     def riga_da_saltare_strumentata(*a, **kw):
@@ -250,7 +259,7 @@ async def raccolta(db, campaign_id, segnalibro):
     diario = {
         "aperture": [],
         "fallimenti_header": [],
-        "tempi": {"lettura": 0.0, "apertura": 0.0, "scroll": 0.0},
+        "tempi": {"lettura": 0.0, "apertura": 0.0, "scroll": 0.0, "pause": 0.0},
         "creati": 0, "aggiornati": 0,
         "righe_saltate": 0, "righe_ripetute": 0,
     }
