@@ -25,7 +25,11 @@ Usa le funzioni VERE del motore, incluse le pause anti-ban: il profilo di
 rischio e' quello di una sessione normale, non un test accelerato.
 
 Uso (dal folder backend, con la campagna in pausa e il profilo libero):
-    ./venv/Scripts/python.exe scripts/supervisione_inbox_browser.py [minuti_fase_B]
+    ./venv/Scripts/python.exe scripts/supervisione_inbox_browser.py [segnalibro:0|1]
+
+Fase B chiama il motore vero (run_inbox_browser_list), avvolto con wrapper
+strumentati (vedi _instrumenta) — non una copia parallela del suo ciclo. Il
+budget di sessione (30-55 min) e' quello vero, interno al motore, casuale.
 """
 import asyncio
 import json
@@ -41,23 +45,21 @@ from sqlalchemy import select
 from app.browser.context_manager import BrowserSession
 from app.database import AsyncSessionLocal
 from app.models.account import InstagramAccount
-from app.models.follower import Follower
+from app.models.campaign import Campaign, CampaignStatus
 from app.services.inbox_browser.pagina import (
-    _JS_CANDIDATI, _JS_FASCIA_ALTA, _JS_RIGHE, _JS_STATO_CONTENITORE,
-    apri_riga, bordo_colonne, leggi_righe_visibili, scegli_contenitore, scorri,
+    _JS_FASCIA_ALTA, _JS_RIGHE, bordo_colonne,
+    leggi_righe_visibili as _leggi_per_censimento, scorri,
 )
-from app.services.inbox_browser.riconoscimento import ArchivioNomi, ContatoreZona
-from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
-from app.services.inbox_browser.salvataggio import DatiContatto, salva_contatto
-from app.services.inbox_browser.testo import (
-    estrai_data_thread, estrai_ultimo_messaggio, normalizza_nome,
-)
-from app.services.scrape_inbox_browser import decide_se_aprire
+from app.services.inbox_browser.testo import normalizza_nome
+import app.services.scrape_inbox_browser as motore
 
 CAMPAGNA = "ec5e2464-1d8d-42a1-a81f-8e61b303fa7a"
 ACCOUNT = "@michele.carozza"
 LINGUA = "it"
 PASSI_CENSIMENTO = 45
+# Sopra al budget interno del motore (30-55 min, casuale ad ogni sessione):
+# rete di sicurezza esterna, non un timer che guida la raccolta.
+TIMEOUT_SICUREZZA_S = 70 * 60
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "data", "supervisione_inbox.json")
 
@@ -68,17 +70,6 @@ def p(s):
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {p(msg)}", flush=True)
-
-
-async def stato_lista(page):
-    """scrollTop/altezza del contenitore della lista, per accorgersi dei reset."""
-    dati = await page.evaluate(_JS_RIGHE, 30)
-    bordo = bordo_colonne((dati or {}).get("righe") or [])
-    candidati = await page.evaluate(_JS_CANDIDATI)
-    idx = scegli_contenitore(candidati, bordo)
-    if idx is None:
-        return None
-    return await page.evaluate(_JS_STATO_CONTENITORE, idx)
 
 
 # ─────────────────────────── FASE A: la foto della lista ───────────────────
@@ -92,7 +83,7 @@ async def censimento(page):
     fermo = 0
 
     for passo in range(PASSI_CENSIMENTO):
-        righe = await leggi_righe_visibili(page, LINGUA)
+        righe = await _leggi_per_censimento(page, LINGUA)
         nuove = 0
         for r in righe:
             chiave = normalizza_nome(r.nome)
@@ -124,120 +115,169 @@ async def censimento(page):
     return viste, ordine, formati_data
 
 
-# ─────────────────────── FASE B: la raccolta, cronometrata ─────────────────
-async def raccolta(page, db, campaign_id, minuti_max):
-    """Il ciclo del motore, con dentro un cronometro e un registro di tutto."""
-    log(f"FASE B — raccolta supervisionata (max {minuti_max} min)")
+# ────────────── FASE B: il motore VERO, avvolto per misurare ───────────────
+def _instrumenta(diario):
+    """Avvolge le funzioni del motore reale con cronometri/contatori.
 
-    nomi_esistenti = (await db.execute(
-        select(Follower.full_name).where(Follower.campaign_id == campaign_id)
-    )).scalars().all()
-    archivio = ArchivioNomi(list(nomi_esistenti))
-    contatore = ContatoreZona()
+    Non riscrive il ciclo (rischio di duplicare — e far divergere — la logica
+    gia' delicata di run_inbox_browser_list): lo si avvolge. Python risolve le
+    chiamate per nome nel namespace del modulo AL MOMENTO della chiamata
+    (stesso principio di monkeypatch.setattr nei test), quindi patchare gli
+    attributi di `motore` qui sotto e' visibile dentro il ciclo vero. Ritorna
+    il callback di ripristino.
+    """
+    originali = {}
+
+    def _sostituisci(nome_attributo, nuova_funzione):
+        originali[nome_attributo] = getattr(motore, nome_attributo)
+        setattr(motore, nome_attributo, nuova_funzione)
+
+    leggi_reale = motore.leggi_righe_visibili
+
+    async def leggi_strumentata(*a, **kw):
+        t0 = time.time()
+        r = await leggi_reale(*a, **kw)
+        diario["tempi"]["lettura"] += time.time() - t0
+        return r
+
+    _sostituisci("leggi_righe_visibili", leggi_strumentata)
+
+    gia_esaminata_reale = motore.gia_esaminata
+
+    def gia_esaminata_strumentata(*a, **kw):
+        r = gia_esaminata_reale(*a, **kw)
+        if r:
+            diario["righe_ripetute"] += 1
+        return r
+
+    _sostituisci("gia_esaminata", gia_esaminata_strumentata)
+
+    riga_da_saltare_reale = motore.riga_da_saltare
+
+    def riga_da_saltare_strumentata(*a, **kw):
+        r = riga_da_saltare_reale(*a, **kw)
+        if r:
+            diario["righe_saltate"] += 1
+        return r
+
+    _sostituisci("riga_da_saltare", riga_da_saltare_strumentata)
+
+    apri_riga_reale = motore.apri_riga
+
+    async def apri_riga_strumentata(page, indice, nome_atteso, lingua, account_username=None):
+        t0 = time.time()
+        username = await apri_riga_reale(page, indice, nome_atteso, lingua, account_username)
+        durata = time.time() - t0
+        diario["tempi"]["apertura"] += durata
+        esito = "aperta" if username else "fallita"
+        diario["aperture"].append({"nome": nome_atteso, "esito": esito, "secondi": round(durata, 1)})
+        if username:
+            log(f"  APERTA      @{username:<28} <- {nome_atteso!r} ({durata:.1f}s)")
+        else:
+            # Perche' e' fallita: si guarda il DOM ADESSO, non dopo.
+            nodi = await page.evaluate(_JS_FASCIA_ALTA)
+            dati = await page.evaluate(_JS_RIGHE, 30)
+            bordo = bordo_colonne((dati or {}).get("righe") or [])
+            diario["fallimenti_header"].append({
+                "atteso": nome_atteso, "bordo": bordo,
+                "viewport": (dati or {}).get("viewport"),
+                "fascia": [n for n in nodi if n["top"] < 200][:14],
+            })
+            log(f"  fallita apertura di {nome_atteso!r} ({durata:.1f}s) — fascia catturata")
+        return username
+
+    _sostituisci("apri_riga", apri_riga_strumentata)
+
+    salva_contatto_reale = motore.salva_contatto
+
+    async def salva_contatto_strumentata(*a, **kw):
+        esito = await salva_contatto_reale(*a, **kw)
+        diario[("creati" if esito == "creato" else "aggiornati")] += 1
+        return esito
+
+    _sostituisci("salva_contatto", salva_contatto_strumentata)
+
+    decidi_fine_lista_reale = motore.decidi_fine_lista
+
+    async def decidi_fine_lista_strumentata(*a, **kw):
+        t0 = time.time()
+        r = await decidi_fine_lista_reale(*a, **kw)
+        diario["tempi"]["scroll"] += time.time() - t0
+        return r
+
+    _sostituisci("decidi_fine_lista", decidi_fine_lista_strumentata)
+
+    lancia_reale = motore.lancia
+
+    async def lancia_strumentata(*a, **kw):
+        t0 = time.time()
+        r = await lancia_reale(*a, **kw)
+        diario["tempi"]["scroll"] += time.time() - t0
+        return r
+
+    _sostituisci("lancia", lancia_strumentata)
+
+    def ripristina():
+        for nome_attributo, funzione in originali.items():
+            setattr(motore, nome_attributo, funzione)
+
+    return ripristina
+
+
+async def raccolta(db, campaign_id, segnalibro):
+    """Chiama il motore vero (`run_inbox_browser_list`), avvolto per misurare.
+
+    Il budget di sessione (30-55 min) e' interno al motore, casuale ad ogni
+    chiamata: qui c'e' solo una rete di sicurezza esterna (TIMEOUT_SICUREZZA_S),
+    non un timer che guida la raccolta.
+    """
+    log(f"FASE B — raccolta supervisionata (motore vero, segnalibro={'ON' if segnalibro else 'OFF'})")
+
+    campaign = (await db.execute(
+        select(Campaign).where(Campaign.id == campaign_id)
+    )).scalar_one()
+    if campaign.inbox_engine != "browser":
+        log(f"  !! campaign.inbox_engine='{campaign.inbox_engine}', non 'browser' — il motore uscira' subito")
+
+    # Stessa strada di scrape_list.py: attributo RUNTIME, mai persistito.
+    campaign.inbox_salta_lavorate = segnalibro
+    # _deve_fermarsi() dentro il motore si ferma all'istante se lo stato non
+    # e' listing/listing_break: va impostato e committato PRIMA di chiamare.
+    campaign.status = CampaignStatus.listing
+    campaign.updated_at = datetime.utcnow()
+    await db.commit()
 
     diario = {
-        "esaminate": [],       # ogni riga incontrata, con la decisione presa
-        "aperture": [],        # ogni tentativo di apertura, con esito e durata
+        "aperture": [],
         "fallimenti_header": [],
-        "reset_scroll": [],
-        "tempi": {"pause": 0.0, "apertura": 0.0, "lettura": 0.0, "scroll": 0.0},
+        "tempi": {"lettura": 0.0, "apertura": 0.0, "scroll": 0.0},
         "creati": 0, "aggiornati": 0,
+        "righe_saltate": 0, "righe_ripetute": 0,
     }
-    incontrate: set[str] = set()
-    scadenza = time.time() + minuti_max * 60
-    scroll_prec = None
 
-    while time.time() < scadenza:
-        t0 = time.time()
-        righe = await leggi_righe_visibili(page, LINGUA)
-        diario["tempi"]["lettura"] += time.time() - t0
+    ripristina = _instrumenta(diario)
+    try:
+        esito = await asyncio.wait_for(
+            motore.run_inbox_browser_list(campaign_id, db, campaign),
+            timeout=TIMEOUT_SICUREZZA_S,
+        )
+        diario["esito_run"] = esito  # secondi di defer al break, o None
+    except asyncio.TimeoutError:
+        diario["esito_run"] = "timeout_sicurezza"
+        log(f"  !! TIMEOUT DI SICUREZZA a {TIMEOUT_SICUREZZA_S}s — il motore non e' rientrato da solo")
+    finally:
+        ripristina()
 
-        stato = await stato_lista(page)
-        if stato and scroll_prec is not None and stato["top"] + 200 < scroll_prec:
-            diario["reset_scroll"].append(
-                {"quando": datetime.now().isoformat(timespec="seconds"),
-                 "da": scroll_prec, "a": stato["top"]})
-            log(f"  !! LISTA TORNATA INDIETRO: scrollTop {scroll_prec} -> {stato['top']}")
-        if stato:
-            scroll_prec = stato["top"]
-
-        for riga in righe:
-            if time.time() >= scadenza:
-                break
-            chiave = normalizza_nome(riga.nome)
-            if not chiave:
-                continue
-            gia_vista = chiave in incontrate
-            incontrate.add(chiave)
-
-            if riga.non_letta:
-                if not gia_vista:
-                    diario["esaminate"].append({"nome": riga.nome, "decisione": "non_letta"})
-                continue
-
-            riconosciuta = archivio.e_riconosciuto(riga.nome)
-            apre = decide_se_aprire(riga.nome, archivio, contatore.zona)
-            if not gia_vista:
-                diario["esaminate"].append({
-                    "nome": riga.nome, "zona": contatore.zona,
-                    "decisione": "apre" if apre else ("nota" if riconosciuta else "segnaposto"),
-                })
-
-            if apre:
-                t0 = time.time()
-                username = await apri_riga(page, riga.indice, riga.nome, LINGUA, ACCOUNT)
-                durata = time.time() - t0
-                diario["tempi"]["apertura"] += durata
-                esito = "aperta" if username else "fallita"
-
-                if not username:
-                    # Perche' e' fallita: si guarda il DOM ADESSO, non dopo.
-                    nodi = await page.evaluate(_JS_FASCIA_ALTA)
-                    dati = await page.evaluate(_JS_RIGHE, 30)
-                    bordo = bordo_colonne((dati or {}).get("righe") or [])
-                    diario["fallimenti_header"].append({
-                        "atteso": riga.nome, "bordo": bordo,
-                        "viewport": (dati or {}).get("viewport"),
-                        "fascia": [n for n in nodi if n["top"] < 200][:14],
-                    })
-                    log(f"  fallita apertura di {riga.nome!r} ({durata:.1f}s) — fascia catturata")
-                else:
-                    testo_pagina = await page.evaluate("() => document.body.innerText")
-                    dati_contatto = DatiContatto(
-                        username=username, nome=riga.nome,
-                        last_message_at=estrai_data_thread(testo_pagina, LINGUA),
-                        last_message_from=("us" if riga.ultimo_nostro is True
-                                           else "them" if riga.ultimo_nostro is False else None),
-                        last_message_text=estrai_ultimo_messaggio(testo_pagina, LINGUA),
-                    )
-                    esito_salvataggio = await salva_contatto(db, campaign_id, dati_contatto)
-                    archivio.aggiungi(riga.nome)
-                    diario[("creati" if esito_salvataggio == "creato" else "aggiornati")] += 1
-                    esito = esito_salvataggio
-                    log(f"  {esito.upper():<11} @{username:<28} <- {riga.nome!r} ({durata:.1f}s)")
-
-                diario["aperture"].append({"nome": riga.nome, "esito": esito,
-                                           "secondi": round(durata, 1), "zona": contatore.zona})
-
-            contatore.registra(riconosciuta)
-            pausa = campiona_pausa(zona_pausa(contatore.zona, apre))
-            diario["tempi"]["pause"] += pausa
-            voce = "pause_apertura" if apre else "pause_scorrimento"
-            diario["tempi"][voce] = diario["tempi"].get(voce, 0.0) + pausa
-            await asyncio.sleep(pausa)
-
-        t0 = time.time()
-        await scorri(page)
-        diario["tempi"]["scroll"] += time.time() - t0
-
-    diario["incontrate"] = sorted(incontrate)
     log(f"FASE B finita: {diario['creati']} creati, {diario['aggiornati']} aggiornati, "
-        f"{len(incontrate)} chat incontrate")
+        f"{diario['righe_saltate']} righe saltate (segnalibro), "
+        f"{diario['righe_ripetute']} righe ripetute")
     return diario
 
 
 async def main():
-    minuti = int(sys.argv[1]) if len(sys.argv) > 1 else 18
+    # sys.argv[1]: 1/0 = modalita' segnalibro ON/OFF per la FASE B (Task 12:
+    # prima una misura con OFF, poi una con ON, per confrontare il guadagno).
+    segnalibro = bool(int(sys.argv[1])) if len(sys.argv) > 1 else False
 
     async with AsyncSessionLocal() as db:
         acct = (await db.execute(select(InstagramAccount).where(
@@ -246,30 +286,36 @@ async def main():
             log(f"account {ACCOUNT} non trovato")
             return
 
-        session = BrowserSession(acct.id)
-        await session.open()
-        rapporto = {"inizio": datetime.now().isoformat(timespec="seconds")}
-        try:
-            ctx = session.context
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            await page.goto("https://www.instagram.com/direct/inbox/",
-                            wait_until="commit", timeout=60000)
-            await page.wait_for_timeout(8000)
-            rapporto["viewport"] = await page.evaluate(
-                "() => ({w: window.innerWidth, h: window.innerHeight})")
-            log(f"viewport reale: {rapporto['viewport']}")
+        rapporto = {"inizio": datetime.now().isoformat(timespec="seconds"), "segnalibro": segnalibro}
 
-            if os.environ.get("CENSIMENTO", "1") == "1":
+        # FASE A: sessione propria, chiusa PRIMA della fase B — run_inbox_browser_list
+        # apre la sua BrowserSession sullo stesso profilo, e le due non possono
+        # convivere (lock profilo browser cross-processo, gia' visto in questo
+        # cantiere: due sessioni aperte insieme sullo stesso account si bloccano
+        # a vicenda).
+        if os.environ.get("CENSIMENTO", "1") == "1":
+            session = BrowserSession(acct.id)
+            await session.open()
+            try:
+                ctx = session.context
+                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                await page.goto("https://www.instagram.com/direct/inbox/",
+                                wait_until="commit", timeout=60000)
+                await page.wait_for_timeout(8000)
+                rapporto["viewport"] = await page.evaluate(
+                    "() => ({w: window.innerWidth, h: window.innerHeight})")
+                log(f"viewport reale: {rapporto['viewport']}")
+
                 viste, ordine, formati = await censimento(page)
                 rapporto["censite"] = {k: v for k, v in viste.items()}
                 rapporto["ordine_censimento"] = ordine
                 rapporto["formati_data_riga"] = formati
-                await page.reload(wait_until="commit", timeout=60000)
-                await page.wait_for_timeout(8000)
+            finally:
+                await session.close()
 
-            rapporto["diario"] = await raccolta(page, db, CAMPAGNA, minuti)
+        try:
+            rapporto["diario"] = await raccolta(db, CAMPAGNA, segnalibro)
         finally:
-            await session.close()
             rapporto["fine"] = datetime.now().isoformat(timespec="seconds")
             os.makedirs(os.path.dirname(OUT), exist_ok=True)
             with open(OUT, "w", encoding="utf-8") as f:
