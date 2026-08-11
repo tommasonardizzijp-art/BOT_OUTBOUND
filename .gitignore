@@ -1,6 +1,9 @@
 # Contatti estratti dall'inbox (PII reali) — output, mai in git
 backend/contatti_chat_*.csv
 
+# Output grezzi dei PoC WA (numeri di telefono reali, screenshot con dati cliente) — PII, mai in git
+backend/scripts/poc_wa/artifacts/
+
 # Python
 backend/venv/
 backend/__pycache__/
