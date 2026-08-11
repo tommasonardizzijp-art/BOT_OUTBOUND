@@ -65,6 +65,14 @@ PASSO_SCROLL_MAX = 4.0
 PASSO_SCROLL_SENZA_LETTURA_MIN = 0.6
 PASSO_SCROLL_SENZA_LETTURA_MAX = 0.8
 
+# Quante schermate copre un lancio (Task 4b). Un gesto umano ne copre da 6 a
+# 25; qui si resta prudenti perche' anche in zona nota la lista va comunque
+# attraversata, non teletrasportata. Deve restare sopra PASSO_SCROLL_MAX: il
+# lancio serve a coprire distanza PIU' in fretta dello scorrimento normale,
+# altrimenti tanto vale usare quello (che almeno campiona).
+LANCIO_SCHERMATE_MIN = 5.0
+LANCIO_SCHERMATE_MAX = 9.0
+
 # Il nome del thread sta nella parte SINISTRA della colonna di destra (misurato:
 # x=544 con bordo a 471 e finestra larga 1280). Oltre questa frazione ci sono i
 # controlli in alto a destra — 'Top' a x=1197 e' quello che il motore scambiava
@@ -688,6 +696,42 @@ async def scorri(page) -> StatoScorrimento:
     await page.mouse.move(x, y, steps=random.randint(5, 15))
 
     for delta, pausa in piano_scroll(px):
+        await page.mouse.wheel(0, delta)
+        await page.wait_for_timeout(int(pausa * 1000))
+
+    stato = await page.evaluate(_JS_STATO_CONTENITORE, indice)
+    if stato is None:
+        return StatoScorrimento(altezza=None, al_fondo=False)
+    return StatoScorrimento(altezza=stato["altezza"], al_fondo=stato["alFondo"])
+
+
+async def lancia(page) -> StatoScorrimento:
+    """Un flick che copre piu' schermate, per attraversare zona gia' nota.
+
+    NON va usata dove le righe vanno esaminate: coprire piu' del buffer
+    renderizzato fa perdere righe IN SILENZIO (vedi `scorri_leggendo`, che
+    esiste apposta per non farlo). Serve alla modalita' segnalibro (Task 7-8),
+    dove per definizione la zona attraversata non va letta: non chiama mai
+    `leggi_righe_visibili`, a differenza di `scorri_leggendo`.
+    """
+    _righe, _viewport, bordo = await _leggi_righe_grezze(page)
+    candidati = await page.evaluate(_JS_CANDIDATI)
+    indice = scegli_contenitore(candidati, bordo)
+    if indice is None:
+        logger.warning(
+            f"[InboxBrowser] contenitore della lista non riconosciuto "
+            f"(bordo {bordo}) — nessun lancio"
+        )
+        return StatoScorrimento(altezza=None, al_fondo=False)
+
+    box = candidati[indice]
+    px = int(box["clientHeight"] * random.uniform(LANCIO_SCHERMATE_MIN, LANCIO_SCHERMATE_MAX))
+
+    x = box["left"] + box["w"] * random.uniform(0.3, 0.7)
+    y = box["top"] + box["h"] * random.uniform(0.3, 0.7)
+    await page.mouse.move(x, y, steps=random.randint(5, 15))
+
+    for delta, pausa in piano_lancio(px):
         await page.mouse.wheel(0, delta)
         await page.wait_for_timeout(int(pausa * 1000))
 

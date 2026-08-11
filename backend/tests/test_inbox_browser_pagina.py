@@ -635,3 +635,64 @@ async def test_il_campionamento_non_rallenta_il_gesto():
 
     await scorri_leggendo(page, "it", conta)
     assert letture <= (page.scroll // PX_FRA_LETTURE) + 2
+
+
+# ── il lancio copre distanza dove non serve leggere ────────────────────────
+def test_il_lancio_copre_piu_schermate_di_uno_scorrimento():
+    """Un gesto umano copre da 6 a 25 schermate (misurato: 5.742-24.113px con
+    finestra alta 940). Scorrere una schermata alla volta e' una scelta del
+    motore, e si paga in righe riesaminate. Deve restare sopra il passo di
+    scorri_leggendo (Task 4a, 2-4 schermate): il lancio serve ad attraversare
+    PIU' in fretta della lettura normale, non uguale o meno."""
+    from app.services.inbox_browser.pagina import (
+        LANCIO_SCHERMATE_MAX, LANCIO_SCHERMATE_MIN, PASSO_SCROLL_MAX,
+    )
+    assert LANCIO_SCHERMATE_MIN >= 3
+    assert LANCIO_SCHERMATE_MAX > LANCIO_SCHERMATE_MIN
+    assert LANCIO_SCHERMATE_MIN > PASSO_SCROLL_MAX
+
+
+@pytest.mark.asyncio
+async def test_lancia_non_legge_le_righe_attraversate():
+    """A differenza di scorri_leggendo, lancia() non chiama mai leggi_righe_
+    visibili: la zona che attraversa e' per definizione gia' lavorata (modalita'
+    segnalibro), leggerla sarebbe lavoro sprecato quanto quello che Task 4a
+    elimina altrove."""
+    from app.services.inbox_browser.pagina import lancia
+
+    page = _FakePageScroll()
+    scroll_prima = page.scroll
+
+    stato = await lancia(page)
+
+    assert page.scroll > scroll_prima
+    assert stato.altezza is not None
+
+
+@pytest.mark.asyncio
+async def test_lancia_su_contenitore_non_trovato_non_scrolla():
+    class _PageSenzaContenitore:
+        async def evaluate(self, script, *args):
+            if "nonLetta" in script:
+                return {"viewport": {"w": 1920, "h": 940}, "righe": []}
+            return []
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+        class _Mouse:
+            async def move(self, x, y, steps=1):
+                return None
+
+            async def wheel(self, dx, dy):
+                raise AssertionError("non deve scrollare senza un contenitore")
+
+        @property
+        def mouse(self):
+            return self._Mouse()
+
+    from app.services.inbox_browser.pagina import lancia
+
+    stato = await lancia(_PageSenzaContenitore())
+    assert stato.altezza is None
+    assert stato.al_fondo is False
