@@ -61,6 +61,12 @@ async def _dispatch_inbox(campaign_id: str, db, campaign) -> int | None:
     """
     if getattr(campaign, "inbox_engine", "api") == "browser":
         from app.services.scrape_inbox_browser import run_inbox_browser_list
+        from app.services.work_enqueue import modalita_segnalibro_attiva
+        # Il worker carica la campagna da capo (processo nuovo, query nuova):
+        # un attributo runtime impostato dalla richiesta API non arriverebbe
+        # mai qui. La modalita' viaggia via Redis (segna_modalita_segnalibro
+        # in campaigns.py), non come colonna — vale una sessione sola.
+        campaign.inbox_salta_lavorate = await modalita_segnalibro_attiva(campaign_id)
         return await run_inbox_browser_list(campaign_id, db, campaign)
     from app.services.scrape_inbox import run_inbox_list
     return await run_inbox_list(campaign_id, db, campaign)

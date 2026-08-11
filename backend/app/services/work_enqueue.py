@@ -134,6 +134,41 @@ async def _enqueue_bios_with_redis(redis, campaign_id: str) -> bool:
     return await _reenqueue_phase(redis, "scrape_bios_task", f"bios:{campaign_id}", campaign_id)
 
 
+async def segna_modalita_segnalibro(campaign_id: str, attiva: bool) -> None:
+    """La modalita' segnalibro vale per una sessione sola: si passa al worker
+    via Redis con una scadenza, non come colonna, cosi' non sopravvive a un
+    riavvio ne' a una ripresa dopo il session-break.
+
+    Va chiamata SEMPRE all'avvio della Fase Lista, anche con `attiva=False`:
+    altrimenti una sessione precedente che l'aveva accesa lascerebbe il flag
+    attivo per il TTL residuo (fino a 6h), e la sessione che non l'ha chiesta
+    salterebbe righe senza saperlo.
+    """
+    import redis.asyncio as aioredis
+
+    r = aioredis.from_url(settings.redis_url)
+    try:
+        chiave = f"inbox_segnalibro:{campaign_id}"
+        if attiva:
+            await r.set(chiave, "1", ex=6 * 3600)
+        else:
+            await r.delete(chiave)
+    finally:
+        await r.aclose()
+
+
+async def modalita_segnalibro_attiva(campaign_id: str) -> bool:
+    """Se la Fase Lista corrente deve saltare la zona gia' lavorata. Assente in
+    Redis (mai impostato, o TTL scaduto) = spenta: nel dubbio si legge tutto."""
+    import redis.asyncio as aioredis
+
+    r = aioredis.from_url(settings.redis_url)
+    try:
+        return bool(await r.get(f"inbox_segnalibro:{campaign_id}"))
+    finally:
+        await r.aclose()
+
+
 async def enqueue_list(campaign_id: str) -> bool:
     import arq
     redis = await arq.create_pool(arq_redis_settings())

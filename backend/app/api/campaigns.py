@@ -577,6 +577,11 @@ async def start_scrape(campaign_id: str, db: AsyncSession = Depends(get_db)):
 
 class PhaseStartBody(BaseModel):
     target: int | None = None
+    # Modalita' segnalibro (Fase Lista via browser): vale SOLO per questa
+    # sessione, non viene persistita. Una sessione la usa per scendere in
+    # profondita' saltando la parte gia' lavorata, quella dopo la lascia
+    # spenta e recupera chi ha risposto ed e' risalito in cima.
+    salta_lavorate: bool = False
 
 
 @router.post("/{campaign_id}/list/start", response_model=CampaignResponse)
@@ -645,7 +650,10 @@ async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: A
     db.add(ActivityLog(campaign_id=campaign.id, action="list_started"))
     await db.commit()
     await db.refresh(campaign)
-    from app.services.work_enqueue import enqueue_list
+    from app.services.work_enqueue import enqueue_list, segna_modalita_segnalibro
+    # Sempre chiamata, anche a False: pulisce un flag lasciato acceso da una
+    # sessione precedente (vedi la sua docstring).
+    await segna_modalita_segnalibro(campaign_id, bool(body.salta_lavorate) if body else False)
     await enqueue_list(campaign_id)
     return await _enrich_campaign(campaign, db, include_today=True)
 
