@@ -29,7 +29,7 @@ scomodo: sono la fotografia del layout che il motore deve saper leggere.
 import pytest
 
 from app.services.inbox_browser.pagina import (
-    bordo_colonne, href_thread, nome_header, piano_scroll, righe_valide,
+    bordo_colonne, href_thread, nome_header, piano_lancio, piano_scroll, righe_valide,
     scegli_contenitore, username_header,
 )
 
@@ -220,22 +220,53 @@ def test_fra_due_contenitori_della_lista_vince_quello_piu_alto():
     assert scegli_contenitore([interno, LISTA_CHAT], bordo=471) == 1
 
 
-# ── scroll umano: non un salto secco ──────────────────────────────────────
-def test_il_gesto_e_fitto_come_quello_di_un_trackpad():
-    """Otto scatti da un centinaio di pixel con pause di due decimi l'uno
-    dall'altro non sono un gesto fluido: sono otto colpi separati. Un dito su
-    un trackpad produce decine di eventi piccoli e ravvicinati."""
-    piano = piano_scroll(590)          # una schermata a 1920x940
-    assert len(piano) >= 15, f"solo {len(piano)} scatti: si vede la scalinata"
-    assert all(abs(delta) <= 60 for delta, _ in piano)
-    assert all(0.008 <= pausa <= 0.06 for _, pausa in piano)
+# ── i gesti, tarati sui dati veri ──────────────────────────────────────────
+# Registrati l'11/08 dal trackpad di Tommaso (scripts/registra_scroll_umano.py,
+# 1660 eventi su 4 gesti). I numeri qui sotto sono quelli, non una stima:
+#   intervallo fra eventi: mediana 16.7ms (ritmo di frame)
+#   deltaY: mediana 18, picchi 193-342
+#   velocita': 1472-2517 px/s
+#   un gesto copre da 5.742 a 24.113 px
+import statistics
+
+INTERVALLO_UMANO_MS = 16.7
+PICCO_UMANO_MIN = 190
+VELOCITA_UMANA_MIN = 1400
+VELOCITA_UMANA_MAX = 2600
+
+
+def test_gli_eventi_arrivano_a_ritmo_di_frame():
+    """Mediana 16.7ms misurata. Eventi piu' radi tradiscono una simulazione."""
+    pause_ms = [p * 1000 for _, p in piano_scroll(2000)]
+    assert 10 <= statistics.median(pause_ms) <= 24
+
+
+def test_il_gesto_raggiunge_i_picchi_di_una_mano_vera():
+    """Il modello precedente non superava i 60px per evento; una mano arriva a
+    193-342. Un flusso tutto piccolo e' regolare quanto uno tutto grande."""
+    picchi = [max(d for d, _ in piano_scroll(2000)) for _ in range(30)]
+    assert max(picchi) >= PICCO_UMANO_MIN
+
+
+def test_la_velocita_sta_nella_forbice_misurata():
+    piano = piano_scroll(2000)
+    durata = sum(p for _, p in piano)
+    velocita = sum(d for d, _ in piano) / durata
+    assert VELOCITA_UMANA_MIN <= velocita <= VELOCITA_UMANA_MAX, f"{velocita:.0f} px/s"
+
+
+def test_ogni_tanto_esce_un_evento_a_zero_pixel():
+    """48 eventi su 1660 avevano deltaY esattamente 0. Un flusso che non ne ha
+    mai e' piu' pulito del vero."""
+    zeri = sum(1 for _ in range(60) for d, _ in piano_scroll(2000) if d == 0)
+    assert zeri > 0
 
 
 def test_il_gesto_accelera_e_poi_frena():
     """La firma di un movimento vero: parte piano, prende velocita' in mezzo,
     rallenta alla fine. Una sequenza di scatti tutti uguali e' un motore, non
     una mano."""
-    piano = [d for d, _ in piano_scroll(590) if d > 0]
+    piano = [d for d, _ in piano_scroll(2000) if d > 0]
     bordo = max(2, len(piano) // 5)
     inizio = sum(piano[:bordo]) / bordo
     centro = sum(piano[bordo:-bordo]) / max(len(piano) - 2 * bordo, 1)
@@ -244,41 +275,33 @@ def test_il_gesto_accelera_e_poi_frena():
     assert fine < centro, f"si ferma di colpo ({fine:.0f} vs {centro:.0f})"
 
 
-def test_lo_scroll_e_fatto_di_piu_scatti_piccoli():
-    """Un solo salto da 400px e' la firma piu' riconoscibile che ci sia:
-    nessun dito su un trackpad muove una schermata in un evento solo."""
-    piano = piano_scroll(400)
-    assert len(piano) >= 3
-    assert all(abs(delta) <= 200 for delta, _ in piano)
-
-
-def test_lo_scroll_arriva_circa_dove_gli_e_stato_chiesto():
-    """Circa, non esatto: la precisione al pixel e' essa stessa un segnale."""
-    netto = sum(delta for delta, _ in piano_scroll(400))
-    assert 340 <= netto <= 460
-
-
-def test_fra_uno_scatto_e_l_altro_c_e_una_pausa_breve():
-    assert all(0.01 <= pausa <= 0.35 for _, pausa in piano_scroll(400))
-
-
 def test_gli_scatti_non_sono_tutti_uguali():
     """Passi identici sono una griglia: si riconoscono a colpo d'occhio in un
     grafico di eventi wheel."""
-    delta = [d for d, _ in piano_scroll(400)]
+    delta = [d for d, _ in piano_scroll(2000)]
     assert len(set(delta)) > 1
-
-
-def test_ogni_tanto_lo_scroll_rimbalza_indietro():
-    """Su cento gesti, almeno uno torna su di qualche pixel: e' quello che fa
-    una mano vera quando supera il punto che voleva."""
-    rimbalzi = sum(1 for _ in range(100)
-                   if any(delta < 0 for delta, _ in piano_scroll(400)))
-    assert rimbalzi > 0
 
 
 def test_uno_scroll_di_zero_pixel_non_produce_gesti():
     assert piano_scroll(0) == []
+
+
+# ── il lancio: il flick che copre distanza ─────────────────────────────────
+def test_il_lancio_decelera_fino_a_spegnersi():
+    """I due flick veri (gesti 0 e 2) finiscono con 3,3,2,2,1,1,1."""
+    piano = [d for d, _ in piano_lancio(6000)]
+    assert piano[-1] <= 2
+    assert piano[0] >= PICCO_UMANO_MIN
+
+
+def test_un_lancio_copre_la_distanza_di_un_gesto_umano():
+    """5.742px il piu' corto dei gesti registrati."""
+    netto = sum(d for d, _ in piano_lancio(6000))
+    assert 4500 <= netto <= 7500
+
+
+def test_un_lancio_di_zero_pixel_non_produce_eventi():
+    assert piano_lancio(0) == []
 
 
 # ── nessuna soglia assoluta puo' tornare dentro il JS ──────────────────────

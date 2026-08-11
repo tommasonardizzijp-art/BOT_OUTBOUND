@@ -78,20 +78,25 @@ ALTEZZA_HEADER_PX = 130
 # ombre, scrollbar): oltre questo margine e' un'altra colonna.
 TOLLERANZA_BORDO_PX = 30
 
-# Scatti di rotella. Un dito su un trackpad non produce otto colpi da cento
-# pixel: produce decine di eventi piccoli e ravvicinati, che accelerano e poi
-# frenano. Sopra i 60px per evento la scalinata si vede a occhio.
-SCATTO_MAX_PX = 60
-PAUSA_SCATTO_MIN_S = 0.012
-PAUSA_SCATTO_MAX_S = 0.045
+# Gesti di scorrimento, tarati sui dati registrati l'11/08 dal trackpad di
+# Tommaso (scripts/registra_scroll_umano.py, 1660 eventi):
+#   - gli eventi arrivano a ritmo di frame: mediana 16.7ms, con code fino a
+#     150ms e occasionali coppie nello stesso frame;
+#   - deltaY mediano 18, con picchi fra 193 e 342;
+#   - velocita' fra 1472 e 2517 px/s;
+#   - un singolo gesto copre da 5.742 a 24.113 px.
+# Il modello precedente stava a 952 px/s con picchi da 60: piu' lento e piu'
+# piccolo del vero, che non e' prudenza — e' una firma diversa dal riferimento.
+INTERVALLO_FRAME_S = 0.0167
+INTERVALLO_JITTER_S = 0.006      # code fino a ~150ms viste nei dati
+PROB_INTERVALLO_LUNGO = 0.04
+INTERVALLO_LUNGO_MAX_S = 0.150
+PROB_EVENTO_NULLO = 0.03         # 48 eventi su 1660 avevano deltaY 0
 
-# Quanti pixel per scatto, in media: da qui esce il numero di eventi.
-PX_PER_SCATTO_MIN = 18
-PX_PER_SCATTO_MAX = 32
-SCATTI_MIN = 8
-SCATTI_MAX = 45
-
-PROB_RIMBALZO = 0.12
+PICCO_MIN_PX = 190
+PICCO_MAX_PX = 342
+VELOCITA_MIN_PX_S = 1500
+VELOCITA_MAX_PX_S = 2500
 
 # Attese a pazienza crescente prima di dichiarare qualcosa sulla fine lista.
 ATTESE_S = (1, 2, 4, 8, 16)
@@ -342,38 +347,101 @@ def scegli_contenitore(candidati: list[dict], bordo: float | None) -> int | None
     return max(dentro, key=lambda coppia: coppia[1].get("scrollHeight", 0))[0]
 
 
-def piano_scroll(px_totali: int) -> list[tuple[int, float]]:
-    """Il gesto di scorrimento, come sequenza di (pixel, pausa in secondi).
+def _intervallo() -> float:
+    """Il tempo fino al prossimo evento wheel.
 
-    Un solo salto da mezza schermata e' la firma piu' riconoscibile che ci sia:
-    nessun dito muove una lista in un evento solo. Qui il gesto si scompone in
-    scatti piccoli e disuguali, con pause brevi, e ogni tanto un rimbalzo
-    all'indietro — quello che fa una mano quando supera il punto che voleva.
+    Il browser li emette a ritmo di frame, ma nei dati veri capitano sia coppie
+    nello stesso frame sia pause fino a 150ms quando il dito rallenta.
+    """
+    if random.random() < PROB_INTERVALLO_LUNGO:
+        return random.uniform(INTERVALLO_FRAME_S * 2, INTERVALLO_LUNGO_MAX_S)
+    return max(0.0, random.gauss(INTERVALLO_FRAME_S, INTERVALLO_JITTER_S))
+
+
+def piano_scroll(px_totali: int) -> list[tuple[int, float]]:
+    """Un gesto di scorrimento: (pixel, pausa) per ogni evento wheel.
+
+    Profilo a campana — accelera, tiene, frena — con la velocita' MEDIA del
+    gesto presa dalla forbice misurata (1472-2517 px/s). Il picco per singolo
+    evento (193-342px) e' un'altra statistica: e' 10-19 volte la mediana per
+    evento (18px), un rapporto che una campana liscia non puo' produrre — il
+    picco piu' alto che una distribuzione sinusoidale normalizzata concede e'
+    ~1.6 volte la media, non 19 volte. Percio' l'evento centrale del gesto
+    viene forzato dentro la forbice reale, e il resto del budget si distribuisce
+    sugli altri eventi come prima: e' la stessa asimmetria vista nei dati veri,
+    una sventagliata in mezzo a tanti scatti piccoli.
+
+    Sotto i ~190px la sventagliata da sola coprirebbe l'intero `px_totali`
+    (budget residuo a zero, un solo evento): innocuo per i due chiamanti reali
+    (`scorri`/`scorri_leggendo`, che chiedono sempre centinaia-migliaia di px),
+    ma non e' il gesto "tanti scatti piccoli" che il resto del modulo assume.
+    Sopra i ~60-70px la campana non riesce a salire (stesso limite matematico
+    del picco, applicato al budget residuo): fra i due resta una zona 60-189px
+    piu' scarsa che nei dati veri, dove gli eventi medio-grandi sono diffusi
+    lungo tutto il gesto, non concentrati in un unico scatto. Accettato: i due
+    test di forma (mediana e picco) restano fedeli ai dati; la forma fine della
+    distribuzione no. Un secondo picco intermedio (invece di uno solo) la
+    chiuderebbe, se servisse mai su gesti molto piu' lunghi di quelli attuali.
+
+    Il numero di eventi (`quanti`) e' scelto perche' la durata totale attesa
+    combaci con `px_totali / velocita`; ma i tempi FRA gli eventi restano
+    casuali (code fino a 150ms), quindi la durata REALIZZATA oscilla. Senza
+    correzione, su ~2000 estrazioni la velocita' realizzata cade fuori dalla
+    forbice misurata circa 1 volta su 4 — un test flaky, trovato in review.
+    Si normalizza la somma delle pause sulla durata attesa: le differenze
+    relative fra pause lunghe e corte restano (il jitter resta jitter), solo
+    la durata totale del gesto smette di vagare.
     """
     if px_totali <= 0:
         return []
 
-    quanti = round(px_totali / random.uniform(PX_PER_SCATTO_MIN, PX_PER_SCATTO_MAX))
-    quanti = max(SCATTI_MIN, min(SCATTI_MAX, quanti))
+    velocita = random.uniform(VELOCITA_MIN_PX_S, VELOCITA_MAX_PX_S)
+    quanti = max(4, round(px_totali / (velocita * INTERVALLO_FRAME_S)))
+    indice_picco = quanti // 2
+    picco_delta = min(px_totali, random.randint(PICCO_MIN_PX, PICCO_MAX_PX))
+    budget_residuo = px_totali - picco_delta
 
-    # Profilo a campana: il gesto parte piano, prende velocita' a meta' e frena
-    # verso la fine. E' la firma di un movimento vero — una sequenza di scatti
-    # tutti uguali e' un motore, non una mano.
     pesi = [math.sin(math.pi * (i + 0.5) / quanti) for i in range(quanti)]
+    pesi[indice_picco] = 0.0   # l'evento di picco esce dal budget, non dalla campana
     totale_pesi = sum(pesi) or 1.0
 
+    grezzo: list[tuple[int, float]] = []
+    for i, peso in enumerate(pesi):
+        pausa = _intervallo()
+        if i == indice_picco:
+            grezzo.append((picco_delta, pausa))
+            continue
+        if random.random() < PROB_EVENTO_NULLO:
+            grezzo.append((0, pausa))
+            continue
+        delta = budget_residuo * peso / totale_pesi * random.uniform(0.75, 1.25)
+        grezzo.append((max(0, min(PICCO_MAX_PX, round(delta))), pausa))
+
+    durata_attesa = px_totali / velocita
+    durata_grezza = sum(p for _, p in grezzo) or durata_attesa
+    fattore = durata_attesa / durata_grezza
+    return [(d, p * fattore) for d, p in grezzo]
+
+
+def piano_lancio(px_totali: int) -> list[tuple[int, float]]:
+    """Un flick: spinta e poi inerzia che si spegne fino a un pixel.
+
+    L'attrito si sceglie perche' la distanza percorsa — somma di una
+    progressione geometrica, spinta / (1 - attrito) — sia quella richiesta:
+    cosi' il gesto resta fisicamente coerente invece di essere troncato a
+    meta' corsa, che a occhio si riconosce subito.
+    """
+    if px_totali <= 0:
+        return []
+
+    spinta = random.randint(PICCO_MIN_PX, PICCO_MAX_PX)
+    attrito = max(0.90, min(0.995, 1 - spinta / px_totali))
+
     piano: list[tuple[int, float]] = []
-    for peso in pesi:
-        delta = px_totali * peso / totale_pesi * random.uniform(0.82, 1.18)
-        delta = max(3, min(SCATTO_MAX_PX, round(delta)))
-        piano.append((delta, random.uniform(PAUSA_SCATTO_MIN_S, PAUSA_SCATTO_MAX_S)))
-
-    # Ogni tanto la mano supera il punto e torna indietro di qualche pixel.
-    if random.random() < PROB_RIMBALZO and len(piano) > 3:
-        dove = random.randint(len(piano) // 2, len(piano) - 1)
-        piano.insert(dove, (-random.randint(8, 30),
-                            random.uniform(PAUSA_SCATTO_MIN_S, PAUSA_SCATTO_MAX_S)))
-
+    velocita = float(spinta)
+    while velocita >= 1 and len(piano) < 800:
+        piano.append((max(1, round(velocita)), _intervallo()))
+        velocita *= attrito
     return piano
 
 
