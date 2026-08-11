@@ -96,18 +96,21 @@ function formatData(iso: string | null): string {
 // regole.promuovibile in modo approssimato (non e' la fonte di verita', lo
 // e' il backend), giusto per non lasciare una checkbox scurita senza dire
 // perche'.
+// Testo umano per il `motivo` che il backend calcola (regole.py). Non
+// ri-deriva la regola: si limita a tradurre il codice gia' deciso — l'ordine
+// dei controlli vive in un solo posto (review finale di branch: prima
+// esisteva una copia client-side con l'ordine invertito rispetto al
+// backend, gruppo controllato prima di status invece che dopo).
+const MOTIVO_LABEL: Record<string, string> = {
+  gruppo: "Gruppo: mai promuovibile. Anche se selezionata, il backend la scarta comunque.",
+  senza_numero: 'Nessun numero leggibile per questa chat.',
+  gia_promosso: 'Gia\' promossa in precedenza.',
+  scartato: 'Scartata in precedenza.',
+}
+
 function motivoNonPromuovibile(riga: WaDiscoveredChat): string | null {
-  if (riga.promuovibile) return null
-  if (riga.tipo_chat === 'gruppo') {
-    return "Gruppo: mai promuovibile. Anche se selezionata, il backend la scarta comunque."
-  }
-  if (riga.status !== 'nuovo') {
-    return `Stato attuale "${STATUS_LABEL[riga.status]}": non e' piu' una riga nuova.`
-  }
-  if (!riga.numero_mascherato) {
-    return 'Nessun numero leggibile per questa chat.'
-  }
-  return 'Non promuovibile.'
+  if (!riga.motivo) return null
+  return MOTIVO_LABEL[riga.motivo] ?? `Non promuovibile (${riga.motivo}).`
 }
 
 export default function ScopertiPage() {

@@ -20,7 +20,6 @@ protegge la singola INSERT concorrente fra due chiamate `promuovi()` diverse
 """
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -31,6 +30,21 @@ from sqlalchemy.exc import IntegrityError
 from app.models.wa import WaContact, WaDiscoveredChat
 from app.services.wa_discover.classifica import e_etichetta_mascherata
 from app.services.wa_promote.regole import promuovibile
+from app.utils.ids import uuid_valido
+
+
+def _gap_fill(contatto: WaContact, riga: WaDiscoveredChat) -> None:
+    """Aggiorna `display_name`/`chat_title` con cio' che la riga scoperta
+    porta, senza mai cancellare cio' che c'era e senza mai far passare una
+    maschera (P12) per un nome vero. Un solo punto per i due rami che
+    riusano un `WaContact` esistente (trovato subito, o dopo l'IntegrityError
+    di corsa): erano rimasti divergenti -- il primo aggiornava solo
+    `display_name`, mai `chat_title`, mentre la creazione ex-novo valorizza
+    entrambi. Trovato in review finale di branch."""
+    if riga.display_name and not e_etichetta_mascherata(riga.display_name):
+        contatto.display_name = riga.display_name
+    if riga.chat_title and not e_etichetta_mascherata(riga.chat_title):
+        contatto.chat_title = riga.chat_title
 
 
 @dataclass
@@ -75,17 +89,11 @@ async def promuovi(db, *, tenant_id: str, ids: list[str]) -> ReportPromozione:
     adesso = datetime.utcnow()
 
     for id_ in ids:
-        try:
-            # L'id atteso e' sempre un uuid4 (String(36), vedi il modello).
-            # Un id malformato (null byte, non-uuid, 10k caratteri) non deve
-            # arrivare al driver: un null byte fa sollevare ad asyncpg un
-            # CharacterNotInRepertoireError non catturato -> 500 grezzo
-            # (trovato in QA di fine modulo). Si scarta PRIMA della query,
-            # stesso motivo "non_trovato" di un id valido ma inesistente --
-            # nessuna differenza osservabile fra le due cause, stesso
-            # principio del confine di sicurezza sul tenant sopra.
-            uuid.UUID(id_)
-        except (ValueError, AttributeError, TypeError):
+        if not uuid_valido(id_):
+            # Si scarta PRIMA della query, stesso motivo "non_trovato" di un
+            # id valido ma inesistente -- nessuna differenza osservabile fra
+            # le due cause, stesso principio del confine di sicurezza sul
+            # tenant sopra.
             report.scarti.append(Scarto(id_, "non_trovato"))
             continue
 
@@ -136,12 +144,18 @@ async def promuovi(db, *, tenant_id: str, ids: list[str]) -> ReportPromozione:
                 report.contatti_creati += 1
             except IntegrityError:
                 # L'altra chiamata ha vinto la corsa: si rilegge e si
-                # procede come nel ramo "trovato" sotto.
+                # procede come nel ramo "trovato" sotto. Guard esplicito su
+                # None (a differenza di ogni altro lookup in questo file):
+                # sotto READ COMMITTED la riga vincente deve esserci sempre,
+                # ma se quell'assunzione si rompesse un AttributeError grezzo
+                # sarebbe peggio di un errore chiaro. Trovato in review
+                # finale di branch.
                 contatto = await db.scalar(
                     select(WaContact).where(WaContact.tenant_id == riga.tenant_id,
                                             WaContact.phone_hmac == riga.phone_hmac))
-                if riga.display_name and not e_etichetta_mascherata(riga.display_name):
-                    contatto.display_name = riga.display_name
+                if contatto is None:
+                    raise
+                _gap_fill(contatto, riga)
                 report.contatti_riusati += 1
         else:
             # Gap-fill (stesso principio di wa_ingest Q16): si aggiorna cio'
@@ -152,9 +166,9 @@ async def promuovi(db, *, tenant_id: str, ids: list[str]) -> ReportPromozione:
             # l'opposto di "integra, non cancella". Trovato con un test
             # dedicato: senza il guard, un contatto con display_name="Mario
             # Rossi" veniva sovrascritto da una ri-scoperta con pannello non
-            # apribile ("+39•••••077").
-            if riga.display_name and not e_etichetta_mascherata(riga.display_name):
-                contatto.display_name = riga.display_name
+            # apribile ("+39•••••077"). Stesso guard vale per chat_title
+            # (review finale di branch: era rimasto scoperto).
+            _gap_fill(contatto, riga)
             report.contatti_riusati += 1
 
         # status non torna mai indietro (vincolo globale): da qui in poi la

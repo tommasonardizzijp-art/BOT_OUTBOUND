@@ -44,12 +44,19 @@ async def _numero_o_404(db, number_id: str) -> WaNumber:
 
 def _serializza(riga: WaDiscoveredChat) -> dict:
     """`numero_mascherato` mai il numero intero (P12, stesso vincolo di
-    `wa_contacts.lista_contatti`). `promuovibile` riusa `regole.promuovibile`
-    -- niente duplicazione della regola fra qui e `promozione.py` (il piano lo
-    richiede esplicitamente): un gruppo compare comunque nella lista (visibile
-    all'operatore), solo marcato non promuovibile, mai nascosto."""
+    `wa_contacts.lista_contatti`). `promuovibile`/`motivo` riusano
+    `regole.promuovibile` -- niente duplicazione della regola fra qui e
+    `promozione.py` (il piano lo richiede esplicitamente): un gruppo compare
+    comunque nella lista (visibile all'operatore), solo marcato non
+    promuovibile, mai nascosto. `motivo` (None se promuovibile) e' il MOTIVO
+    VERO calcolato da `regole.py` -- il frontend lo mostra cosi' com'e', non
+    lo ri-deriva con una copia della regola che rischierebbe di divergere
+    nell'ordine dei controlli (trovato in review finale di branch: il
+    frontend controllava 'gruppo' prima di 'status', l'ordine opposto di
+    regole.py)."""
     numero_mascherato = (mask_phone(decrypt(riga.encrypted_phone))
                          if riga.encrypted_phone else None)
+    decisione = promuovibile(riga)
     return {
         "id": riga.id,
         "chat_title": riga.chat_title,
@@ -58,13 +65,14 @@ def _serializza(riga: WaDiscoveredChat) -> dict:
         "numero_leggibile": riga.numero_leggibile,
         "numero_mascherato": numero_mascherato,
         "status": riga.status,
-        "promuovibile": promuovibile(riga).ok,
+        "promuovibile": decisione.ok,
+        "motivo": decisione.motivo,
         "discovered_at": riga.discovered_at.isoformat() if riga.discovered_at else None,
     }
 
 
 @router.get("")
-async def lista(number_id: str, status: str = "nuovo", tipo_chat: str | None = None,
+async def lista(number_id: str, status: str | None = "nuovo", tipo_chat: str | None = None,
                 ha_numero: bool | None = None, limit: int = 200, offset: int = 0,
                 db=Depends(get_db)) -> dict:
     numero = await _numero_o_404(db, number_id)
@@ -73,7 +81,11 @@ async def lista(number_id: str, status: str = "nuovo", tipo_chat: str | None = N
         WaDiscoveredChat.tenant_id == numero.tenant_id,
         WaDiscoveredChat.number_id == number_id,
     )
-    if status:
+    if status is not None:
+        # `is not None`, non un truthy check: uno `?status=` esplicito (stringa
+        # vuota) e' un valore deliberato -- deve filtrare letteralmente su
+        # status='' (zero righe), non azzerare il filtro in silenzio come
+        # faceva un `if status:` (trovato in review finale di branch).
         query = query.where(WaDiscoveredChat.status == status)
     if tipo_chat:
         query = query.where(WaDiscoveredChat.tipo_chat == tipo_chat)

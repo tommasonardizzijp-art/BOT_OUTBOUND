@@ -93,6 +93,13 @@ async def test_get_filtra_per_tipo_chat_ha_numero_status(db_session, client):
     ids = {c["id"] for c in r.json()["chat"]}
     assert ids == {gia_promosso.id}
 
+    # status='' esplicito e' un valore, non "nessun filtro" (review finale di
+    # branch): filtra letteralmente su status='', zero righe -- un `if
+    # status:` tratterebbe la stringa vuota come falsy e mostrerebbe TUTTO.
+    r = await client.get(f"/api/wa/discovered-chats?number_id={number.id}&status=")
+    assert r.status_code == 200, r.text
+    assert r.json()["chat"] == []
+
 
 @pytest.mark.asyncio
 async def test_get_mostra_il_gruppo_ma_non_promuovibile(db_session, client):
@@ -112,6 +119,23 @@ async def test_get_mostra_il_gruppo_ma_non_promuovibile(db_session, client):
     assert len(righe) == 1
     assert righe[0]["id"] == gruppo_con_numero.id
     assert righe[0]["promuovibile"] is False
+    # Il motivo VERO calcolato da regole.py, non ri-derivato lato client
+    # (review finale di branch): il frontend deve leggerlo cosi' com'e'.
+    assert righe[0]["motivo"] == "gruppo"
+
+
+@pytest.mark.asyncio
+async def test_get_riga_promuovibile_ha_motivo_none(db_session, client):
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await make_discovered_chat(db_session, tenant, number, tipo_chat="individuale")
+    await db_session.commit()
+
+    r = await client.get(f"/api/wa/discovered-chats?number_id={number.id}")
+    assert r.status_code == 200, r.text
+    righe = r.json()["chat"]
+    assert righe[0]["promuovibile"] is True
+    assert righe[0]["motivo"] is None
 
 
 @pytest.mark.asyncio

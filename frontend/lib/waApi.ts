@@ -179,6 +179,10 @@ export type WaDiscoveredChat = {
   numero_mascherato: string | null
   status: 'nuovo' | 'promosso' | 'scartato'
   promuovibile: boolean
+  // Il motivo VERO calcolato da regole.py quando promuovibile e' false
+  // (null altrimenti) -- mai ri-derivarlo lato client, l'ordine dei
+  // controlli vive in un solo posto (review finale di branch).
+  motivo: string | null
   discovered_at: string | null
 }
 
