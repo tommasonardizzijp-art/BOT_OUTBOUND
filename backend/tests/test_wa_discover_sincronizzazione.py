@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.wa_discover.sincronizzazione import (
     percentuale_da_testi, puo_scansionare,
 )
@@ -77,3 +79,98 @@ def test_fra_piu_percentuali_vince_quella_del_contesto_giusto():
     testi = ["Fulvio: sconto 50%", "Sincronizzazione dei messaggi precedenti in corso",
              "Completata al 87%"]
     assert percentuale_da_testi(testi) == 87
+
+
+# --- La chiusura del pannello deve essere VERIFICATA, non sperata ---
+
+class _PaginaImpostazioni:
+    """Simula il pannello Impostazioni di WhatsApp Web.
+
+    `escape_necessari` dice quanti Escape servono davvero per chiuderlo: sul DOM
+    reale (misurato l'11/08) UNO non basta -- il pannello resta aperto, e a volte
+    si finisce in una sottopagina (drawer-title-privacy). Finche' resta aperto,
+    la sidebar mostra 5 righe su 65 e nessun click apre una chat: un giro intero
+    di scansione va perso.
+    """
+
+    class _Keyboard:
+        def __init__(self, pagina):
+            self._p = pagina
+
+        async def press(self, tasto):
+            if tasto == "Escape" and self._p.aperto:
+                self._p.escape_ricevuti += 1
+                if self._p.escape_ricevuti >= self._p.escape_necessari:
+                    self._p.aperto = False
+
+    class _Locator:
+        def __init__(self, pagina):
+            self._p = pagina
+
+        @property
+        def first(self):
+            return self
+
+        async def count(self):
+            return 1
+
+        async def click(self, **kw):
+            self._p.aperto = True
+
+    def __init__(self, *, testi, escape_necessari=1):
+        self.testi = testi
+        self.aperto = False
+        self.escape_ricevuti = 0
+        self.escape_necessari = escape_necessari
+        self.keyboard = self._Keyboard(self)
+
+    def locator(self, selettore):
+        return self._Locator(self)
+
+    async def evaluate(self, script, *args):
+        if "pane-side" in script:
+            return True
+        return self.testi if self.aperto else []
+
+    async def reload(self, **kwargs):
+        """Il reload riporta la UI allo stato iniziale: e' la garanzia su cui si
+        appoggia _richiudi_pannello quando gli Escape non bastano."""
+        self.aperto = False
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_il_pannello_viene_chiuso_anche_se_un_escape_non_basta():
+    """Il difetto che ha fatto fallire il collaudo dell'11/08.
+
+    leggi_percentuale apriva Impostazioni e lo chiudeva con UN Escape cieco.
+    Sul DOM reale quell'Escape non chiudeva niente: il pannello restava aperto
+    per tutto il giro, la sidebar mostrava 5 righe su 65 e nessuna chat si
+    apriva. Il gate scritto per proteggere lo scan era la cosa che lo rompeva.
+    """
+    from app.services.wa_discover.sincronizzazione import leggi_percentuale
+
+    pagina = _PaginaImpostazioni(
+        testi=["Sincronizzazione dei messaggi precedenti in corso", "Completata al 61%"],
+        escape_necessari=3,
+    )
+    assert await leggi_percentuale(pagina) == 61
+    assert pagina.aperto is False, (
+        "il pannello e' rimasto aperto: il resto del giro di scansione sarebbe perso"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pannello_che_non_si_chiude_proprio_non_blocca_la_lettura():
+    """Se il pannello non si chiude nemmeno insistendo, la percentuale letta si
+    restituisce lo stesso -- ma il chiamante deve poterlo sapere: e' compito del
+    log, non di un'eccezione che farebbe perdere anche il dato."""
+    from app.services.wa_discover.sincronizzazione import leggi_percentuale
+
+    pagina = _PaginaImpostazioni(
+        testi=["Sincronizzazione in corso", "Completata al 42%"],
+        escape_necessari=99,
+    )
+    assert await leggi_percentuale(pagina) == 42

@@ -77,7 +77,7 @@ class _FakePage:
             pass
 
     def __init__(self, *, righe_per_scroll, testo_pagina="", rowcount=None,
-                viewport_h=800):
+                viewport_h=800, drawer_aperti=None):
         self._righe_per_scroll = list(righe_per_scroll)
         self._passo = 0
         self._totale_letto = False
@@ -88,6 +88,10 @@ class _FakePage:
         self.mouse = self._Mouse()
         self.keyboard = self._Keyboard()
         self.impostazioni_aperte = 0
+        # Pannelli che coprono la lista chat: quando ce n'e' uno, la riga sotto
+        # il puntatore non appartiene alla lista e nessun click la raggiunge --
+        # sul DOM reale lo scan raccoglieva 5 righe su 65 (collaudo 11/08).
+        self.drawer_aperti = list(drawer_aperti or [])
 
     def locator(self, selettore):
         """Simula la voce Impostazioni: la percentuale di sincronizzazione vive
@@ -96,6 +100,9 @@ class _FakePage:
         return _FakeLocator(self, "Impostazioni" in selettore or "Settings" in selettore)
 
     async def evaluate(self, script, *args):
+        if "elementFromPoint" in script:
+            # "La lista e' utilizzabile?": falso quando un pannello la copre.
+            return not self.drawer_aperti
         if "textContent" in script and "children.length" in script:
             # I testi della pagina, letti da leggi_percentuale DOPO il click su
             # Impostazioni: prima di quel click il pannello non c'e'.
@@ -388,3 +395,29 @@ async def test_rinnova_il_lock_solo_se_il_token_e_dato(monkeypatch, db_session, 
         page, db=db_session, tenant_id=numero_wa.tenant_id, number_id=numero_wa.id,
         lock_token="tok-123")
     assert chiamate == [(numero_wa.id, "tok-123")]
+
+
+@pytest.mark.asyncio
+async def test_non_si_scansiona_con_la_sidebar_coperta(monkeypatch, db_session, numero_wa):
+    """Il difetto che ha fatto fallire il collaudo dell'11/08, dal lato
+    dell'orchestratore.
+
+    Con un pannello aperto sopra la lista, la sidebar reale espone 5 righe su 65
+    e nessun click apre una chat -- ma nulla solleva un errore: il giro finisce
+    "dopo stallo" con 1 chat su 291 e sembra un problema di scorrimento, mentre
+    e' una tenda davanti alla lista. Meglio non partire affatto che raccogliere
+    una frazione e dichiararla completa.
+    """
+    monkeypatch.setattr(sidebar, "scan_sidebar", _non_deve_essere_chiamato)
+    page = _FakePage(
+        righe_per_scroll=[[{"position": 0, "titolo": "Fulvio", "top": 200}]],
+        testo_pagina="Sincronizzazione dei messaggi precedenti in corso\nCompletata al 90%",
+        rowcount=291,
+        drawer_aperti=["drawer-fullscreen", "drawer-left", "drawer-title-privacy"],
+    )
+    esito = await wa_discover_run._esegui_scan(
+        page, db=db_session, tenant_id=numero_wa.tenant_id, number_id=numero_wa.id)
+
+    assert esito["motivo"] == "sidebar_coperta"
+    assert esito["salvate"] == 0
+    assert await _scoperte_di(db_session, numero_wa.id) == []
