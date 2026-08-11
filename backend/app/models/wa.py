@@ -353,3 +353,79 @@ class WaInboundEvent(Base):
     matched_by: Mapped[WaMatchedBy] = mapped_column(
         SAEnum(WaMatchedBy, name="wa_matched_by", native_enum=False), nullable=False)
     processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class WaDiscoveredChat(Base):
+    """Staging delle chat scoperte dalla Fase A auto-discover (spec 5.4).
+
+    Tabella separata da wa_contacts per una ragione strutturale, non estetica:
+    li' encrypted_phone e phone_hmac sono NOT NULL, quindi una chat di cui non
+    si legge il numero -- il 100% dei gruppi e una parte delle 1:1 (misurato nel
+    PoC-4) -- non potrebbe proprio esistere. Salvarla comunque, marcata, e' una
+    decisione presa: il dato resta recuperabile a mano dalla rubrica del
+    telefono. Il grezzo raccolto dal browser non tocca i contatti veri del bot
+    finche' la Fase B non lo promuove.
+    """
+    __tablename__ = "wa_discovered_chats"
+    __table_args__ = (
+        # Ri-scansionare lo stesso numero deve essere innocuo (spec 5.3): la
+        # seconda passata aggiorna, non duplica.
+        #
+        # La chiave e' (numero, TITOLO) e non il numero di telefono, perche' il
+        # telefono manca in tutti i gruppi e in parte delle 1:1: una unique su
+        # phone_hmac lascerebbe senza protezione proprio i casi piu' frequenti.
+        # E include number_id perche' due numeri WhatsApp hanno rubriche
+        # diverse -- 'Fulvio' nel telefono del negozio e 'Fulvio' in quello
+        # personale sono due chat distinte.
+        UniqueConstraint("number_id", "chat_title",
+                         name="uq_wa_discovered_number_title"),
+        # SECONDA rete, e non e' ridondanza. In SQL NULL != NULL: la unique qui
+        # sopra NON vede due righe con chat_title NULL -- e chat_title e' NULL
+        # proprio nel caso piu' frequente, quando il titolo E' il numero e per
+        # P12 non si salva in chiaro (il 39% delle chat di Primero, misurato).
+        # Senza questa, ri-scansionare duplicherebbe in silenzio due contatti su
+        # cinque, cioe' l'opposto dell'"innocuo" promesso dalla spec 5.3.
+        # Le due unique si coprono a vicenda: quando manca il titolo c'e' il
+        # numero, quando manca il numero c'e' il titolo.
+        UniqueConstraint("number_id", "phone_hmac",
+                         name="uq_wa_discovered_number_phone"),
+        Index("ix_wa_discovered_number_status", "number_id", "status"),
+        Index("ix_wa_discovered_phone_hmac", "phone_hmac"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True,
+                                    default=lambda: str(uuid.uuid4()))
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"),
+                                           nullable=False)
+    number_id: Mapped[str] = mapped_column(String(36), ForeignKey("wa_numbers.id"),
+                                           nullable=False)
+    # Il titolo COSI' COME APPARE nella sidebar -- tranne quando il titolo E' il
+    # numero: in quel caso resta None e il numero va cifrato sotto (P12, stessa
+    # regola di WaContact.chat_title). Non e' un caso di bordo: e' il 39% delle
+    # chat di Primero e il 14% di un numero personale (misurato, PoC-5).
+    chat_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Fernet, come WaContact.encrypted_phone. Nullable: qui il numero puo'
+    # legittimamente mancare.
+    encrypted_phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    numero_leggibile: Mapped[bool] = mapped_column(Boolean, default=False,
+                                                   nullable=False)
+    # 'individuale' | 'gruppo' | 'ignoto'. TRI-STATO, non booleano: il PoC-4 ha
+    # misurato recall 1/6 per il rilevamento gruppo e un 5% di pannelli che non
+    # si aprono nemmeno su chat 1:1 vere. "Non lo so" e' uno stato frequente e
+    # va detto: con un booleano quel dubbio diventerebbe una risposta secca, e
+    # persone contattabili verrebbero scartate senza lasciare traccia del perche'.
+    tipo_chat: Mapped[str] = mapped_column(String(20), default="ignoto",
+                                           nullable=False)
+    # Quale filtro/etichetta era attivo durante lo scan. Oggi sempre None: le
+    # Liste non si sincronizzano su WhatsApp Web e Primero non e' un account
+    # Business (PoC-5, 11/08). Il campo resta perche' costa nulla e il giorno in
+    # cui il filtro tornera' praticabile serve sapere da dove viene ogni riga.
+    source_filtro: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # 'nuovo' | 'promosso' | 'scartato' (spec 5.4). Lo muove la Fase B.
+    status: Mapped[str] = mapped_column(String(20), default="nuovo", nullable=False)
+    discovered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, nullable=False)
