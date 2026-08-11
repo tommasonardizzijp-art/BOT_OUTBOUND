@@ -93,6 +93,7 @@ export interface Campaign {
   bio_target?: number | null
   list_progress?: { done: number; target: number | null } | null
   bio_progress?: { done: number; target: number | null } | null
+  inbox_cursor_at?: string | null
 }
 
 // M15 rev: approval queue item

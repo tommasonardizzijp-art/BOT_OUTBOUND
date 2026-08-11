@@ -15,6 +15,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Input } from '@/components/ui/input'
 import { Progress } from '@/components/ui/progress'
 import { Separator } from '@/components/ui/separator'
+import { formatDateTime } from '@/lib/dateUtils'
 import { toast } from 'sonner'
 import {
   ArrowLeft, Play, Pause, Square, Loader2, Users, CheckCircle,
@@ -95,6 +96,7 @@ function TwoPhasePanel({ campaign, id, action, loadingAction }: {
 }) {
   const [listTarget, setListTarget] = useState<string>('')
   const [bioTarget, setBioTarget] = useState<string>('')
+  const [saltaLavorate, setSaltaLavorate] = useState(false)
   const lp = campaign.list_progress
   const bp = campaign.bio_progress
   const listing = campaign.status === 'listing' || campaign.status === 'listing_break'
@@ -123,15 +125,35 @@ function TwoPhasePanel({ campaign, id, action, loadingAction }: {
             className="bg-gray-800 border-gray-700 text-white text-sm h-8 disabled:opacity-50"
           />
           {!listing ? (
-            <Button
-              size="sm"
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white"
-              disabled={loadingAction}
-              onClick={() => action(() => api.campaigns.startList(id, listTarget ? Number(listTarget) : null))}
-            >
-              {loadingAction ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Play className="w-4 h-4 mr-1" />}
-              Avvia Fase Lista
-            </Button>
+            <>
+              {campaign.inbox_engine === 'browser' && (
+                <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={saltaLavorate && !!campaign.inbox_cursor_at}
+                    onChange={(e) => setSaltaLavorate(e.target.checked)}
+                    disabled={!campaign.inbox_cursor_at}
+                    className="rounded border-gray-600 bg-gray-800 accent-purple-500"
+                  />
+                  Riprendi da dove ero arrivato
+                  {campaign.inbox_cursor_at
+                    ? ` (${formatDateTime(campaign.inbox_cursor_at)})`
+                    : ' — nessun segnalibro ancora'}
+                </label>
+              )}
+              <Button
+                size="sm"
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+                disabled={loadingAction}
+                onClick={() => action(() => api.campaigns.startList(
+                  id, listTarget ? Number(listTarget) : null,
+                  saltaLavorate && !!campaign.inbox_cursor_at,
+                ))}
+              >
+                {loadingAction ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Play className="w-4 h-4 mr-1" />}
+                Avvia Fase Lista
+              </Button>
+            </>
           ) : (
             <Button
               size="sm"

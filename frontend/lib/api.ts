@@ -160,8 +160,11 @@ export const api = {
       request<Campaign>(`/campaigns/${id}/start-dm-auto`, { method: 'POST' }),
     resumeBreak: (id: string) =>
       request<Campaign>(`/campaigns/${id}/resume-break`, { method: 'POST' }),
-    startList: (id: string, target?: number | null) =>
-      request<Campaign>(`/campaigns/${id}/list/start`, { method: 'POST', body: JSON.stringify({ target: target ?? null }) }),
+    startList: (id: string, target?: number | null, saltaLavorate = false) =>
+      request<Campaign>(`/campaigns/${id}/list/start`, {
+        method: 'POST',
+        body: JSON.stringify({ target: target ?? null, salta_lavorate: saltaLavorate }),
+      }),
     stopList: (id: string) =>
       request<Campaign>(`/campaigns/${id}/list/stop`, { method: 'POST' }),
     startBios: (id: string, target?: number | null) =>
