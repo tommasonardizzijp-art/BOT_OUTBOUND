@@ -97,6 +97,47 @@ def analizza_riga_lista(testo_riga: str, lingua: str) -> RigaLista:
     return RigaLista(nome=nome, anteprima=anteprima, ultimo_nostro=ultimo_nostro, data_relativa=data)
 
 
+# Unita' di tempo della riga di lista, in ore. Misurate l'11/08: '5 g', '20 h',
+# '3 g', '15 h', '2 g', '3 h'. Le sigle inglesi convivono con quelle italiane
+# perche' l'interfaccia dell'account misurato le mescolava ('Unread' in inglese
+# con il resto in italiano).
+_UNITA_IN_ORE: dict[str, float] = {
+    "m": 1 / 60, "min": 1 / 60,
+    "h": 1.0, "o": 1.0, "ora": 1.0, "ore": 1.0,
+    "g": 24.0, "gg": 24.0, "d": 24.0, "giorno": 24.0, "giorni": 24.0,
+    "sett": 168.0, "w": 168.0, "settimana": 168.0, "settimane": 168.0,
+    "a": 8760.0, "y": 8760.0, "anno": 8760.0, "anni": 8760.0,
+}
+
+# Le cifre sono limitate a 6: nessuna data relativa reale le supera (anni
+# nella decina), e senza limite un numero patologicamente lungo (DOM corrotto,
+# testo concatenato) farebbe sollevare OverflowError a int()*float invece di
+# ritornare None come la funzione promette di fare sempre.
+_ETA_RIGA = re.compile(r"^\s*(\d{1,6})\s*([a-zA-Zàèéìòù]+)\s*$")
+
+
+def eta_riga_in_ore(data_relativa: str | None, lingua: str) -> float | None:
+    """Quante ore fa risale l'ultimo messaggio della riga di lista.
+
+    `None` quando il formato non e' riconosciuto ('Unread', stringhe vuote,
+    qualunque cosa Instagram cambi domani): meglio nessuna eta' che una
+    sbagliata, perche' la modalita' segnalibro su un'eta' inventata salterebbe
+    righe che andavano lette.
+
+    `lingua` non seleziona il vocabolario — le sigle italiane e inglesi sono
+    accettate insieme — ma resta in firma per uniformita' con le altre funzioni
+    del modulo e perche' serve il giorno in cui i formati divergeranno davvero.
+    """
+    corrispondenza = _ETA_RIGA.match(data_relativa or "")
+    if not corrispondenza:
+        return None
+    quantita, unita = corrispondenza.groups()
+    ore = _UNITA_IN_ORE.get(unita.lower())
+    if ore is None:
+        return None
+    return int(quantita) * ore
+
+
 def estrai_username_thread(href_list: list[str], propri: set[str]) -> str | None:
     """Lo username dell'interlocutore dagli href a segmento singolo.
 

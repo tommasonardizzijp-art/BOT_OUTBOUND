@@ -160,3 +160,49 @@ def test_estrai_data_thread_senza_data_riconoscibile():
 def test_estrai_data_thread_lingua_non_prevista_solleva():
     with pytest.raises(KeyError):
         estrai_data_thread("9 feb 2026, 20:28", "de")
+
+
+# ── eta' della riga, per la modalita' segnalibro ───────────────────────────
+# Formati misurati l'11/08 sulla lista di @michele.carozza, 212 righe:
+#   '5 g' x128 · '20 h' x64 · '3 g' x6 · '4 g' x6 · '15 h' x2 · '2 g' x2 · '3 h' x1 · 'Unread' x3
+from app.services.inbox_browser.testo import eta_riga_in_ore   # noqa: E402
+
+
+def test_le_ore_si_leggono_dalla_riga():
+    assert eta_riga_in_ore("20 h", "it") == 20.0
+
+
+def test_i_giorni_diventano_ore():
+    assert eta_riga_in_ore("5 g", "it") == 120.0
+
+
+def test_le_settimane_diventano_ore():
+    assert eta_riga_in_ore("2 sett", "it") == 336.0
+
+
+def test_i_minuti_valgono_meno_di_un_ora():
+    assert eta_riga_in_ore("45 m", "it") == 0.75
+
+
+def test_un_formato_sconosciuto_non_produce_un_eta():
+    """Meglio nessuna eta' che una sbagliata: su un'eta' inventata la modalita'
+    segnalibro salterebbe righe che andavano lette."""
+    assert eta_riga_in_ore("Unread", "it") is None
+    assert eta_riga_in_ore("", "it") is None
+    assert eta_riga_in_ore(None, "it") is None
+
+
+def test_il_formato_inglese_e_riconosciuto():
+    """L'interfaccia dell'account misurato mostrava 'Unread' in inglese pur
+    avendo il resto in italiano: il parsing non deve dipendere dalla lingua
+    dichiarata piu' del necessario."""
+    assert eta_riga_in_ore("5 d", "en") == 120.0
+    assert eta_riga_in_ore("20 h", "en") == 20.0
+    assert eta_riga_in_ore("2 w", "en") == 336.0
+
+
+def test_un_numero_patologicamente_lungo_non_solleva_eccezione():
+    """Trovato in review: senza limite di cifre, un DOM corrotto o testo
+    concatenato con centinaia di cifre faceva sollevare OverflowError invece
+    di ritornare None come la funzione promette sempre di fare."""
+    assert eta_riga_in_ore("1" + "0" * 400 + " g", "it") is None
