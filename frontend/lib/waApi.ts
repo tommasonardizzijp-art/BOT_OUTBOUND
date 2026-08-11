@@ -166,6 +166,43 @@ export type ReportIngest = {
   scarti: ScartoIngest[]
 }
 
+// wa_discover._serializza: numero_mascherato mai il numero intero (P12,
+// stesso vincolo di wa_contacts.lista_contatti). promuovibile riusa
+// regole.promuovibile lato backend -- un gruppo compare comunque nella
+// lista, solo marcato non promuovibile, mai nascosto.
+export type WaDiscoveredChat = {
+  id: string
+  chat_title: string | null
+  display_name: string | null
+  tipo_chat: 'individuale' | 'gruppo' | 'ignoto'
+  numero_leggibile: boolean
+  numero_mascherato: string | null
+  status: 'nuovo' | 'promosso' | 'scartato'
+  promuovibile: boolean
+  discovered_at: string | null
+}
+
+export type ScartoPromozione = { id: string; motivo: string }
+
+// wa_discover.promote(): risposta di POST /wa/discovered-chats/promote,
+// stesso stile di ReportIngest (chiavi del dataclass, scarti come lista di dict).
+export type ReportPromozione = {
+  promossi: number
+  contatti_creati: number
+  contatti_riusati: number
+  gia_dnc: number
+  scarti: ScartoPromozione[]
+  contatti_promossi_ids: string[]
+}
+
+// wa_contacts.enroll(): risposta di POST /wa/contacts/enroll.
+export type ReportArruolamento = {
+  arruolati: number
+  gia_presenti: number
+  gia_dnc: number
+  scarti: { id: string; motivo: string }[]
+}
+
 export type WaNumberCreate = {
   tenant_id: string
   label: string
@@ -271,5 +308,39 @@ export const waApi = {
     },
     rimuovi: (campaignContactId: string) =>
       req<{ rimosso: boolean }>(`/wa/contacts/${campaignContactId}`, { method: 'DELETE' }),
+    // wa_contacts.enroll(): arruola WaContact gia' esistenti (usciti da
+    // waApi.scoperti.promote) in una campagna in bozza.
+    enroll: (campaignId: string, contactIds: string[]) =>
+      req<ReportArruolamento>('/wa/contacts/enroll', {
+        method: 'POST',
+        body: JSON.stringify({ campaign_id: campaignId, contact_ids: contactIds }),
+      }),
+  },
+
+  // wa_discover.py: staging dello scan auto-discover (Fase B). number_id e'
+  // obbligatorio sia in GET che in POST -- e' la chiave con cui il backend
+  // risolve il tenant_id corretto da WaNumber, mai da un campo scritto dal
+  // client (barriera IDOR, vedi docstring del router).
+  scoperti: {
+    list: (numberId: string, filtri?: {
+      status?: 'nuovo' | 'promosso' | 'scartato'
+      tipoChat?: 'individuale' | 'gruppo' | 'ignoto'
+      haNumero?: boolean
+      limit?: number
+      offset?: number
+    }) => {
+      const q = new URLSearchParams({ number_id: numberId })
+      if (filtri?.status) q.set('status', filtri.status)
+      if (filtri?.tipoChat) q.set('tipo_chat', filtri.tipoChat)
+      if (filtri?.haNumero !== undefined) q.set('ha_numero', String(filtri.haNumero))
+      if (filtri?.limit) q.set('limit', String(filtri.limit))
+      if (filtri?.offset) q.set('offset', String(filtri.offset))
+      return req<{ chat: WaDiscoveredChat[] }>(`/wa/discovered-chats?${q}`)
+    },
+    promote: (numberId: string, ids: string[]) =>
+      req<ReportPromozione>('/wa/discovered-chats/promote', {
+        method: 'POST',
+        body: JSON.stringify({ number_id: numberId, ids }),
+      }),
   },
 }
