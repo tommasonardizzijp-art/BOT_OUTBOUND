@@ -51,6 +51,7 @@ from app.services.inbox_browser.pagina import (
     leggi_righe_visibili as _leggi_per_censimento, scorri,
 )
 from app.services.inbox_browser.testo import normalizza_nome
+import app.services.inbox_browser.pagina as pagina_mod
 import app.services.scrape_inbox_browser as motore
 
 CAMPAGNA = "ec5e2464-1d8d-42a1-a81f-8e61b303fa7a"
@@ -126,11 +127,11 @@ def _instrumenta(diario):
     attributi di `motore` qui sotto e' visibile dentro il ciclo vero. Ritorna
     il callback di ripristino.
     """
-    originali = {}
+    originali = []
 
-    def _sostituisci(nome_attributo, nuova_funzione):
-        originali[nome_attributo] = getattr(motore, nome_attributo)
-        setattr(motore, nome_attributo, nuova_funzione)
+    def _sostituisci(nome_attributo, nuova_funzione, modulo=motore):
+        originali.append((modulo, nome_attributo, getattr(modulo, nome_attributo)))
+        setattr(modulo, nome_attributo, nuova_funzione)
 
     leggi_reale = motore.leggi_righe_visibili
 
@@ -206,12 +207,32 @@ def _instrumenta(diario):
 
     _sostituisci("salva_contatto", salva_contatto_strumentata)
 
+    # HEARTBEAT (11/08 sera): senza questo, un tratto di puro scorrimento (che
+    # non logga MAI un'apertura) e' indistinguibile da un blocco vero. Tommaso
+    # ha visto il log tacere per minuti e ha sospettato un freeze — invece era
+    # `decidi_fine_lista` che aspettava Instagram, cieco per chi guarda da qui.
+    # `scorri_leggendo` e' definita in pagina.py e chiamata SENZA qualificazione
+    # da li' dentro: va patchata su `pagina_mod`, non su `motore` (namespace
+    # diverso — stesso principio del resto di questo file, modulo diverso).
+    scorri_leggendo_reale = pagina_mod.scorri_leggendo
+
+    async def scorri_leggendo_strumentata(*a, **kw):
+        t0 = time.time()
+        stato = await scorri_leggendo_reale(*a, **kw)
+        log(f"    [scroll] altezza={stato.altezza} al_fondo={stato.al_fondo} ({time.time() - t0:.1f}s)")
+        return stato
+
+    _sostituisci("scorri_leggendo", scorri_leggendo_strumentata, modulo=pagina_mod)
+
     decidi_fine_lista_reale = motore.decidi_fine_lista
 
     async def decidi_fine_lista_strumentata(*a, **kw):
+        log("  [fine-lista?] nessuna riga nuova nel lotto, verifico se la lista e' cresciuta...")
         t0 = time.time()
         r = await decidi_fine_lista_reale(*a, **kw)
-        diario["tempi"]["scroll"] += time.time() - t0
+        durata = time.time() - t0
+        diario["tempi"]["scroll"] += durata
+        log(f"  [fine-lista?] decisione={r!r} dopo {durata:.1f}s")
         return r
 
     _sostituisci("decidi_fine_lista", decidi_fine_lista_strumentata)
@@ -221,14 +242,16 @@ def _instrumenta(diario):
     async def lancia_strumentata(*a, **kw):
         t0 = time.time()
         r = await lancia_reale(*a, **kw)
-        diario["tempi"]["scroll"] += time.time() - t0
+        durata = time.time() - t0
+        diario["tempi"]["scroll"] += durata
+        log(f"    [lancio] altezza={r.altezza} al_fondo={r.al_fondo} ({durata:.1f}s)")
         return r
 
     _sostituisci("lancia", lancia_strumentata)
 
     def ripristina():
-        for nome_attributo, funzione in originali.items():
-            setattr(motore, nome_attributo, funzione)
+        for modulo, nome_attributo, funzione in reversed(originali):
+            setattr(modulo, nome_attributo, funzione)
 
     return ripristina
 
