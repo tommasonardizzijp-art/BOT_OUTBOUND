@@ -55,3 +55,57 @@ def test_le_tre_modalita_compaiono_tutte(campioni):
 def test_zona_sconosciuta_solleva():
     with pytest.raises(KeyError):
         campiona_pausa("turbo")
+
+
+# ── il ritmo dello SCORRIMENTO non e' quello delle azioni ──────────────────
+# Misurato l'11/08 su una sessione supervisionata di 18 minuti: il 91% del
+# tempo era `sleep`, e dentro quel 91% circa tre quarti erano "stacchi" da 2-5
+# minuti. La causa non e' il valore dello stacco: e' che la pausa veniva presa
+# a OGNI riga esaminata, comprese le 144 su 170 che il motore non ha aperto
+# perche' gia' note. Su quelle righe non parte nessuna richiesta verso
+# Instagram: dormirci sopra non riduce il footprint di un byte, riduce solo il
+# throughput. Fermarsi cinque minuti dopo aver scorso cento righe non e'
+# nemmeno umano.
+from app.services.inbox_browser.ritmo import zona_pausa   # noqa: E402
+
+
+def test_scorrere_righe_note_non_e_un_azione_verso_instagram():
+    assert zona_pausa("rapida", ha_aperto=False) == "scorrimento"
+    assert zona_pausa("piena", ha_aperto=False) == "scorrimento"
+
+
+def test_aprire_una_chat_mantiene_il_ritmo_della_zona():
+    """L'apertura e' l'unica cosa che Instagram vede davvero: li' il ritmo
+    completo, stacchi compresi, resta intatto."""
+    assert zona_pausa("rapida", ha_aperto=True) == "rapida"
+    assert zona_pausa("piena", ha_aperto=True) == "piena"
+
+
+def test_lo_scorrimento_non_produce_mai_stacchi_da_minuti():
+    campioni = [campiona_pausa("scorrimento") for _ in range(N)]
+    assert max(campioni) < 60, f"pausa da {max(campioni):.0f}s durante il solo scorrimento"
+
+
+def test_lo_scorrimento_conserva_qualche_sosta_breve():
+    """Non deve diventare un metronomo: una pausa occasionale da una decina di
+    secondi resta, e' quella che fa un umano che si sofferma su un nome."""
+    campioni = [campiona_pausa("scorrimento") for _ in range(N)]
+    soste = [d for d in campioni if d >= 5]
+    assert soste, "nessuna sosta: il ritmo diventa piatto"
+    assert len(soste) / N < 0.10, "troppe soste: tanto vale tenere il ritmo pieno"
+
+
+def test_scorrere_costa_circa_un_secondo_a_riga():
+    """Il conto che giustifica tutto il cambiamento.
+
+    Sulla sessione dell'11/08 una riga costava in media 5.7s, anche quando era
+    solo scorsa: 170 righe = 16 minuti di sleep. Sotto 1.2s a riga, le stesse
+    170 righe stanno in tre minuti scarsi.
+
+    La soglia e' assoluta di proposito: confrontare due estrazioni casuali —
+    una delle quali contiene stacchi da 2-5 minuti che escono il 2% delle
+    volte — da' un test che passa o fallisce a seconda della fortuna, non del
+    codice.
+    """
+    media = statistics.mean(campiona_pausa("scorrimento") for _ in range(N))
+    assert media < 1.2, f"{media:.2f}s a riga: 170 righe sarebbero {media * 170 / 60:.1f} min"

@@ -239,14 +239,56 @@ def nome_header(nodi: list[dict], bordo: float | None, larghezza_viewport: int) 
     limite_destro = bordo + (larghezza_viewport - bordo) * FRAZIONE_FASCIA_NOME
     candidati = [
         n for n in nodi or []
+        # Il limite INFERIORE conta quanto quello superiore: nel pannello
+        # restano nodi con top negativo — messaggi vecchi scrollati sopra il
+        # bordo della finestra. Ordinando per top crescente vincerebbero sempre
+        # loro (misurato: -185 contro 18, e il nome diventava una data).
         if bordo <= float(n.get("left", 0)) <= limite_destro
-        and float(n.get("top", 0)) < ALTEZZA_HEADER_PX
+        and 0 <= float(n.get("top", 0)) < ALTEZZA_HEADER_PX
         and (n.get("testo") or "").strip()
     ]
     if not candidati:
         return None
     candidati.sort(key=lambda n: (float(n["top"]), float(n["left"])))
     return candidati[0]["testo"]
+
+
+def username_header(nodi: list[dict], nome: str | None, bordo: float | None,
+                    larghezza_viewport: int) -> str | None:
+    """Lo username scritto SOTTO il nome, nell'header del thread aperto.
+
+    Serve quando gli href del pannello sono ambigui: una conversazione che
+    contiene un post condiviso porta il link di un altro profilo, e
+    `estrai_username_thread` — giustamente — preferisce scartare piuttosto che
+    tirare a indovinare. Ma l'informazione giusta e' li', ventitre' pixel sotto
+    il nome (misurato: nome a y=18, username a y=41).
+
+    Chi chiama deve comunque confermarlo contro gli href veri: qui si estrae un
+    candidato, non si stabilisce una verita'.
+    """
+    if bordo is None or not nome:
+        return None
+    nome_normale = normalizza_nome(nome)
+    limite_destro = bordo + (larghezza_viewport - bordo) * FRAZIONE_FASCIA_NOME
+    fascia = sorted(
+        (n for n in nodi or []
+         if bordo <= float(n.get("left", 0)) <= limite_destro
+         and 0 <= float(n.get("top", 0)) < ALTEZZA_HEADER_PX
+         and (n.get("testo") or "").strip()),
+        key=lambda n: (float(n["top"]), float(n["left"])),
+    )
+    for i, nodo in enumerate(fascia):
+        if normalizza_nome(nodo["testo"]) != nome_normale:
+            continue
+        for successivo in fascia[i + 1:]:
+            candidato = (successivo.get("testo") or "").strip()
+            # Uno username Instagram non contiene spazi: e' cio' che distingue
+            # 'ylianpaventi_' da 'Attivo 3 ore fa', che occupa lo stesso posto.
+            if candidato and " " not in candidato:
+                return candidato.lower()
+            return None
+        return None
+    return None
 
 
 def href_thread(href: list[dict], bordo: float | None) -> list[str]:
@@ -445,7 +487,28 @@ async def apri_riga(
 
     href = href_thread(await page.evaluate(_JS_HREF), bordo)
     propri = {account_username} if account_username else set()
-    return estrai_username_thread(href, propri=propri)
+    username = estrai_username_thread(href, propri=propri)
+    if username:
+        return username
+
+    # Href ambigui: succede quando la conversazione contiene un post condiviso
+    # e porta con se' il link di un altro profilo (misurato l'11/08 su 'Ylian
+    # Paventi', con dentro un post di @outpump). Lo username giusto e' scritto
+    # sotto il nome nell'header, ma lo si accetta solo se un link a QUEL
+    # profilo esiste davvero nel pannello: due indizi indipendenti, non uno.
+    candidato = username_header(nodi, nome_trovato, bordo, viewport.get("w", 0))
+    if not candidato:
+        return None
+    segmenti = {s.strip("/").lower() for s in href if s.count("/") <= 2}
+    if candidato in segmenti and candidato not in {
+        (account_username or "").lower().lstrip("@")
+    }:
+        logger.info(
+            f"[InboxBrowser] href ambigui per {nome_trovato!r}: username preso "
+            f"dall'header e confermato dai link ({candidato})"
+        )
+        return candidato
+    return None
 
 
 async def scorri(page) -> StatoScorrimento:

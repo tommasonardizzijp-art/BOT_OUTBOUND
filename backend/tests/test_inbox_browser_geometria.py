@@ -30,7 +30,7 @@ import pytest
 
 from app.services.inbox_browser.pagina import (
     bordo_colonne, href_thread, nome_header, piano_scroll, righe_valide,
-    scegli_contenitore,
+    scegli_contenitore, username_header,
 )
 
 VIEWPORT_W = 1280
@@ -136,8 +136,56 @@ def test_il_pulsante_in_fondo_a_destra_non_e_il_nome_del_thread():
                        larghezza_viewport=VIEWPORT_W) is None
 
 
+def test_un_nodo_scrollato_fuori_dalla_vista_non_e_il_nome_del_thread():
+    """Misurato l'11/08 a 1920x940: nel pannello restano nodi con top NEGATIVO,
+    cioe' sopra il bordo alto della finestra, appartenenti a messaggi vecchi.
+    Ordinando per top crescente, -185 viene prima di 18 e vince: e' cosi' che
+    la data '1 ago 2026, 15:01' e' stata scambiata per il nome della persona,
+    facendo scartare una riga buona."""
+    nodi = [
+        {"left": 544, "top": 18, "testo": "Abbigliamento Vincente"},
+        {"left": 488, "top": -185, "testo": "1 ago 2026, 15:01"},
+        {"left": 578, "top": -133, "testo": "abbigliamentovincente"},
+    ]
+    assert nome_header(nodi, bordo=471, larghezza_viewport=VIEWPORT_W) == "Abbigliamento Vincente"
+
+
 def test_header_non_ancora_renderizzato_non_produce_un_nome():
     assert nome_header([], bordo=471, larghezza_viewport=VIEWPORT_W) is None
+
+
+# ── lo username dell'interlocutore sta SOTTO il suo nome, nell'header ──────
+def test_lo_username_si_legge_sotto_il_nome_nell_header():
+    """Misurato l'11/08: la chat di 'Ylian Paventi' conteneva un post
+    condiviso di @outpump, quindi due candidati href e riga scartata come
+    ambigua — comportamento giusto in assenza d'altro, ma l'username corretto
+    era li' sotto al nome, a 23 pixel di distanza."""
+    nodi = [
+        {"left": 544, "top": 18, "testo": "Ylian Paventi"},
+        {"left": 544, "top": 41, "testo": "ylianpaventi_"},
+        {"left": 488, "top": 86, "testo": "28 giu 2026, 13:20"},
+        {"left": 578, "top": 136, "testo": "outpump"},
+    ]
+    assert username_header(nodi, nome="Ylian Paventi", bordo=471,
+                           larghezza_viewport=VIEWPORT_W) == "ylianpaventi_"
+
+
+def test_senza_una_riga_sotto_il_nome_non_si_inventa_uno_username():
+    nodi = [{"left": 544, "top": 18, "testo": "Ylian Paventi"}]
+    assert username_header(nodi, nome="Ylian Paventi", bordo=471,
+                           larghezza_viewport=VIEWPORT_W) is None
+
+
+def test_lo_stato_di_presenza_non_e_uno_username():
+    """Sotto il nome non c'e' sempre l'username: puo' esserci 'Attivo 3 ore
+    fa'. Uno username Instagram non ha spazi, ed e' il filtro che distingue i
+    due casi senza dover indovinare."""
+    nodi = [
+        {"left": 544, "top": 18, "testo": "Ylian Paventi"},
+        {"left": 544, "top": 41, "testo": "Attivo 3 ore fa"},
+    ]
+    assert username_header(nodi, nome="Ylian Paventi", bordo=471,
+                           larghezza_viewport=VIEWPORT_W) is None
 
 
 # ── href del thread: lo username sta a 488 ─────────────────────────────────
