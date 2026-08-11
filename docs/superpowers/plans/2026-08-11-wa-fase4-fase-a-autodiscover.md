@@ -467,6 +467,19 @@ cronologia, raccoglie una frazione delle chat e dichiara "lista esaurita". Nessu
 nessun allarme: è la stessa forma del "collaudo 90/90 verde con zero messaggi inviati".
 `aria-rowcount` stesso può essere parziale.
 
+**E c'è un secondo effetto, misurato l'11/08**: sotto il 100% le **Liste** di WhatsApp non
+sono nemmeno visibili su Web (comparse solo a sincronizzazione conclusa). Quindi la soglia
+serve a due cose diverse, e i due valori non coincidono:
+
+| Cosa | Soglia |
+|---|---|
+| Scansione integrale della sidebar | `SOGLIA_DEFAULT` (60) — le chat arrivano progressivamente |
+| Uso di un filtro per lista/etichetta | **100** — sotto, le liste non esistono nel DOM e il filtro sembrerebbe "nessuna lista" |
+
+Chi implementerà il filtro deve chiedere il 100%, non la soglia di default: altrimenti
+l'operatore vedrebbe "questo cliente non ha liste" quando invece la pagina non aveva ancora
+finito di caricarle.
+
 **Files:**
 - Create: `backend/app/services/wa_discover/sincronizzazione.py`
 - Test: `backend/tests/test_wa_discover_sincronizzazione.py`
@@ -941,6 +954,6 @@ imposte dal dominio:
 | Cosa | Perché fuori |
 |---|---|
 | **Fase B** (promozione a `WaContact` + campagna) | Piano proprio. La Fase A da sola produce software completo e verificabile: scan + staging. |
-| Filtro per etichetta/lista | Le Liste non si sincronizzano su Web e Primero non è Business (PoC-5). Il campo `source_filtro` resta pronto. |
+| Filtro per etichetta/lista | **Praticabile, ma non è la base.** Le Liste su Web compaiono a sincronizzazione completata (misurato l'11/08, correzione di una conclusione affrettata dello stesso giorno) — però Primero, il cliente di oggi, non ne ha create nessuna. Lo scan integrale funziona sempre; il filtro si aggiunge dopo, e il campo `source_filtro` è già lì per registrarlo. |
 | Sostituire la quarantena d'invio con la soglia di sync | Ora è **fattibile** (l'ordine è noto: "messaggi precedenti", quindi all'indietro) e farebbe risparmiare ~15 min di browser fermo per ogni mini-sessione. Ma tocca `wa_worker`/`wa_sender`, cioè il percorso d'invio: merita la sua PR e i suoi test, non un'aggiunta di contrabbando a un piano di sola lettura. |
 | UI della Fase A | La Fase B avrà bisogno di una lista approvabile: si disegna lì, non qui. |
