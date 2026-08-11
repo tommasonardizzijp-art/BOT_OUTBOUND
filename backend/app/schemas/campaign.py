@@ -141,6 +141,7 @@ class CampaignResponse(BaseModel):
     list_target: int | None = None
     bio_target: int | None = None
     list_progress: dict | None = None
+    inbox_cursor_at: datetime | None = None
     bio_progress: dict | None = None
 
     model_config = {"from_attributes": True}
