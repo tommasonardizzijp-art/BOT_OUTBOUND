@@ -34,7 +34,7 @@ from app.services.inbox_browser.pagina import (
     apri_riga, decidi_fine_lista, leggi_righe_visibili,
 )
 from app.services.inbox_browser.riconoscimento import ArchivioNomi, ContatoreZona
-from app.services.inbox_browser.ritmo import campiona_pausa
+from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
 from app.services.inbox_browser.salvataggio import DatiContatto, salva_contatto
 from app.services.inbox_browser.testo import e_segnaposto, estrai_data_thread, estrai_ultimo_messaggio
 from app.services.scrape_inbox import _single_inbox_account   # sola lettura DB
@@ -175,7 +175,8 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                     continue
 
                 riconosciuta_prima = archivio.e_riconosciuto(riga.nome)
-                if decide_se_aprire(riga.nome, archivio, contatore.zona):
+                ha_aperto = decide_se_aprire(riga.nome, archivio, contatore.zona)
+                if ha_aperto:
                     username = await apri_riga(page, riga.indice, riga.nome, LINGUA, account.username)
                     if username:
                         testo_pagina = await page.evaluate("() => document.body.innerText")
@@ -205,7 +206,11 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                     # nessuna scrittura, si riprova alla prossima ripresa — mai a metà.
 
                 contatore.registra(riconosciuta_prima)
-                await asyncio.sleep(campiona_pausa(contatore.zona))
+                # La pausa dipende da cosa si e' FATTO, non da dove ci si trova:
+                # una riga solo scorsa non ha toccato Instagram, e pagarla al
+                # ritmo delle aperture costava il 91% del tempo di sessione
+                # (misurato l'11/08). Vedi ritmo.zona_pausa.
+                await asyncio.sleep(campiona_pausa(zona_pausa(contatore.zona, ha_aperto)))
 
                 durata_s = (datetime.utcnow() - session_started).total_seconds()
                 if durata_s >= session_budget_s:

@@ -35,6 +35,7 @@ Quattro vincoli misurati sul campo, non ipotizzati:
 """
 from __future__ import annotations
 
+import math
 import random
 from collections import Counter
 from dataclasses import dataclass
@@ -63,12 +64,19 @@ ALTEZZA_HEADER_PX = 130
 # ombre, scrollbar): oltre questo margine e' un'altra colonna.
 TOLLERANZA_BORDO_PX = 30
 
-# Scatti di rotella: sopra i 200px per evento si esce da cio' che produce un
-# trackpad reale.
-SCATTO_MAX_PX = 200
-SCATTO_MIN_PX = 40
-PAUSA_SCATTO_MIN_S = 0.03
-PAUSA_SCATTO_MAX_S = 0.25
+# Scatti di rotella. Un dito su un trackpad non produce otto colpi da cento
+# pixel: produce decine di eventi piccoli e ravvicinati, che accelerano e poi
+# frenano. Sopra i 60px per evento la scalinata si vede a occhio.
+SCATTO_MAX_PX = 60
+PAUSA_SCATTO_MIN_S = 0.012
+PAUSA_SCATTO_MAX_S = 0.045
+
+# Quanti pixel per scatto, in media: da qui esce il numero di eventi.
+PX_PER_SCATTO_MIN = 18
+PX_PER_SCATTO_MAX = 32
+SCATTI_MIN = 8
+SCATTI_MAX = 45
+
 PROB_RIMBALZO = 0.12
 
 # Attese a pazienza crescente prima di dichiarare qualcosa sulla fine lista.
@@ -239,14 +247,56 @@ def nome_header(nodi: list[dict], bordo: float | None, larghezza_viewport: int) 
     limite_destro = bordo + (larghezza_viewport - bordo) * FRAZIONE_FASCIA_NOME
     candidati = [
         n for n in nodi or []
+        # Il limite INFERIORE conta quanto quello superiore: nel pannello
+        # restano nodi con top negativo — messaggi vecchi scrollati sopra il
+        # bordo della finestra. Ordinando per top crescente vincerebbero sempre
+        # loro (misurato: -185 contro 18, e il nome diventava una data).
         if bordo <= float(n.get("left", 0)) <= limite_destro
-        and float(n.get("top", 0)) < ALTEZZA_HEADER_PX
+        and 0 <= float(n.get("top", 0)) < ALTEZZA_HEADER_PX
         and (n.get("testo") or "").strip()
     ]
     if not candidati:
         return None
     candidati.sort(key=lambda n: (float(n["top"]), float(n["left"])))
     return candidati[0]["testo"]
+
+
+def username_header(nodi: list[dict], nome: str | None, bordo: float | None,
+                    larghezza_viewport: int) -> str | None:
+    """Lo username scritto SOTTO il nome, nell'header del thread aperto.
+
+    Serve quando gli href del pannello sono ambigui: una conversazione che
+    contiene un post condiviso porta il link di un altro profilo, e
+    `estrai_username_thread` — giustamente — preferisce scartare piuttosto che
+    tirare a indovinare. Ma l'informazione giusta e' li', ventitre' pixel sotto
+    il nome (misurato: nome a y=18, username a y=41).
+
+    Chi chiama deve comunque confermarlo contro gli href veri: qui si estrae un
+    candidato, non si stabilisce una verita'.
+    """
+    if bordo is None or not nome:
+        return None
+    nome_normale = normalizza_nome(nome)
+    limite_destro = bordo + (larghezza_viewport - bordo) * FRAZIONE_FASCIA_NOME
+    fascia = sorted(
+        (n for n in nodi or []
+         if bordo <= float(n.get("left", 0)) <= limite_destro
+         and 0 <= float(n.get("top", 0)) < ALTEZZA_HEADER_PX
+         and (n.get("testo") or "").strip()),
+        key=lambda n: (float(n["top"]), float(n["left"])),
+    )
+    for i, nodo in enumerate(fascia):
+        if normalizza_nome(nodo["testo"]) != nome_normale:
+            continue
+        for successivo in fascia[i + 1:]:
+            candidato = (successivo.get("testo") or "").strip()
+            # Uno username Instagram non contiene spazi: e' cio' che distingue
+            # 'ylianpaventi_' da 'Attivo 3 ore fa', che occupa lo stesso posto.
+            if candidato and " " not in candidato:
+                return candidato.lower()
+            return None
+        return None
+    return None
 
 
 def href_thread(href: list[dict], bordo: float | None) -> list[str]:
@@ -289,26 +339,26 @@ def piano_scroll(px_totali: int) -> list[tuple[int, float]]:
     if px_totali <= 0:
         return []
 
-    scatto_max = min(SCATTO_MAX_PX, max(SCATTO_MIN_PX, px_totali // 3))
-    piano: list[tuple[int, float]] = []
-    percorso = 0
-    while percorso < px_totali * 0.9:
-        passo = random.randint(SCATTO_MIN_PX, scatto_max)
-        passo = min(passo, px_totali - percorso + random.randint(0, 20))
-        if passo <= 0:
-            break
-        piano.append((passo, random.uniform(PAUSA_SCATTO_MIN_S, PAUSA_SCATTO_MAX_S)))
-        percorso += passo
-        if random.random() < PROB_RIMBALZO:
-            rimbalzo = -random.randint(10, min(50, max(10, passo // 2)))
-            piano.append((rimbalzo, random.uniform(PAUSA_SCATTO_MIN_S, PAUSA_SCATTO_MAX_S)))
-            percorso += rimbalzo
+    quanti = round(px_totali / random.uniform(PX_PER_SCATTO_MIN, PX_PER_SCATTO_MAX))
+    quanti = max(SCATTI_MIN, min(SCATTI_MAX, quanti))
 
-    # Scatti tutti identici sarebbero una griglia riconoscibile a colpo d'occhio.
-    # Capita solo su piani cortissimi, e costa meno correggerlo che spiegarlo.
-    if len({delta for delta, _ in piano}) == 1 and piano:
-        delta, pausa = piano[-1]
-        piano[-1] = (delta + random.choice((-7, 7)), pausa)
+    # Profilo a campana: il gesto parte piano, prende velocita' a meta' e frena
+    # verso la fine. E' la firma di un movimento vero — una sequenza di scatti
+    # tutti uguali e' un motore, non una mano.
+    pesi = [math.sin(math.pi * (i + 0.5) / quanti) for i in range(quanti)]
+    totale_pesi = sum(pesi) or 1.0
+
+    piano: list[tuple[int, float]] = []
+    for peso in pesi:
+        delta = px_totali * peso / totale_pesi * random.uniform(0.82, 1.18)
+        delta = max(3, min(SCATTO_MAX_PX, round(delta)))
+        piano.append((delta, random.uniform(PAUSA_SCATTO_MIN_S, PAUSA_SCATTO_MAX_S)))
+
+    # Ogni tanto la mano supera il punto e torna indietro di qualche pixel.
+    if random.random() < PROB_RIMBALZO and len(piano) > 3:
+        dove = random.randint(len(piano) // 2, len(piano) - 1)
+        piano.insert(dove, (-random.randint(8, 30),
+                            random.uniform(PAUSA_SCATTO_MIN_S, PAUSA_SCATTO_MAX_S)))
 
     return piano
 
@@ -445,7 +495,28 @@ async def apri_riga(
 
     href = href_thread(await page.evaluate(_JS_HREF), bordo)
     propri = {account_username} if account_username else set()
-    return estrai_username_thread(href, propri=propri)
+    username = estrai_username_thread(href, propri=propri)
+    if username:
+        return username
+
+    # Href ambigui: succede quando la conversazione contiene un post condiviso
+    # e porta con se' il link di un altro profilo (misurato l'11/08 su 'Ylian
+    # Paventi', con dentro un post di @outpump). Lo username giusto e' scritto
+    # sotto il nome nell'header, ma lo si accetta solo se un link a QUEL
+    # profilo esiste davvero nel pannello: due indizi indipendenti, non uno.
+    candidato = username_header(nodi, nome_trovato, bordo, viewport.get("w", 0))
+    if not candidato:
+        return None
+    segmenti = {s.strip("/").lower() for s in href if s.count("/") <= 2}
+    if candidato in segmenti and candidato not in {
+        (account_username or "").lower().lstrip("@")
+    }:
+        logger.info(
+            f"[InboxBrowser] href ambigui per {nome_trovato!r}: username preso "
+            f"dall'header e confermato dai link ({candidato})"
+        )
+        return candidato
+    return None
 
 
 async def scorri(page) -> StatoScorrimento:

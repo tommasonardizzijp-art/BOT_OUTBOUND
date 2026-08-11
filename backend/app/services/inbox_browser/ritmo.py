@@ -33,6 +33,22 @@ PARAMETRI: dict[str, dict] = {
         "p_sosta": 0.025,
         "p_stacco": 0.02,
     },
+    # solo scorrimento: la riga e' gia' nota e NON viene aperta.
+    # Qui non parte nessuna richiesta verso Instagram — nessun click, nessun
+    # thread caricato: l'unica cosa che l'altra parte vede e' lo scroll, che ha
+    # gia' il suo ritmo umano (pagina.piano_scroll). Prendersi qui una pausa da
+    # cinque minuti non abbassa di un byte il footprint, abbassa solo il
+    # throughput, e per giunta e' meno umano del contrario: nessuno scorre cento
+    # nomi e poi si blocca cinque minuti a meta' lista.
+    # Misurato l'11/08: 144 righe su 170 finivano qui, e si portavano via la
+    # maggior parte dei 972s di sleep di una sessione da 18 minuti.
+    "scorrimento": {
+        "normale": (0.25, 0.9),
+        "sosta": (6.0, 18.0),
+        "stacco": (6.0, 18.0),   # mai estratto (p_stacco=0): la sosta e' il tetto
+        "p_sosta": 0.025,
+        "p_stacco": 0.0,
+    },
 }
 
 SIGMA = 0.9
@@ -53,6 +69,18 @@ def _troncata(lo: float, hi: float, sigma: float = SIGMA) -> float:
         if lo <= d <= hi:
             return d
     return mediana
+
+
+def zona_pausa(zona: str, ha_aperto: bool) -> str:
+    """Con che ritmo aspettare dopo questa riga.
+
+    La distinzione che conta non e' fra zona piena e zona rapida: e' fra
+    l'aver COMPIUTO un'azione (aprire una chat, che Instagram vede) e l'aver
+    solo scorso una riga gia' nota (che Instagram non vede affatto). Le pause
+    lunghe appartengono alle azioni; applicarle anche allo scorrimento vuol
+    dire pagarne il prezzo senza comprarne la protezione.
+    """
+    return zona if ha_aperto else "scorrimento"
 
 
 def campiona_pausa(zona: str) -> float:
