@@ -36,7 +36,9 @@ from app.services.inbox_browser.pagina import (
 from app.services.inbox_browser.riconoscimento import ArchivioNomi, ContatoreZona
 from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
 from app.services.inbox_browser.salvataggio import DatiContatto, salva_contatto
-from app.services.inbox_browser.testo import e_segnaposto, estrai_data_thread, estrai_ultimo_messaggio
+from app.services.inbox_browser.testo import (
+    e_segnaposto, estrai_data_thread, estrai_ultimo_messaggio, normalizza_nome,
+)
 from app.services.scrape_inbox import _single_inbox_account   # sola lettura DB
 from app.services.scraper import is_challenge_exception, isolate_challenged_account
 from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, ScraperError
@@ -45,6 +47,27 @@ DURATA_SESSIONE_MIN = 30 * 60
 DURATA_SESSIONE_MAX = 55 * 60
 LINGUA = "it"
 _INBOX_ENDPOINT = re.compile(r"(direct_v2|graphql)", re.I)
+
+
+def gia_esaminata(chiave: str | None, viste: set[str]) -> bool:
+    """True se questa riga e' gia' passata sotto gli occhi in QUESTA sessione.
+
+    Serve a non pagarne la pausa una seconda volta: il ciclo rilegge le righe
+    visibili a ogni giro e `human_click` sposta la lista a ogni apertura, quindi
+    il lotto successivo ricomincia in mezzo al precedente. Una riga senza chiave
+    non e' memorizzabile e viene trattata come nuova: dire il contrario
+    zittirebbe tutte le righe anonime dopo la prima.
+
+    A differenza di `ArchivioNomi` (che tratta i nomi duplicati come mai
+    riconosciuti, perche' i nomi visualizzati di Instagram non sono univoci),
+    questa memoria non gestisce le collisioni: due chat diverse con lo stesso
+    nome, nello stesso giro, fanno saltare la seconda. Rischio accettato e
+    limitato alla sessione corrente (30-55 min): al giro successivo la memoria
+    e' vuota e la riga torna esaminabile.
+    """
+    if not chiave:
+        return False
+    return chiave in viste
 
 
 def decide_se_aprire(nome: str | None, archivio: ArchivioNomi, zona: str) -> bool:
@@ -92,6 +115,7 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
     ) or 0
     since_break = 0
     nuovi_in_sessione = 0
+    viste_in_sessione: set[str] = set()
     session_started = datetime.utcnow()
     session_budget_s = random.uniform(DURATA_SESSIONE_MIN, DURATA_SESSIONE_MAX)
 
@@ -172,7 +196,19 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                     # Preserva il badge dei non letti (decisione di Tommaso): si
                     # salta SENZA aprire e senza contare nel riconoscimento, la
                     # riga resta da raccogliere quando sarà stata letta a mano.
+                    # Non entra nella memoria di sessione: se nel frattempo
+                    # viene letta a mano va rivalutata, e il salto qui non paga
+                    # comunque nessuna pausa da risparmiare.
                     continue
+
+                chiave = normalizza_nome(riga.nome)
+                if gia_esaminata(chiave, viste_in_sessione):
+                    # Gia' guardata in questa sessione: niente pausa, niente
+                    # decisione, niente contatore di zona. Ripagarla e' il 65%
+                    # delle pause di scorrimento misurate l'11/08.
+                    continue
+                if chiave:
+                    viste_in_sessione.add(chiave)
 
                 riconosciuta_prima = archivio.e_riconosciuto(riga.nome)
                 ha_aperto = decide_se_aprire(riga.nome, archivio, contatore.zona)
