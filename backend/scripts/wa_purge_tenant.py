@@ -42,12 +42,18 @@ from sqlalchemy import delete, func, select
 from app.database import AsyncSessionLocal
 from app.models.tenant import Tenant
 from app.models.wa import (WaCampaign, WaCampaignContact, WaContact,
-                           WaInboundEvent, WaMessage, WaNumber, WaSequenceStep)
+                           WaDiscoveredChat, WaInboundEvent, WaMessage,
+                           WaNumber, WaSequenceStep)
 from app.services.wa_session import profile_dir_for
 
 # Ordine di stampa/cancellazione FK-safe: figli prima dei genitori.
+# wa_discovered_chats sta PRIMA di wa_numbers perche' ne e' figlia (FK number_id):
+# contiene i nomi e i numeri delle chat scoperte dalla Fase A auto-discover,
+# cioe' dati personali di terzi -- se sfuggisse al purge resterebbero a DB dopo
+# che il tenant e' stato cancellato.
 _TABELLE = ("wa_inbound_events", "wa_messages", "wa_campaign_contacts",
-           "wa_sequence_steps", "wa_campaigns", "wa_contacts", "wa_numbers")
+           "wa_sequence_steps", "wa_campaigns", "wa_contacts",
+           "wa_discovered_chats", "wa_numbers")
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -141,6 +147,7 @@ async def _compute_counts(db, tenant_id: str, campaign_ids: list[str]) -> dict:
             db, WaSequenceStep, WaSequenceStep.campaign_id, campaign_ids),
         "wa_campaigns": await _count_tenant(db, WaCampaign, tenant_id),
         "wa_contacts": await _count_tenant(db, WaContact, tenant_id),
+        "wa_discovered_chats": await _count_tenant(db, WaDiscoveredChat, tenant_id),
         "wa_numbers": await _count_tenant(db, WaNumber, tenant_id),
     }
 
@@ -193,6 +200,9 @@ async def main() -> None:
             await db.execute(delete(WaSequenceStep).where(WaSequenceStep.campaign_id.in_(campaign_ids)))
         await db.execute(delete(WaCampaign).where(WaCampaign.tenant_id == args.tenant_id))
         await db.execute(delete(WaContact).where(WaContact.tenant_id == args.tenant_id))
+        # Prima di WaNumber: e' sua figlia via FK number_id.
+        await db.execute(
+            delete(WaDiscoveredChat).where(WaDiscoveredChat.tenant_id == args.tenant_id))
         await db.execute(delete(WaNumber).where(WaNumber.tenant_id == args.tenant_id))
         await db.execute(delete(Tenant).where(Tenant.id == args.tenant_id))
         await db.commit()
