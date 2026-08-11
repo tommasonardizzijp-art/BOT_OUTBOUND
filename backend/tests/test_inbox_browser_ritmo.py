@@ -109,3 +109,13 @@ def test_scorrere_costa_circa_un_secondo_a_riga():
     """
     media = statistics.mean(campiona_pausa("scorrimento") for _ in range(N))
     assert media < 1.2, f"{media:.2f}s a riga: 170 righe sarebbero {media * 170 / 60:.1f} min"
+
+
+# ── gli stacchi sulle aperture (Task 11, via libera esplicito di Tommaso) ──
+def test_uno_stacco_non_puo_valere_un_quarto_della_sessione():
+    """Misurato l'11/08: 2 stacchi su 98 aperture pesavano 420s su 1727s totali.
+    Il costo atteso di uno stacco per apertura deve stare sotto i 2 secondi,
+    altrimenti la coda governa la media."""
+    p = PARAMETRI["piena"]
+    costo_atteso = p["p_stacco"] * (p["stacco"][0] + p["stacco"][1]) / 2
+    assert costo_atteso < 2.0, f"{costo_atteso:.1f}s per apertura solo di stacchi"

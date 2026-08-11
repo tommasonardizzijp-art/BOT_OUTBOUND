@@ -18,20 +18,27 @@ import random
 
 PARAMETRI: dict[str, dict] = {
     # zona piena: si aprono chat nuove, ci si ferma a leggere
+    #
+    # Lo stacco resta — una sessione senza nessuna pausa lunga e' una firma —
+    # ma scende da (120-300s, 2%) a (90-180s, 1%) con il via libera esplicito
+    # di Tommaso l'11/08 (Task 11): il costo atteso per apertura passa da 4.2s
+    # a 1.35s. Misurato l'11/08: due stacchi si mangiavano il 24% di una
+    # sessione da 30 minuti. Il session-break da 30-55 minuti, che e' la
+    # pausa lunga vera, non e' toccato.
     "piena": {
         "normale": (1.0, 4.0),
         "sosta": (10.0, 30.0),
-        "stacco": (120.0, 300.0),
+        "stacco": (90.0, 180.0),
         "p_sosta": 0.10,
-        "p_stacco": 0.02,
+        "p_stacco": 0.01,
     },
     # zona rapida: si attraversa cio' che e' gia' stato raccolto
     "rapida": {
         "normale": (0.4, 1.2),
         "sosta": (10.0, 30.0),
-        "stacco": (120.0, 300.0),
+        "stacco": (90.0, 180.0),
         "p_sosta": 0.025,
-        "p_stacco": 0.02,
+        "p_stacco": 0.01,
     },
     # solo scorrimento: la riga e' gia' nota e NON viene aperta.
     # Qui non parte nessuna richiesta verso Instagram — nessun click, nessun
