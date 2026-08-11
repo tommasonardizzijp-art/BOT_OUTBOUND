@@ -219,7 +219,12 @@ def _instrumenta(diario):
     async def scorri_leggendo_strumentata(*a, **kw):
         t0 = time.time()
         stato = await scorri_leggendo_reale(*a, **kw)
-        log(f"    [scroll] altezza={stato.altezza} al_fondo={stato.al_fondo} ({time.time() - t0:.1f}s)")
+        # `top` e `nuove` sono i due segnali aggiunti il 12/08: la posizione
+        # serve a vedere dal log se la lista e' ripartita da capo (era invisibile
+        # da qui), le righe nuove a capire perche' decidi_fine_lista ha deciso
+        # come ha deciso.
+        log(f"    [scroll] altezza={stato.altezza} top={stato.top} nuove={stato.nuove} "
+            f"al_fondo={stato.al_fondo} ({time.time() - t0:.1f}s)")
         return stato
 
     _sostituisci("scorri_leggendo", scorri_leggendo_strumentata, modulo=pagina_mod)
@@ -244,7 +249,7 @@ def _instrumenta(diario):
         r = await lancia_reale(*a, **kw)
         durata = time.time() - t0
         diario["tempi"]["scroll"] += durata
-        log(f"    [lancio] altezza={r.altezza} al_fondo={r.al_fondo} ({durata:.1f}s)")
+        log(f"    [lancio] altezza={r.altezza} top={r.top} al_fondo={r.al_fondo} ({durata:.1f}s)")
         return r
 
     _sostituisci("lancia", lancia_strumentata)

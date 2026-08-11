@@ -5,6 +5,7 @@ contatti in silenzio dopo l'introduzione della raccolta via `raccogli`.
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models.campaign import Campaign, CampaignStatus
@@ -44,7 +45,8 @@ class _FakeBrowserSession:
         return None
 
 
-async def _monta(monkeypatch, camp, righe_iniziali, decidi_fine_lista_fake, spia_apri=None):
+async def _monta(monkeypatch, camp, righe_iniziali, decidi_fine_lista_fake, spia_apri=None,
+                 apri_riga_fake=None):
     page = _FakePage()
     _FakeBrowserSession.pagina_condivisa = page
     monkeypatch.setattr("app.browser.context_manager.BrowserSession", _FakeBrowserSession)
@@ -65,6 +67,8 @@ async def _monta(monkeypatch, camp, righe_iniziali, decidi_fine_lista_fake, spia
     async def fake_apri_riga(page_, indice, nome, lingua, account_username=None):
         if spia_apri is not None:
             spia_apri.append(nome)
+        if apri_riga_fake is not None:
+            return await apri_riga_fake(nome)
         return f"user_{normalizza_via_spia(nome)}"
 
     def normalizza_via_spia(nome):
@@ -150,4 +154,100 @@ async def test_righe_scoperte_nel_gesto_di_fine_lista_non_si_perdono(monkeypatch
 
         assert spia_apri == ["Ultimo Della Lista"], (
             f"la riga scoperta nel gesto di 'fine' doveva essere processata, spia={spia_apri}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_apertura_fallita_non_cancella_la_riga_per_tutta_la_sessione(monkeypatch):
+    """Root cause dei contatti persi in silenzio (misurata l'11/08: 84 righe su
+    143 nella baseline). Il motore metteva la riga nella memoria di sessione
+    PRIMA di provare ad aprirla: se l'apertura falliva — quasi sempre perche' la
+    riga era uscita dal DOM mentre si scendeva, non per un problema della riga —
+    quella chat risultava "gia' esaminata" per il resto della sessione e non
+    veniva piu' ritentata da nessuna parte. Un fallimento di apertura non e' un
+    giudizio sulla riga: va rimessa in gioco."""
+    async with AsyncSessionLocal() as db:
+        camp = Campaign(
+            name="t-ritenta-riga", status=CampaignStatus.listing,
+            source_type="scrape", scrape_mode="dm_threads", inbox_engine="browser",
+        )
+        db.add(camp)
+        await db.commit()
+        await db.refresh(camp)
+
+        riga = RigaVisibile(
+            indice=0, nome="Sfuggita Dal Dom", ultimo_nostro=None, non_letta=False,
+            testo_grezzo="Sfuggita Dal Dom\nciao",
+        )
+
+        giri = {"n": 0}
+
+        async def decidi_fine_lista_fake(page_, falliti, lingua, su_righe):
+            giri["n"] += 1
+            if giri["n"] == 1:
+                # Il gesto successivo ri-incontra la stessa riga: se la memoria
+                # di sessione l'ha gia' marcata, `raccogli` la scarta e non la
+                # rivedra' nessuno.
+                await su_righe([riga])
+                return "continua"
+            return "fine"
+
+        tentativi = {"n": 0}
+
+        async def apre_al_secondo_tentativo(nome):
+            tentativi["n"] += 1
+            return None if tentativi["n"] == 1 else "sfuggita_dal_dom"
+
+        spia_apri: list = []
+        await _monta(monkeypatch, camp, [riga], decidi_fine_lista_fake, spia_apri,
+                     apri_riga_fake=apre_al_secondo_tentativo)
+
+        await scrape_inbox_browser.run_inbox_browser_list(camp.id, db, camp)
+
+        assert spia_apri == ["Sfuggita Dal Dom", "Sfuggita Dal Dom"], (
+            f"la riga andava ritentata dopo il fallimento, spia={spia_apri}"
+        )
+        salvati = (await db.execute(
+            select(Follower.username).where(Follower.campaign_id == camp.id)
+        )).scalars().all()
+        assert salvati == ["sfuggita_dal_dom"]
+
+
+@pytest.mark.asyncio
+async def test_una_riga_che_non_si_apre_mai_non_gira_in_tondo(monkeypatch):
+    """Ramo negativo del ritentativo: rimettere in gioco una riga che non si
+    risolve MAI significherebbe ripagarne la pausa a ogni giro per tutta la
+    sessione. Dopo MAX_TENTATIVI_RIGA si lascia perdere fino alla prossima."""
+    async with AsyncSessionLocal() as db:
+        camp = Campaign(
+            name="t-ritenta-tetto", status=CampaignStatus.listing,
+            source_type="scrape", scrape_mode="dm_threads", inbox_engine="browser",
+        )
+        db.add(camp)
+        await db.commit()
+        await db.refresh(camp)
+
+        riga = RigaVisibile(
+            indice=0, nome="Mai Apribile", ultimo_nostro=None, non_letta=False,
+            testo_grezzo="Mai Apribile\nciao",
+        )
+
+        giri = {"n": 0}
+
+        async def decidi_fine_lista_fake(page_, falliti, lingua, su_righe):
+            giri["n"] += 1
+            await su_righe([riga])
+            return "continua" if giri["n"] < 8 else "fine"
+
+        async def non_apre_mai(nome):
+            return None
+
+        spia_apri: list = []
+        await _monta(monkeypatch, camp, [riga], decidi_fine_lista_fake, spia_apri,
+                     apri_riga_fake=non_apre_mai)
+
+        await scrape_inbox_browser.run_inbox_browser_list(camp.id, db, camp)
+
+        assert len(spia_apri) == scrape_inbox_browser.MAX_TENTATIVI_RIGA, (
+            f"attesi {scrape_inbox_browser.MAX_TENTATIVI_RIGA} tentativi, spia={spia_apri}"
         )

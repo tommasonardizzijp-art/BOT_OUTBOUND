@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+import time
 from datetime import datetime, timedelta
 
 from loguru import logger
@@ -32,6 +33,7 @@ from app.models.follower import Follower
 from app.services.bot_state_service import is_halted
 from app.services.inbox_browser.pagina import (
     RigaVisibile, apri_riga, decidi_fine_lista, lancia, leggi_righe_visibili,
+    lista_ripartita_da_capo, stato_lista,
 )
 from app.services.inbox_browser.riconoscimento import ArchivioNomi, ContatoreZona
 from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
@@ -51,6 +53,33 @@ DURATA_SESSIONE_MIN = 30 * 60
 DURATA_SESSIONE_MAX = 55 * 60
 LINGUA = "it"
 _INBOX_ENDPOINT = re.compile(r"(direct_v2|graphql)", re.I)
+
+# Quante volte si ritenta una riga che non si e' riusciti ad aprire, dentro la
+# stessa sessione. Un fallimento di apertura NON e' un giudizio sulla riga: e'
+# quasi sempre la riga uscita dal DOM mentre si scendeva. Marcarla come "gia'
+# vista" (cosa che il motore faceva prima del click) la cancellava per tutta la
+# sessione: 84 righe su 143 nella baseline dell'11/08 — contatti persi in
+# silenzio, esattamente cio' da cui la memoria di sessione doveva proteggere.
+# Il tetto esiste per non girare in tondo su una riga che non si risolve mai.
+MAX_TENTATIVI_RIGA = 3
+
+# Quanti lanci si concedono per tornare dove si era arrivati dopo che la lista
+# e' ripartita da capo. A 5-9 schermate per lancio coprono decine di migliaia di
+# pixel; oltre, e' piu' onesto rinunciare e lasciare che il giro normale
+# riattraversi la zona (le righe gia' viste non si ripagano, vedi gia_esaminata).
+MAX_LANCI_RECUPERO = 40
+
+# Ogni quanto si interroga davvero il DB per sapere se bisogna fermarsi.
+# `_deve_fermarsi` costa DUE viaggi verso il Postgres condiviso (kill-switch +
+# rilettura campagna): misurati **349 ms per riga** sul pooler Supabase il
+# 12/08. Chiamandolo a ogni riga si mangiava il 52% di una sessione (342s su
+# 663s misurati) — piu' del doppio di tutte le pause anti-ban messe insieme.
+# Il controllo a ogni riga non comprava reattivita': una riga in "piena" dorme
+# comunque da 1 a 90 secondi, e quel sonno non e' interrompibile. Con la
+# soglia a tempo il ritardo dello stop resta dominato dal sonno in corso,
+# esattamente come prima, e le righe attraversate in fretta (zona gia'
+# lavorata, 0.15-0.5s l'una) smettono di pagare un viaggio di rete a testa.
+INTERVALLO_CONTROLLO_STOP_S = 2.0
 
 
 def gia_esaminata(chiave: str | None, viste: set[str]) -> bool:
@@ -91,6 +120,25 @@ def decide_se_aprire(nome: str | None, archivio: ArchivioNomi, zona: str) -> boo
     return not archivio.e_riconosciuto(nome)
 
 
+def richiede_apertura(riga, archivio: ArchivioNomi, soglia: float | None,
+                      salta_lavorate: bool, zona: str) -> bool:
+    """Questa riga va aperta? UNA sola risposta, usata in due punti.
+
+    La usa il ciclo per decidere cosa fare della riga, e la usa `raccogli`
+    DURANTE il gesto di scorrimento per sapere se fermarlo (vedi
+    pagina.scorri_leggendo: una riga si puo' aprire solo mentre e' a schermo).
+    Se le due risposte divergessero, il gesto si fermerebbe dove non serve o —
+    molto peggio — tirerebbe dritto proprio dove serviva, e la riga sarebbe
+    persa. Percio' stanno qui, non duplicate.
+    """
+    if riga.non_letta:
+        return False
+    analizzata = analizza_riga_lista(riga.testo_grezzo, LINGUA)
+    if riga_da_saltare(analizzata.data_relativa, soglia, salta_lavorate):
+        return False
+    return decide_se_aprire(riga.nome, archivio, zona)
+
+
 def motore_ancora_nostro(campaign) -> bool:
     """True se la campagna e' ancora impostata sul motore browser.
 
@@ -120,16 +168,30 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
     since_break = 0
     nuovi_in_sessione = 0
     viste_in_sessione: set[str] = set()
+    tentativi: dict[str, int] = {}
     session_started = datetime.utcnow()
     session_budget_s = random.uniform(DURATA_SESSIONE_MIN, DURATA_SESSIONE_MAX)
 
-    async def _deve_fermarsi() -> str | None:
+    ultimo_controllo_stop = float("-inf")
+
+    async def _deve_fermarsi(forza: bool = False) -> str | None:
         """Kill-switch, stato campagna, motore ancora nostro: 'halted' | 'status'
         | 'motore' | None. Va richiamato SIA in cima al lotto SIA dentro il for
         di ogni riga (I2): con `campiona_pausa` che arriva fino a 2-5 minuti per
         riga e un lotto di 30 righe, controllare solo in cima al while farebbe
         impiegare diversi minuti al kill-switch prima di fermare davvero il
-        browser — la spec chiede stop immediato."""
+        browser — la spec chiede stop immediato.
+
+        Il DB pero' si interroga al massimo ogni INTERVALLO_CONTROLLO_STOP_S:
+        la soglia e' sul tempo TRASCORSO, quindi dopo una pausa lunga il
+        controllo avviene comunque, e a saltare sono solo le chiamate in rapida
+        successione (righe attraversate senza aprire). Vedi la costante per i
+        numeri misurati."""
+        nonlocal ultimo_controllo_stop
+        adesso = time.monotonic()
+        if not forza and adesso - ultimo_controllo_stop < INTERVALLO_CONTROLLO_STOP_S:
+            return None
+        ultimo_controllo_stop = adesso
         if await is_halted(db):
             return "halted"
         await db.refresh(campaign)
@@ -164,10 +226,46 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
 
         page.on("requestfailed", _on_requestfailed)
 
+        # Spia a costo zero (nessuna richiesta in piu', solo un evento che
+        # Playwright emette gia'): se la pagina si ricarica o naviga da sola,
+        # la lista riparte dalla cima e tutto il lavoro di posizione e' perso.
+        # Tommaso lo riporta come "si ricarica e si ricomincia da capo"; la
+        # sonda dell'11/08 aveva catturato un `pagehide` senza poterne
+        # attribuire la causa. Qui la distinzione fra "pagina ricaricata" e
+        # "lista ricostruita a pagina ferma" si legge dal log, senza aggiungere
+        # un solo byte di footprint.
+        navigazioni: list[str] = []
+
+        def _on_framenavigated(frame):
+            try:
+                if frame.parent_frame is not None:
+                    return
+                url = frame.url or ""
+                # L'apertura di una chat porta a /direct/t/<id>/ ed e' roba
+                # nostra: quella non e' una navigazione spontanea. Tutto il
+                # resto — a partire da un ritorno su /direct/inbox/, che e'
+                # un reload — azzera la posizione della lista.
+                if "/direct/t/" in url:
+                    return
+                navigazioni.append(url)
+                logger.warning(
+                    f"[InboxBrowser] la pagina ha navigato da sola verso {url} "
+                    f"(evento n.{len(navigazioni)}) — la lista riparte dalla cima"
+                )
+            except Exception:
+                pass
+
         await page.goto("https://www.instagram.com/direct/inbox/", wait_until="commit", timeout=60000)
         await page.wait_for_timeout(3000)
         if "/accounts/login" in page.url:
             raise ScraperError("Sessione web non loggata su Instagram — nessun tentativo di login automatico")
+
+        # Registrata DOPO il goto: la navigazione che apre l'inbox e' nostra e
+        # non va contata fra quelle spontanee.
+        try:
+            page.on("framenavigated", _on_framenavigated)
+        except Exception:   # pagina finta nei test, o versione senza l'evento
+            pass
 
         emit_event(campaign_id, "scrape_start", "Fase Lista inbox avviata (browser)")
 
@@ -212,7 +310,20 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
         # giro dopo", mai un click sulla persona sbagliata.
         righe_del_giro: list[RigaVisibile] = []
 
-        async def raccogli(righe_viste: list[RigaVisibile]) -> None:
+        async def raccogli(righe_viste: list[RigaVisibile]) -> tuple[int, int]:
+            """Accoda le righe mai viste. Ritorna (quante nuove, quante da aprire).
+
+            Nessuno dei due conteggi e' decorativo. Le NUOVE dicono a
+            `decidi_fine_lista` che c'e' ancora roba da lavorare, e gli
+            risparmiano la scala di attese. Quelle DA APRIRE fermano il gesto
+            di scorrimento sul posto (pagina.scorri_leggendo): Instagram tiene
+            nel DOM solo la fascia visibile — misurato 9-10 righe il 12/08 —
+            quindi una riga si puo' aprire solo mentre e' ancora sotto gli
+            occhi. Tirare dritto e aprirla dopo non e' piu' lento: e'
+            impossibile, e prima produceva blocchi di 20-45 fallimenti di fila.
+            """
+            accettate = 0
+            da_aprire = 0
             for r in righe_viste:
                 chiave = normalizza_nome(r.nome)
                 # Senza chiave (es. nome fatto solo di emoji, che
@@ -222,8 +333,16 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                 # tutta la sessione, bug trovato dal QA su un nome-solo-emoji.
                 if not chiave or chiave not in viste_in_sessione:
                     righe_del_giro.append(r)
+                    accettate += 1
+                    if richiede_apertura(r, archivio, soglia, salta_lavorate,
+                                         contatore.zona):
+                        da_aprire += 1
+            return accettate, da_aprire
 
         lista_esaurita = False
+        # Fin dove si era arrivati a scorrere, in pixel: la misura di
+        # riferimento per accorgersi che la lista e' ripartita dalla cima.
+        ultimo_top: int | None = None
 
         while True:
             esito_stop = await _deve_fermarsi()
@@ -234,6 +353,31 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
             if campaign.list_target and already >= campaign.list_target:
                 logger.info(f"[InboxBrowser] Target {campaign.list_target} raggiunto ({already})")
                 break
+
+            # La lista e' ripartita da capo mentre lavoravamo? Il controllo e'
+            # di sole letture del DOM (nessuna richiesta verso Instagram) e la
+            # posizione precedente e' quella misurata alla fine del giro
+            # scorso. Senza questo, un reset lasciava il motore a riattraversare
+            # tutta la lista dall'inizio un gesto alla volta — e' il
+            # "ricomincia da capo" riportato dal vivo.
+            stato_ora = await stato_lista(page)
+            if lista_ripartita_da_capo(ultimo_top, stato_ora.top):
+                logger.warning(
+                    f"[InboxBrowser] lista ripartita da capo: ero a {ultimo_top}px, "
+                    f"ora sono a {stato_ora.top}px (navigazioni spontanee finora: "
+                    f"{len(navigazioni)}) — risalgo con i lanci"
+                )
+                emit_event(campaign_id, "scrape_batch",
+                           "La lista dei messaggi e' ripartita dalla cima: "
+                           "recupero la posizione senza rileggere tutto", level="warn")
+                obiettivo = ultimo_top or 0
+                for _ in range(MAX_LANCI_RECUPERO):
+                    stato_ora = await lancia(page)
+                    if stato_ora.top is None or stato_ora.top >= obiettivo * 0.9:
+                        break
+                    if stato_ora.al_fondo:
+                        break
+            ultimo_top = stato_ora.top if stato_ora.top is not None else ultimo_top
 
             if not righe_del_giro:
                 await raccogli(await leggi_righe_visibili(page, LINGUA))
@@ -275,7 +419,11 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                     continue
 
                 riconosciuta_prima = archivio.e_riconosciuto(riga.nome)
-                ha_aperto = decide_se_aprire(riga.nome, archivio, contatore.zona)
+                # Stessa funzione che ha deciso se fermare il gesto: se qui si
+                # decidesse diversamente, il motore si fermerebbe dove non
+                # serve o passerebbe oltre proprio dove serviva.
+                ha_aperto = richiede_apertura(riga, archivio, soglia,
+                                              salta_lavorate, contatore.zona)
                 if ha_aperto:
                     username = await apri_riga(page, riga.indice, riga.nome, LINGUA, account.username)
                     if username:
@@ -324,8 +472,24 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                         if esito == "creato":
                             emit_event(campaign_id, "scrape_batch",
                                        f"Inbox: {already}" + (f"/{campaign.list_target}" if campaign.list_target else ""))
-                    # username None (verifica post-click fallita, o profilo sparito):
-                    # nessuna scrittura, si riprova alla prossima ripresa — mai a metà.
+                    else:
+                        # username None: verifica post-click fallita, profilo
+                        # sparito, oppure — il caso di gran lunga piu' frequente
+                        # (misurato) — riga uscita dal DOM prima del click.
+                        # Nessuna scrittura, ma la riga va rimessa in gioco:
+                        # toglierla dalla memoria di sessione la fa ricompare
+                        # al prossimo campionamento che la incontra. Senza
+                        # questo, un fallimento di apertura equivaleva a
+                        # cancellare il contatto per tutta la sessione.
+                        tentativi[chiave] = tentativi.get(chiave, 0) + 1
+                        if chiave and tentativi[chiave] < MAX_TENTATIVI_RIGA:
+                            viste_in_sessione.discard(chiave)
+                        elif chiave:
+                            logger.info(
+                                f"[InboxBrowser] {riga.nome!r} non aperta dopo "
+                                f"{MAX_TENTATIVI_RIGA} tentativi — lasciata alla "
+                                f"prossima sessione"
+                            )
 
                 contatore.registra(riconosciuta_prima)
                 # La pausa dipende da cosa si e' FATTO, non da dove ci si trova:

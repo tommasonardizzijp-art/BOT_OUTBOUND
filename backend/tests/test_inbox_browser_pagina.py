@@ -696,3 +696,329 @@ async def test_lancia_su_contenitore_non_trovato_non_scrolla():
     stato = await lancia(_PageSenzaContenitore())
     assert stato.altezza is None
     assert stato.al_fondo is False
+
+
+# ── la riga da cliccare si cerca fra le righe MONTATE, non fra quelle a schermo ──
+# Root cause dei blocchi a raffica dell'11/08 sera (45 aperture consecutive
+# fallite in 0.0s subito dopo un 'continua' di decidi_fine_lista, misurate in
+# data/supervisione_inbox_ON_v3.json): il motore campiona le righe DURANTE un
+# gesto lungo e le apre dopo, ma la ricerca della riga da cliccare guardava solo
+# la fascia visibile. Quando arrivava il loro turno, le righe erano ancora nel
+# DOM ma fuori schermo — e venivano dichiarate introvabili.
+def _dom_righe_con_top(coppie: list[tuple[str, int]]) -> dict:
+    """Righe con un `top` deciso dal test: sopra la piega (negativo), a schermo,
+    o sotto la piega (oltre l'altezza della finestra)."""
+    return {
+        "viewport": _VIEWPORT,
+        "righe": [
+            {"indice": i, "testo": t, "left": 72, "right": _BORDO,
+             "top": top, "w": 399, "nonLetta": False, "pallinoConferma": False}
+            for i, (t, top) in enumerate(coppie)
+        ],
+    }
+
+
+class _FakePageRigheFuoriSchermo:
+    def __init__(self, coppie, header):
+        self.coppie = coppie
+        self.header = header
+        self.idx_richiesto = None
+
+    async def evaluate_handle(self, script, indice):
+        self.idx_richiesto = indice
+        return _FakeHandle(_FakeElemento())
+
+    async def evaluate(self, script, *args):
+        if _e_query_righe(script):
+            return _dom_righe_con_top(self.coppie)
+        if _e_query_href(script):
+            return []
+        return _dom_fascia_alta(self.header)
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_apri_riga_clicca_una_riga_montata_sotto_la_piega(monkeypatch):
+    """La riga e' nel DOM ma sotto il bordo inferiore della finestra (top 1400
+    con finestra alta 660): e' il caso di un lotto letto in blocco e aperto
+    dopo. `human_click` fa `scroll_into_view_if_needed` prima di premere, quindi
+    e' cliccabile a tutti gli effetti — scartarla era il difetto."""
+    from app.services.inbox_browser import pagina
+
+    async def human_click_ok(page, elemento):
+        return None
+    monkeypatch.setattr(pagina.human_input, "human_click", human_click_ok)
+    monkeypatch.setattr(pagina, "estrai_username_thread", lambda href, propri: "bruzzo_abbigliamento")
+
+    page = _FakePageRigheFuoriSchermo(
+        coppie=[("Altra Persona\nCiao", 321), ("Bruzzo Abbigliamento\nGrazie", 1400)],
+        header=["Bruzzo Abbigliamento"],
+    )
+    risultato = await apri_riga(page, indice=1, nome_atteso="Bruzzo Abbigliamento", lingua="it")
+
+    assert page.idx_richiesto == 1
+    assert risultato == "bruzzo_abbigliamento"
+
+
+@pytest.mark.asyncio
+async def test_leggi_righe_visibili_continua_a_classificare_solo_cio_che_e_a_schermo():
+    """Ramo negativo: allargare la ricerca del CLICK non deve allargare anche la
+    LETTURA. Una riga sotto la piega ha un testo affidabile ma non e' quella che
+    l'utente sta guardando, e il ciclo la incontrera' comunque scorrendo: se
+    entrasse qui, la memoria di sessione la marcherebbe come vista senza che
+    nessuno l'abbia mai valutata davvero."""
+    from app.services.inbox_browser.pagina import leggi_righe_visibili
+
+    page = _FakePageRigheFuoriSchermo(
+        coppie=[("Altra Persona\nCiao", 321), ("Bruzzo Abbigliamento\nGrazie", 1400)],
+        header=[],
+    )
+    righe = await leggi_righe_visibili(page, "it")
+
+    assert [r.nome for r in righe] == ["Altra Persona"]
+
+
+def test_una_riga_gia_comoda_a_schermo_non_fa_muovere_la_lista():
+    """Se la riga e' gia' dove si puo' cliccare, nessun gesto: muovere per
+    abitudine e' rumore in piu' e righe che si smontano per niente."""
+    from app.services.inbox_browser.pagina import _riga_da_avvicinare
+
+    assert _riga_da_avvicinare(top=400, altezza_viewport=940) == 0
+
+
+def test_una_riga_fuori_schermo_si_avvicina_nel_verso_giusto():
+    """Sotto la piega si scende, sopra si risale — e in entrambi i casi la riga
+    finisce nel primo terzo della finestra, non incollata al bordo (da dove il
+    primo assestamento del layout la rimetterebbe fuori)."""
+    from app.services.inbox_browser.pagina import _riga_da_avvicinare
+
+    giu = _riga_da_avvicinare(top=1400, altezza_viewport=940)
+    su = _riga_da_avvicinare(top=-500, altezza_viewport=940)
+    assert giu > 0 and su < 0
+    assert 1400 - giu == pytest.approx(940 / 3, abs=1)
+    assert -500 - su == pytest.approx(940 / 3, abs=1)
+
+
+@pytest.mark.asyncio
+async def test_avvicinarsi_alla_riga_e_un_gesto_non_un_teletrasporto():
+    """`human_click` raggiungerebbe la riga da solo con
+    `scroll_into_view_if_needed`, ma quello e' un salto istantaneo senza un solo
+    evento wheel: una firma che nessuna mano produce, ripetuta a ogni inizio di
+    lotto. La distanza va coperta con `piano_scroll`, cioe' con la forma di
+    gesto misurata sul trackpad vero."""
+    from app.services.inbox_browser.pagina import avvicina_riga
+
+    page = _FakePageScroll()
+    fatto = await avvicina_riga(page, delta_px=1800, bordo=471)
+
+    assert fatto is True
+    assert page.eventi > 10, "un salto solo non e' un gesto"
+    # La distanza e' quella chiesta a meno degli arrotondamenti per evento e
+    # degli eventi a delta nullo del modello (PROB_EVENTO_NULLO).
+    assert page.scroll == pytest.approx(1800, rel=0.15)
+
+
+@pytest.mark.asyncio
+async def test_avvicinarsi_verso_lalto_scorre_indietro():
+    from app.services.inbox_browser.pagina import avvicina_riga
+
+    page = _FakePageScroll()
+    page.scroll = 5000
+    await avvicina_riga(page, delta_px=-1200, bordo=471)
+
+    assert page.scroll == pytest.approx(3800, rel=0.05)
+
+
+def test_la_query_dell_handle_usa_lo_STESSO_filtro_della_lettura():
+    """L'indice con cui si ritrova la riga da cliccare e' la posizione dentro
+    l'array filtrato: due filtri anche solo leggermente diversi risolvono
+    elementi diversi con lo stesso indice, e il click finisce sulla persona
+    sbagliata. Prima erano due stringhe JS scritte a mano in due punti."""
+    from app.services.inbox_browser.pagina import (
+        _JS_HANDLE_MONTATE, _JS_RIGHE_MONTATE, TOP_MIN_MONTATE,
+    )
+    filtro = (
+        "return r.top > %d && r.height > 50 && r.height < 130 && r.width > 250;"
+        % TOP_MIN_MONTATE
+    )
+    assert filtro in _JS_RIGHE_MONTATE
+    assert filtro in _JS_HANDLE_MONTATE
+    assert TOP_MIN_MONTATE < 0, "deve ammettere le righe montate sopra la piega"
+
+
+# ── decidi_fine_lista: righe nuove battono la scala di attese ──────────────
+class _PageContaAttese:
+    def __init__(self):
+        self.attese_ms = 0
+
+    async def wait_for_timeout(self, ms):
+        self.attese_ms += ms
+
+
+@pytest.mark.asyncio
+async def test_decidi_fine_lista_esce_subito_se_il_gesto_ha_trovato_righe_nuove(monkeypatch):
+    """Se il gesto ha gia' prodotto righe mai viste, la domanda "la lista e'
+    finita?" non si pone: c'e' lavoro da fare adesso. Prima si percorreva
+    comunque tutta la scala (31s di attesa piu' cinque gesti da 2-4 schermate),
+    accumulando lotti enormi che poi fallivano l'apertura in blocco."""
+    from app.services.inbox_browser import pagina
+
+    gesti = {"n": 0}
+
+    async def scorri_con_righe_nuove(_page, _lingua, _su_righe):
+        gesti["n"] += 1
+        return StatoScorrimento(altezza=5112, al_fondo=False, nuove=7)
+
+    monkeypatch.setattr(pagina, "scorri_leggendo", scorri_con_righe_nuove)
+
+    async def _ignora(_righe):
+        return None
+
+    page = _PageContaAttese()
+    esito = await decidi_fine_lista(page, [], "it", _ignora)
+
+    assert esito == "continua"
+    assert gesti["n"] == 1, "un solo gesto: il resto della scala e' lavoro sprecato"
+    assert page.attese_ms == 0
+
+
+@pytest.mark.asyncio
+async def test_decidi_fine_lista_senza_righe_nuove_esaurisce_la_pazienza(monkeypatch):
+    """Ramo negativo: quando il gesto non trova nulla di nuovo e l'altezza non
+    cresce, la scala di attese serve ancora — dichiarare esaurita una lista solo
+    lenta fa perdere in silenzio tutto quello che sta sotto."""
+    from app.services.inbox_browser import pagina
+    from app.services.inbox_browser.pagina import ATTESE_S
+
+    async def scorri_a_vuoto(_page, _lingua, _su_righe):
+        return StatoScorrimento(altezza=5112, al_fondo=True, nuove=0)
+
+    monkeypatch.setattr(pagina, "scorri_leggendo", scorri_a_vuoto)
+
+    async def _ignora(_righe):
+        return None
+
+    page = _PageContaAttese()
+    esito = await decidi_fine_lista(page, [], "it", _ignora)
+
+    assert esito == "fine"
+    assert page.attese_ms == sum(ATTESE_S) * 1000
+
+
+@pytest.mark.asyncio
+async def test_il_gesto_si_ferma_sulla_riga_da_aprire():
+    """Misurato dal vivo il 12/08 con la diagnostica su `apri_riga`: Instagram
+    tiene nel DOM 9-10 righe, cioe' la sola fascia visibile. Una riga vista
+    250px fa non e' piu' raggiungibile in NESSUN modo — leggere in anticipo e
+    aprire dopo non e' lento, e' impossibile. Quindi il gesto deve fermarsi
+    dov'e' la riga da aprire, finche' e' ancora a schermo."""
+    from app.services.inbox_browser.pagina import scorri_leggendo
+
+    page = _FakePageScroll()
+    campioni = {"n": 0}
+
+    async def raccogli(righe):
+        campioni["n"] += 1
+        # Alla terza lettura compare qualcosa da aprire.
+        return (len(righe), 1 if campioni["n"] == 3 else 0)
+
+    stato = await scorri_leggendo(page, "it", raccogli)
+
+    assert stato.da_aprire == 1
+    assert campioni["n"] == 3, "il gesto doveva fermarsi al campionamento buono"
+    assert page.scroll < 1500, f"si e' fermato troppo tardi: {page.scroll}px"
+
+
+@pytest.mark.asyncio
+async def test_le_righe_gia_note_non_fermano_il_gesto():
+    """Ramo negativo: fermarsi su cio' che si conosce gia' butterebbe via tutto
+    il guadagno di velocita' — e non e' nemmeno il gesto umano che il modulo
+    imita (si scorre in fretta cio' che si e' gia' visto)."""
+    from app.services.inbox_browser.pagina import scorri_leggendo
+
+    page = _FakePageScroll()
+
+    async def raccogli(righe):
+        return (len(righe), 0)
+
+    stato = await scorri_leggendo(page, "it", raccogli)
+
+    # Il gesto e' casuale fra PASSO_SCROLL_MIN e MAX schermate: si verifica che
+    # sia arrivato almeno al minimo previsto, non un numero fisso (che con
+    # PASSO_SCROLL_MIN=2 su una finestra da 700px cadeva sotto soglia a caso).
+    from app.services.inbox_browser.pagina import PASSO_SCROLL_MIN
+    minimo = PASSO_SCROLL_MIN * 700 * 0.9
+    assert stato.da_aprire == 0
+    assert page.scroll >= minimo, (
+        f"senza righe da aprire il gesto deve andare fino in fondo: "
+        f"{page.scroll}px contro un minimo di {minimo:.0f}px"
+    )
+
+
+@pytest.mark.asyncio
+async def test_una_riga_da_aprire_gia_a_schermo_non_fa_partire_il_gesto():
+    """Il primo campionamento avviene prima di muovere la rotella: se il lavoro
+    e' gia' li', muoversi lo porterebbe via."""
+    from app.services.inbox_browser.pagina import scorri_leggendo
+
+    page = _FakePageScroll()
+
+    async def raccogli(righe):
+        return (len(righe), 2)
+
+    stato = await scorri_leggendo(page, "it", raccogli)
+
+    assert stato.da_aprire == 2
+    assert page.scroll == 0, "non doveva scorrere di un pixel"
+
+
+@pytest.mark.asyncio
+async def test_scorri_leggendo_riporta_quante_righe_nuove_ha_trovato():
+    """Il conteggio arriva da chi raccoglie (l'unico che sa cosa ha gia'
+    lavorato) e deve risalire fino al chiamante; chi non ritorna niente — gli
+    script diagnostici — vale zero, non un errore."""
+    from app.services.inbox_browser.pagina import scorri_leggendo
+
+    page = _FakePageScroll()
+
+    async def raccogli_conta(righe):
+        return len(righe)
+
+    stato = await scorri_leggendo(page, "it", raccogli_conta)
+    assert stato.nuove > 0
+    assert stato.top == page.scroll
+
+    async def raccogli_muto(righe):
+        return None
+
+    stato_muto = await scorri_leggendo(_FakePageScroll(), "it", raccogli_muto)
+    assert stato_muto.nuove == 0
+
+
+# ── la lista che riparte dalla cima ────────────────────────────────────────
+def test_lista_ripartita_da_capo_riconosce_il_crollo_della_posizione():
+    """Il caso misurato l'11/08 mattina: scrollTop oltre 15.000px tornato a
+    ~400px senza che nessuno abbia scorso all'indietro."""
+    from app.services.inbox_browser.pagina import lista_ripartita_da_capo
+
+    assert lista_ripartita_da_capo(15420, 400) is True
+
+
+def test_avanzamento_normale_non_e_un_reset():
+    from app.services.inbox_browser.pagina import lista_ripartita_da_capo
+
+    assert lista_ripartita_da_capo(15420, 17800) is False
+    assert lista_ripartita_da_capo(15420, 14900) is False   # rimbalzo minimo
+
+
+def test_vicino_alla_cima_nessun_falso_allarme():
+    """Nei primi gesti la lista sta ancora in alto: li' un dimezzamento e'
+    normale, non un reset. Senza questa soglia il recupero partirebbe a ogni
+    inizio sessione."""
+    from app.services.inbox_browser.pagina import lista_ripartita_da_capo
+
+    assert lista_ripartita_da_capo(900, 100) is False
+    assert lista_ripartita_da_capo(None, 100) is False
+    assert lista_ripartita_da_capo(15420, None) is False

@@ -11,10 +11,20 @@ vere: vedi tests/test_inbox_browser_geometria.py.
 
 Quattro vincoli misurati sul campo, non ipotizzati:
 
-1. LISTA VIRTUALIZZATA. Instagram tiene nel DOM solo le righe vicine al viewport
-   e rimuove le altre (misurato: il conteggio righe oscilla fra 72 e 96 mentre
-   l'altezza cresce in modo monotono). Scorrere a salti piu' grandi del buffer fa
-   perdere righe IN SILENZIO: nessun errore, solo contatti mancanti.
+1. LISTA VIRTUALIZZATA, E IL BUFFER E' LA SOLA FASCIA VISIBILE. Instagram tiene
+   nel DOM **9-10 righe**: misurato il 12/08 contando le righe presenti nel
+   momento esatto in cui un'apertura falliva (9 fallimenti, sempre 9 o 10 righe
+   montate), e coerente con le due misure indipendenti del 09-10/08 ("9 nomi
+   leggibili per schermata"; nRighe 6-7 su una finestra alta 339px).
+   La versione precedente di questa riga diceva "fra 72 e 96": quel numero
+   veniva da una query piu' larga, che contava anche elementi che righe non
+   sono, e ha portato a credere che esistesse un buffer fuori schermo su cui
+   fare affidamento. NON esiste. Conseguenza operativa: una riga si puo'
+   aprire SOLO mentre e' a schermo; leggerne un lotto in anticipo e aprirlo
+   dopo non e' lento, e' impossibile (vedi scorri_leggendo, che per questo
+   ferma il gesto sulla riga da aprire). Scorrere a salti piu' grandi del
+   buffer fa comunque perdere righe IN SILENZIO: nessun errore, solo contatti
+   mancanti.
 
 2. NESSUN INDICATORE DI CARICAMENTO. Misurato: 0 spinner su 10 giri di scroll. Il
    segnale utile e' l'ALTEZZA del contenitore, che cresce a ogni caricamento
@@ -37,6 +47,7 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from collections import Counter
 from dataclasses import dataclass
 
@@ -109,14 +120,56 @@ VELOCITA_MAX_PX_S = 2500
 # Attese a pazienza crescente prima di dichiarare qualcosa sulla fine lista.
 ATTESE_S = (1, 2, 4, 8, 16)
 
+# Oltre questa durata un gesto di scorrimento non e' piu' un gesto: e' la
+# pagina che non risponde. Un gesto normale misurato sta fra 2 e 5 secondi.
+SOGLIA_GESTO_LENTO_S = 15.0
+
 # Attese a pazienza crescente per il pannello del thread dopo il click (vedi
 # apri_riga). Totale 3s: il caso rapido esce all'attesa piu' corta.
-_ATTESE_HEADER_S = (0.5, 1.0, 1.5)
+# Misurato nella run live dell'11/08 sera: OGNI apertura riuscita costava
+# 3.4-3.7s, cioe' la scala veniva percorsa fino in fondo quasi sempre — con tre
+# soli gradini si esce a 0.5s, 1.5s o 3.0s, e un header che compare a 1.7s si
+# paga 3.0s. Stesso totale di pazienza (3s), gradini piu' fitti: si esce vicino
+# al momento in cui l'header compare davvero. Ogni gradino costa una
+# `page.evaluate` locale (nessuna richiesta verso Instagram).
+_ATTESE_HEADER_S = (0.4, 0.4, 0.4, 0.4, 0.5, 0.5, 0.4)
 
-_JS_RIGHE = """(nRighe) => {
-    const righe = [...document.querySelectorAll('div[role="button"], div[tabindex="0"], a')]
+# Il filtro che definisce "una riga della lista", condiviso da TUTTE le query
+# che ne parlano. Deve restare UNO SOLO: l'indice con cui si ritrova la riga da
+# cliccare e' la posizione dentro QUESTO array, quindi due filtri anche solo
+# leggermente diversi risolverebbero elementi diversi con lo stesso indice.
+# `topMin` e' l'unico parametro, e distingue i due usi (vedi sotto).
+_JS_FILTRO = """[...document.querySelectorAll('div[role="button"], div[tabindex="0"], a')]
       .filter(e => { const r = e.getBoundingClientRect();
-        return r.top > 150 && r.height > 50 && r.height < 130 && r.width > 250; });
+        return r.top > TOP_MIN && r.height > 50 && r.height < 130 && r.width > 250; })"""
+
+# Lettura della lista: solo la fascia visibile. Sopra i 150px c'e' l'intestazione
+# della colonna (nome account, schede Primary/General/Richieste), che non e' una
+# chat e non va classificata come tale.
+TOP_MIN_VISIBILI = 150
+
+# Risoluzione della riga da CLICCARE: tutte le righe MONTATE nel DOM, comprese
+# quelle sopra la piega (top negativo) e sotto (top oltre l'altezza della
+# finestra). Misurato l'11/08 e confermato dai log della run ON v3: il motore
+# accumula le righe campionate durante un gesto lungo (`scorri_leggendo` legge
+# ogni PX_FRA_LETTURE pixel), poi le apre una alla volta — ma quando arriva il
+# loro turno stanno gia' sopra la piega, e con TOP_MIN_VISIBILI risultavano
+# "non trovate" in 0.0s pur essendo ancora nel DOM. Effetto misurato: 45
+# aperture consecutive fallite subito dopo un 'continua' di decidi_fine_lista,
+# e solo la coda del lotto (le ultime righe campionate, ancora a schermo) che
+# riusciva. `human_click` fa `scroll_into_view_if_needed` prima di premere
+# (human_input.py:96), quindi una riga montata ma fuori schermo e' cliccabile
+# a tutti gli effetti: escluderla era il difetto, non una protezione.
+TOP_MIN_MONTATE = -100000
+
+# Quante righe si guardano. Nella fascia visibile ne stanno ~13; il buffer
+# virtualizzato di Instagram ne tiene fra 72 e 96 (misurato), quindi la
+# risoluzione per il click deve poterle vedere tutte.
+QUANTE_VISIBILI = 30
+QUANTE_MONTATE = 200
+
+_JS_RIGHE_TEMPLATE = """(nRighe) => {
+    const righe = FILTRO;
 
     // Segnale primario: un nodo di testo foglia con font-weight >= 600.
     const fontWeightAlto = (riga) => [...riga.querySelectorAll('span, div')]
@@ -144,6 +197,19 @@ _JS_RIGHE = """(nRighe) => {
                 pallinoConferma: pallinoPresente(e)};
     })};
 }"""
+
+# La query dell'handle da cliccare USA LO STESSO filtro della lettura: e' la
+# condizione perche' l'indice risolto sopra punti allo stesso elemento.
+_JS_HANDLE_TEMPLATE = """(idx) => (FILTRO)[idx] || null"""
+
+
+def _con_filtro(template: str, top_min: int) -> str:
+    return template.replace("FILTRO", _JS_FILTRO.replace("TOP_MIN", str(top_min)))
+
+
+_JS_RIGHE = _con_filtro(_JS_RIGHE_TEMPLATE, TOP_MIN_VISIBILI)
+_JS_RIGHE_MONTATE = _con_filtro(_JS_RIGHE_TEMPLATE, TOP_MIN_MONTATE)
+_JS_HANDLE_MONTATE = _con_filtro(_JS_HANDLE_TEMPLATE, TOP_MIN_MONTATE)
 
 # TUTTI i contenitori scrollabili, in ordine di documento: quale sia quello
 # della lista lo decide `scegli_contenitore` in Python, col bordo misurato.
@@ -202,6 +268,20 @@ class RigaVisibile:
 class StatoScorrimento:
     altezza: int | None
     al_fondo: bool
+    # Quante righe MAI VISTE il gesto ha campionato (le conta il chiamante, che
+    # e' l'unico a sapere cosa ha gia' lavorato: `su_righe` ritorna il conteggio).
+    # E' il segnale "c'e' ancora roba da fare qui sotto", che vale piu'
+    # dell'altezza del contenitore: l'altezza cresce solo quando Instagram
+    # AGGIUNGE thread, mentre le righe nuove compaiono anche solo attraversando
+    # quelli gia' caricati.
+    nuove: int = 0
+    # Quante di quelle righe vanno APERTE. Se ce n'e' anche una sola, il gesto
+    # si ferma li': vedi scorri_leggendo.
+    da_aprire: int = 0
+    # Posizione del contenitore (scrollTop) a fine gesto: serve a riconoscere
+    # una lista che e' tornata da capo. None se il contenitore non e' stato
+    # riconosciuto.
+    top: int | None = None
 
 
 def nome_combacia(atteso: str | None, trovato: str | None) -> bool:
@@ -239,8 +319,8 @@ def bordo_colonne(righe: list[dict]) -> float | None:
 
 
 def righe_valide(grezze: list[dict], altezza_viewport: int,
-                 bordo: float | None = None) -> list[dict]:
-    """Solo le righe che sono davvero chat visibili della lista.
+                 bordo: float | None = None, solo_visibili: bool = True) -> list[dict]:
+    """Solo le righe che sono davvero chat della lista.
 
     Tre scarti, tutti visti dal vivo:
     - placeholder della lista virtualizzata, senza testo;
@@ -249,12 +329,18 @@ def righe_valide(grezze: list[dict], altezza_viewport: int,
       "nome_atteso mancante" — rumore che nascondeva i fallimenti veri;
     - elementi che non appartengono alla colonna della lista, quando il bordo
       e' noto.
+
+    `solo_visibili=False` toglie il secondo scarto: serve alla risoluzione della
+    riga da cliccare, che deve poter raggiungere anche le righe montate fuori
+    schermo (vedi TOP_MIN_MONTATE). Per la CLASSIFICAZIONE resta True: una riga
+    fuori schermo ha un testo affidabile, ma non e' quello che l'utente sta
+    guardando, e il ciclo la incontrera' comunque scorrendo.
     """
     fuori = []
     for r in grezze or []:
         if not (r.get("testo") or "").strip():
             continue
-        if float(r.get("top", 0)) >= altezza_viewport:
+        if solo_visibili and float(r.get("top", 0)) >= altezza_viewport:
             continue
         if bordo is not None and _destro(r) > bordo + TOLLERANZA_BORDO_PX:
             continue
@@ -453,17 +539,24 @@ def piano_lancio(px_totali: int) -> list[tuple[int, float]]:
     return piano
 
 
-async def _leggi_righe_grezze(page, quante: int = 30) -> tuple[list[dict], dict, float | None]:
+async def _leggi_righe_grezze(
+    page, quante: int = QUANTE_VISIBILI, solo_visibili: bool = True,
+) -> tuple[list[dict], dict, float | None]:
     """Righe della lista, viewport e bordo fra le colonne, in una sola lettura.
 
     Il bordo si misura QUI e viene passato a valle: ricalcolarlo dopo il click
     significherebbe misurarlo su un DOM gia' cambiato.
+
+    `solo_visibili=False` legge tutte le righe MONTATE, anche fuori schermo:
+    e' la lettura che serve per ritrovare la riga da cliccare (vedi apri_riga).
     """
-    dati = await page.evaluate(_JS_RIGHE, quante) or {}
+    script = _JS_RIGHE if solo_visibili else _JS_RIGHE_MONTATE
+    dati = await page.evaluate(script, quante) or {}
     viewport = dati.get("viewport") or {"w": 0, "h": 0}
     grezze = dati.get("righe") or []
     bordo = bordo_colonne(grezze)
-    return righe_valide(grezze, viewport.get("h", 0), bordo), viewport, bordo
+    return (righe_valide(grezze, viewport.get("h", 0), bordo, solo_visibili),
+            viewport, bordo)
 
 
 async def leggi_righe_visibili(page, lingua: str, quante: int = 30) -> list[RigaVisibile]:
@@ -485,6 +578,60 @@ async def leggi_righe_visibili(page, lingua: str, quante: int = 30) -> list[Riga
             testo_grezzo=r["testo"],
         ))
     return fuori
+
+
+async def _contenitore_lista(page, bordo: float | None) -> tuple[int, dict] | None:
+    """(indice, riquadro) del contenitore scrollabile della lista, o None."""
+    candidati = await page.evaluate(_JS_CANDIDATI)
+    indice = scegli_contenitore(candidati, bordo)
+    if indice is None:
+        return None
+    return indice, candidati[indice]
+
+
+async def avvicina_riga(page, delta_px: int, bordo: float | None) -> bool:
+    """Porta la lista di `delta_px` (negativo = verso l'alto) con un gesto vero.
+
+    Serve prima di cliccare una riga montata ma fuori schermo. `human_click` la
+    raggiungerebbe da solo con `scroll_into_view_if_needed`, ma quello e' un
+    salto istantaneo senza eventi wheel: un movimento che nessuna mano produce,
+    ripetuto a ogni inizio di lotto. Qui si copre la stessa distanza con
+    `piano_scroll`, cioe' con la forma di gesto misurata sul trackpad di
+    Tommaso — stessa destinazione, firma diversa.
+
+    Ritorna False se il contenitore non e' riconosciuto (allora chi chiama
+    lascia fare al click, che ha comunque la sua rete di sicurezza).
+    """
+    if delta_px == 0:
+        return True
+    trovato = await _contenitore_lista(page, bordo)
+    if trovato is None:
+        return False
+    _indice, box = trovato
+
+    x = box["left"] + box["w"] * random.uniform(0.3, 0.7)
+    y = box["top"] + box["h"] * random.uniform(0.3, 0.7)
+    await page.mouse.move(x, y, steps=random.randint(5, 15))
+
+    verso = 1 if delta_px > 0 else -1
+    for passo, pausa in piano_scroll(abs(int(delta_px))):
+        await page.mouse.wheel(0, verso * passo)
+        await page.wait_for_timeout(int(pausa * 1000))
+    return True
+
+
+def _riga_da_avvicinare(top: float, altezza_viewport: int) -> int:
+    """Di quanti pixel muovere la lista perche' la riga finisca comodamente a
+    schermo, 0 se ci sta gia'. Funzione pura: la geometria si decide qui.
+
+    Il bersaglio e' il primo terzo della finestra — dove finisce lo sguardo di
+    chi ha appena scorso — non il bordo esatto: una riga incollata al margine
+    verrebbe rimessa fuori dal piu' piccolo assestamento del layout.
+    """
+    alto, basso = TOP_MIN_VISIBILI + 60, altezza_viewport - 140
+    if alto <= top <= basso:
+        return 0
+    return int(top - altezza_viewport / 3)
 
 
 async def apri_riga(
@@ -520,27 +667,52 @@ async def apri_riga(
         logger.warning(f"[InboxBrowser] apri_riga: nome_atteso mancante (indice hint {indice}) — nessun click")
         return None
 
-    righe, viewport, bordo = await _leggi_righe_grezze(page)
-    indice_effettivo = None
-    for r in righe:
-        prima_riga = (r.get("testo") or "").split("\n", 1)[0].strip()
-        if prima_riga and normalizza_nome(prima_riga) == nome_target:
-            indice_effettivo = r["indice"]
-            break
+    def _cerca(righe_correnti: list[dict]) -> dict | None:
+        for r in righe_correnti:
+            prima_riga = (r.get("testo") or "").split("\n", 1)[0].strip()
+            if prima_riga and normalizza_nome(prima_riga) == nome_target:
+                return r
+        return None
+
+    righe, viewport, bordo = await _leggi_righe_grezze(
+        page, QUANTE_MONTATE, solo_visibili=False)
+    trovata = _cerca(righe)
+
+    # Riga montata ma fuori schermo: la si porta a schermo con un gesto vero
+    # prima di cliccare. Dopo il movimento il DOM e' cambiato (righe montate e
+    # smontate, coordinate diverse), quindi si ri-risolve da capo: il gesto
+    # sposta la lista, non sposta la certezza su quale elemento sia la riga.
+    if trovata is not None:
+        delta = _riga_da_avvicinare(float(trovata.get("top", 0)), viewport.get("h", 0))
+        if delta and await avvicina_riga(page, delta, bordo):
+            righe, viewport, bordo = await _leggi_righe_grezze(
+                page, QUANTE_MONTATE, solo_visibili=False)
+            trovata = _cerca(righe)
+
+    indice_effettivo = trovata["indice"] if trovata is not None else None
 
     if indice_effettivo is None:
+        # Diagnostica a costo zero (nessuna richiesta di rete, solo il DOM che
+        # e' gia' stato letto sopra): quali righe ci sono DAVVERO in questo
+        # momento. Serve a distinguere i due modi in cui una riga sparisce —
+        # smontata dalla virtualizzazione mentre si scendeva (le righe presenti
+        # sono quelle DOPO di lei) oppure lista ricostruita da capo (le righe
+        # presenti sono le prime della inbox). Finche' il log diceva solo
+        # "non trovata" i due casi erano indistinguibili.
+        presenti = [
+            (r.get("testo") or "").split("\n", 1)[0].strip() for r in righe[:3]
+        ] + ["..."] + [
+            (r.get("testo") or "").split("\n", 1)[0].strip() for r in righe[-3:]
+        ] if len(righe) > 6 else [
+            (r.get("testo") or "").split("\n", 1)[0].strip() for r in righe
+        ]
         logger.warning(
             f"[InboxBrowser] riga non trovata al momento del click per {nome_atteso!r} "
-            f"(indice hint {indice}) — probabilmente scorsa fuori dal DOM virtualizzato"
+            f"(indice hint {indice}) — {len(righe)} righe montate nel DOM: {presenti}"
         )
         return None
 
-    handle = await page.evaluate_handle(
-        """(idx) => [...document.querySelectorAll('div[role="button"], div[tabindex="0"], a')]
-             .filter(e => { const r = e.getBoundingClientRect();
-               return r.top > 150 && r.height > 50 && r.height < 130 && r.width > 250; })[idx] || null""",
-        indice_effettivo,
-    )
+    handle = await page.evaluate_handle(_JS_HANDLE_MONTATE, indice_effettivo)
     elemento = handle.as_element()
     if elemento is None:
         return None
@@ -630,8 +802,41 @@ async def scorri_leggendo(page, lingua: str, su_righe) -> StatoScorrimento:
     primo campionamento avviene PRIMA di muovere la rotella: la funzione non fa
     affidamento su una lettura precedente del chiamante, altrimenti le righe
     visibili nella posizione di partenza sfuggirebbero a chi la chiama isolata.
+
+    Se `su_righe` ritorna un numero, e' il conteggio delle righe MAI VISTE che
+    ha accettato; se ritorna una coppia, la seconda meta' e' quante di quelle
+    vanno APERTE. Chi ritorna None conta zero (i vari script diagnostici),
+    quindi il campo resta compatibile.
+
+    IL GESTO SI FERMA quando il campionamento incontra una riga da aprire.
+    Misurato dal vivo il 12/08 con la diagnostica su `apri_riga`: Instagram
+    tiene nel DOM **9-10 righe**, cioe' la sola fascia visibile — non le 72-96
+    scritte nel docstring del modulo (misura vecchia, sbagliata). Una riga vista
+    250px fa non e' piu' raggiungibile in nessun modo: leggere in anticipo e
+    aprire dopo non e' migliorabile, e' impossibile. L'unico momento in cui una
+    riga si puo' aprire e' mentre e' a schermo. Fermarsi e' anche il gesto piu'
+    umano che ci sia: si scorre in fretta cio' che si conosce e ci si ferma su
+    cio' che interessa. Le righe gia' note non fermano niente e continuano a
+    scorrere alla velocita' piena.
     """
-    await su_righe(await leggi_righe_visibili(page, lingua))
+    nuove = 0
+    da_aprire = 0
+
+    async def _campiona() -> None:
+        nonlocal nuove, da_aprire
+        esito = await su_righe(await leggi_righe_visibili(page, lingua))
+        if isinstance(esito, tuple):
+            nuove += esito[0] or 0
+            da_aprire += esito[1] or 0
+        else:
+            nuove += esito or 0
+
+    await _campiona()
+    if da_aprire:
+        # C'e' gia' da lavorare qui, senza muoversi di un pixel.
+        stato = await stato_lista(page)
+        return StatoScorrimento(altezza=stato.altezza, al_fondo=stato.al_fondo,
+                                nuove=nuove, da_aprire=da_aprire, top=stato.top)
 
     _righe, _viewport, bordo = await _leggi_righe_grezze(page)
     candidati = await page.evaluate(_JS_CANDIDATI)
@@ -651,21 +856,51 @@ async def scorri_leggendo(page, lingua: str, su_righe) -> StatoScorrimento:
     y = box["top"] + box["h"] * random.uniform(0.3, 0.7)
     await page.mouse.move(x, y, steps=random.randint(5, 15))
 
+    # Contabilita' del gesto, per capire DOVE va il tempo quando un gesto che
+    # dovrebbe durare 2-3 secondi ne dura 130 (visto dal vivo il 12/08, due
+    # volte in sette minuti, con la pagina che poi si e' ripresa da sola).
+    # Sono tre attese diverse e vanno separate: la rotella (`mouse.wheel`
+    # aspetta che il renderer abbia gestito l'evento — se la pagina e'
+    # occupata, blocca), le pause fra un evento e l'altro, e la lettura delle
+    # righe. Nessun costo aggiunto: si legge un orologio, non la pagina.
+    speso = {"rotella": 0.0, "attese": 0.0, "lettura": 0.0}
     percorso_da_ultima_lettura = 0
+    t_gesto = time.monotonic()
     for delta, pausa in piano_scroll(px):
+        t = time.monotonic()
         await page.mouse.wheel(0, delta)
+        speso["rotella"] += time.monotonic() - t
+        t = time.monotonic()
         await page.wait_for_timeout(int(pausa * 1000))
+        speso["attese"] += time.monotonic() - t
         percorso_da_ultima_lettura += abs(delta)
         if percorso_da_ultima_lettura >= PX_FRA_LETTURE:
             percorso_da_ultima_lettura = 0
-            await su_righe(await leggi_righe_visibili(page, lingua))
+            t = time.monotonic()
+            await _campiona()
+            speso["lettura"] += time.monotonic() - t
+            if da_aprire:
+                # Riga da aprire sotto gli occhi: si smette di scorrere adesso,
+                # finche' e' ancora a schermo (unico posto dove e' cliccabile).
+                break
 
-    await su_righe(await leggi_righe_visibili(page, lingua))
+    durata = time.monotonic() - t_gesto
+    if durata > SOGLIA_GESTO_LENTO_S:
+        logger.warning(
+            f"[InboxBrowser] gesto di scorrimento lento: {durata:.1f}s per {px}px "
+            f"(rotella {speso['rotella']:.1f}s, attese {speso['attese']:.1f}s, "
+            f"lettura {speso['lettura']:.1f}s) — la pagina non stava rispondendo"
+        )
+
+    if not da_aprire:
+        await _campiona()
 
     stato = await page.evaluate(_JS_STATO_CONTENITORE, indice)
     if stato is None:
-        return StatoScorrimento(altezza=None, al_fondo=False)
-    return StatoScorrimento(altezza=stato["altezza"], al_fondo=stato["alFondo"])
+        return StatoScorrimento(altezza=None, al_fondo=False, nuove=nuove,
+                                da_aprire=da_aprire)
+    return StatoScorrimento(altezza=stato["altezza"], al_fondo=stato["alFondo"],
+                            nuove=nuove, da_aprire=da_aprire, top=stato.get("top"))
 
 
 async def scorri(page) -> StatoScorrimento:
@@ -738,7 +973,51 @@ async def lancia(page) -> StatoScorrimento:
     stato = await page.evaluate(_JS_STATO_CONTENITORE, indice)
     if stato is None:
         return StatoScorrimento(altezza=None, al_fondo=False)
-    return StatoScorrimento(altezza=stato["altezza"], al_fondo=stato["alFondo"])
+    return StatoScorrimento(altezza=stato["altezza"], al_fondo=stato["alFondo"],
+                            top=stato.get("top"))
+
+
+def lista_ripartita_da_capo(top_prima: int | None, top_dopo: int | None,
+                            profondita_minima_px: int = 2000) -> bool:
+    """True se la lista, che era in profondita', si e' ritrovata (quasi) in cima.
+
+    Funzione pura: il rilevamento sta qui, il recupero sta nel motore.
+
+    Osservato due volte l'11/08 mattina (scrollTop oltre 15.000px tornato a
+    ~400px) e sospettato dietro i blocchi a raffica della sera. La causa a monte
+    — refetch di rete, ricostruzione della lista virtualizzata, o un vero
+    reload della pagina — NON e' ancora accertata, e il rilevamento non la
+    assume: guarda solo il fatto osservabile, cioe' che la posizione e'
+    crollata senza che nessuno abbia scorso all'indietro.
+
+    `profondita_minima_px` evita i falsi positivi dei primi gesti, quando la
+    lista sta ancora vicino alla cima e un rimbalzo di poche centinaia di pixel
+    e' normale.
+    """
+    if top_prima is None or top_dopo is None:
+        return False
+    if top_prima < profondita_minima_px:
+        return False
+    return top_dopo < top_prima / 2
+
+
+async def stato_lista(page) -> StatoScorrimento:
+    """Dove si trova la lista, senza toccarla.
+
+    Solo letture del DOM (nessuna richiesta verso Instagram, nessun gesto):
+    serve al motore per accorgersi che la lista e' ripartita da capo fra un
+    giro e l'altro.
+    """
+    _righe, _viewport, bordo = await _leggi_righe_grezze(page)
+    candidati = await page.evaluate(_JS_CANDIDATI)
+    indice = scegli_contenitore(candidati, bordo)
+    if indice is None:
+        return StatoScorrimento(altezza=None, al_fondo=False)
+    stato = await page.evaluate(_JS_STATO_CONTENITORE, indice)
+    if stato is None:
+        return StatoScorrimento(altezza=None, al_fondo=False)
+    return StatoScorrimento(altezza=stato["altezza"], al_fondo=stato["alFondo"],
+                            top=stato.get("top"))
 
 
 def decidi_da_segnali(
@@ -780,10 +1059,23 @@ async def decidi_fine_lista(page, falliti_inbox: list, lingua: str, su_righe) ->
     """
     baseline_falliti = len(falliti_inbox)
     stato = await scorri_leggendo(page, lingua, su_righe)
+    if stato.nuove:
+        # Il gesto ha gia' trovato righe mai viste: la domanda "la lista e'
+        # finita?" non si pone nemmeno, c'e' lavoro da fare subito. Prima
+        # questa uscita non esisteva e la scala di attese veniva percorsa lo
+        # stesso (fino a 31s di sola attesa piu' altri cinque gesti da 2-4
+        # schermate l'uno), perche' l'unico segnale guardato era l'altezza del
+        # contenitore — che cresce solo quando Instagram AGGIUNGE thread, non
+        # quando si attraversano quelli gia' caricati. Effetto misurato l'11/08
+        # sera: lotti da 45+ righe accumulate in un colpo, la meta' delle quali
+        # gia' fuori dal buffer renderizzato quando arrivava il loro turno.
+        return "continua"
     altezza_prima = stato.altezza
     for attesa_s in ATTESE_S:
         await page.wait_for_timeout(int(attesa_s * 1000))
         stato = await scorri_leggendo(page, lingua, su_righe)
+        if stato.nuove:
+            return "continua"
         if stato.altezza is not None and altezza_prima is not None and stato.altezza > altezza_prima:
             return "continua"
         altezza_prima = stato.altezza
