@@ -221,6 +221,29 @@ def test_fra_due_contenitori_della_lista_vince_quello_piu_alto():
 
 
 # ── scroll umano: non un salto secco ──────────────────────────────────────
+def test_il_gesto_e_fitto_come_quello_di_un_trackpad():
+    """Otto scatti da un centinaio di pixel con pause di due decimi l'uno
+    dall'altro non sono un gesto fluido: sono otto colpi separati. Un dito su
+    un trackpad produce decine di eventi piccoli e ravvicinati."""
+    piano = piano_scroll(590)          # una schermata a 1920x940
+    assert len(piano) >= 15, f"solo {len(piano)} scatti: si vede la scalinata"
+    assert all(abs(delta) <= 60 for delta, _ in piano)
+    assert all(0.008 <= pausa <= 0.06 for _, pausa in piano)
+
+
+def test_il_gesto_accelera_e_poi_frena():
+    """La firma di un movimento vero: parte piano, prende velocita' in mezzo,
+    rallenta alla fine. Una sequenza di scatti tutti uguali e' un motore, non
+    una mano."""
+    piano = [d for d, _ in piano_scroll(590) if d > 0]
+    bordo = max(2, len(piano) // 5)
+    inizio = sum(piano[:bordo]) / bordo
+    centro = sum(piano[bordo:-bordo]) / max(len(piano) - 2 * bordo, 1)
+    fine = sum(piano[-bordo:]) / bordo
+    assert inizio < centro, f"parte gia' a velocita' piena ({inizio:.0f} vs {centro:.0f})"
+    assert fine < centro, f"si ferma di colpo ({fine:.0f} vs {centro:.0f})"
+
+
 def test_lo_scroll_e_fatto_di_piu_scatti_piccoli():
     """Un solo salto da 400px e' la firma piu' riconoscibile che ci sia:
     nessun dito su un trackpad muove una schermata in un evento solo."""
