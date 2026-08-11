@@ -184,6 +184,13 @@ class Campaign(Base):
     )
     list_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bio_target: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Segnalibro della Fase Lista via browser: la data della riga di lista piu'
+    # vecchia gia' lavorata. In modalita' segnalibro si scorre senza aprire
+    # finche' le righe sono piu' recenti di questa soglia. E' una DATA, non il
+    # riferimento a una chat: se proprio quella chat ricevesse una risposta
+    # risalirebbe in cima e il riferimento sparirebbe. Migration 033.
+    inbox_cursor_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    inbox_cursor_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 'completed' | 'partial' | 'rate_limited' — esito ultimo scraping
     scrape_outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)
     scrape_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
