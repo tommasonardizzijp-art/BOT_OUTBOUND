@@ -228,6 +228,17 @@ race che l'altro endpoint (`rimuovi_contatto`) già paga con un commento dedicat
   Nessun controllo di stato campagna qui: la promozione non tocca campagne. Risposta: il
   `ReportPromozione` serializzato (stesso stile di `ingest`: dict con le stesse chiavi del
   dataclass, `scarti` come lista di dict).
+  **Requisito esplicito (corretto in review di Task 2, non lasciarlo implicito):**
+  `promuovi()` prende ora `tenant_id: str` obbligatorio ed è la barriera IDOR — una riga di
+  `wa_discovered_chats` che esiste ma appartiene a un altro tenant si scarta con
+  `"non_trovato"`. Questo endpoint DEVE risolvere il `tenant_id` corretto e passarlo,
+  altrimenti la barriera non serve a niente. Non c'è ancora un contesto di richiesta
+  autenticato in questa API (stesso stato di `wa_campaigns.crea`/`wa_numbers.crea`, che si
+  fidano di un `tenant_id` passato dal client): la scelta più semplice, coerente con `GET ""`
+  che già richiede `number_id`, è aggiungere `wa_number_id: str` al body di `POST /promote`,
+  caricare `WaNumber` per id, 404 se non esiste, e usare `numero.tenant_id` come `tenant_id`
+  di `promuovi()` — mai un `tenant_id` preso direttamente dal body senza passare da una riga
+  del DB che lo possieda davvero.
 
 `backend/app/api/wa_contacts.py` — nuovo endpoint aggiunto (non nuovo file):
 
