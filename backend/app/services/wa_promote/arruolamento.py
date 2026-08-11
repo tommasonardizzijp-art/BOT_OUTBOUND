@@ -19,6 +19,7 @@ catturato.
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -45,6 +46,19 @@ class CampagnaNonModificabile(Exception):
     `CsvParseError` in `wa_csv.py` e `WaProfileBusy` in
     `wa_profile_lock.py`: ogni eccezione di dominio vive dove nasce, finche'
     non serve altrove."""
+
+
+def _uuid_valido(id_: str) -> bool:
+    """L'id atteso e' sempre un uuid4 (String(36), vedi i modelli). Un id
+    malformato (null byte, non-uuid) non deve arrivare al driver: un null
+    byte fa sollevare ad asyncpg un CharacterNotInRepertoireError non
+    catturato -> 500 grezzo (trovato in QA di fine modulo Fase B, stesso
+    difetto corretto in promozione.py)."""
+    try:
+        uuid.UUID(id_)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 @dataclass
@@ -89,7 +103,7 @@ async def arruola(db, *, campaign_id: str, contact_ids: list[str]) -> ReportArru
          next_action_at=adesso (contratto §7.2, I3: mai NULL su una riga non
          terminale), failure_count=0.
     """
-    campagna = await db.get(WaCampaign, campaign_id)
+    campagna = await db.get(WaCampaign, campaign_id) if _uuid_valido(campaign_id) else None
     if campagna is None or campagna.status != WaCampaignStatus.draft:
         motivo = "inesistente" if campagna is None else f"stato {campagna.status.value}"
         raise CampagnaNonModificabile(f"campagna {campaign_id} non modificabile: {motivo}")
@@ -98,7 +112,7 @@ async def arruola(db, *, campaign_id: str, contact_ids: list[str]) -> ReportArru
     adesso = datetime.utcnow()
 
     for contact_id in contact_ids:
-        contatto = await db.get(WaContact, contact_id)
+        contatto = await db.get(WaContact, contact_id) if _uuid_valido(contact_id) else None
         if contatto is None or contatto.tenant_id != campagna.tenant_id:
             report.scarti.append(Scarto(contact_id, "contatto_inesistente"))
             continue

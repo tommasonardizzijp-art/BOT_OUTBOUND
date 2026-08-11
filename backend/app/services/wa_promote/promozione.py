@@ -20,6 +20,7 @@ protegge la singola INSERT concorrente fra due chiamate `promuovi()` diverse
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -74,6 +75,20 @@ async def promuovi(db, *, tenant_id: str, ids: list[str]) -> ReportPromozione:
     adesso = datetime.utcnow()
 
     for id_ in ids:
+        try:
+            # L'id atteso e' sempre un uuid4 (String(36), vedi il modello).
+            # Un id malformato (null byte, non-uuid, 10k caratteri) non deve
+            # arrivare al driver: un null byte fa sollevare ad asyncpg un
+            # CharacterNotInRepertoireError non catturato -> 500 grezzo
+            # (trovato in QA di fine modulo). Si scarta PRIMA della query,
+            # stesso motivo "non_trovato" di un id valido ma inesistente --
+            # nessuna differenza osservabile fra le due cause, stesso
+            # principio del confine di sicurezza sul tenant sopra.
+            uuid.UUID(id_)
+        except (ValueError, AttributeError, TypeError):
+            report.scarti.append(Scarto(id_, "non_trovato"))
+            continue
+
         riga = await db.get(WaDiscoveredChat, id_)
         if riga is None or riga.tenant_id != tenant_id:
             report.scarti.append(Scarto(id_, "non_trovato"))

@@ -148,6 +148,29 @@ async def test_contatto_inesistente_si_scarta(db_session):
 
 
 @pytest.mark.asyncio
+async def test_contact_id_con_null_byte_si_scarta_senza_500(db_session):
+    """Stesso difetto trovato in QA su promozione.py: un contact_id con
+    '\\x00' non deve arrivare al driver (asyncpg lo rifiuta con
+    un'eccezione non catturata)."""
+    tenant, campagna = await _ctx(db_session)
+
+    report = await arruolamento.arruola(db_session, campaign_id=campagna.id,
+                                        contact_ids=["abc\x00def"])
+
+    assert report.scarti == [Scarto(id="abc\x00def", motivo="contatto_inesistente")]
+    assert report.arruolati == 0
+
+
+@pytest.mark.asyncio
+async def test_campaign_id_con_null_byte_e_campagna_inesistente(db_session):
+    """Stessa validazione vale per campaign_id: il caricamento fail-fast
+    della campagna non deve nemmeno lui arrivare al driver con un id
+    ostile."""
+    with pytest.raises(CampagnaNonModificabile):
+        await arruolamento.arruola(db_session, campaign_id="abc\x00def", contact_ids=[])
+
+
+@pytest.mark.asyncio
 async def test_contatto_di_altro_tenant_si_scarta_come_inesistente(db_session):
     """Stesso principio 'per costruzione' del gap IDOR gia' corretto in
     promozione.promuovi: un contact_id che esiste ma appartiene a un tenant

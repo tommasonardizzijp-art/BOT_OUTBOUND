@@ -161,6 +161,21 @@ async def test_id_sconosciuto_si_scarta(db_session):
 
 
 @pytest.mark.asyncio
+async def test_id_con_null_byte_si_scarta_senza_500(db_session):
+    """QA di fine modulo (adversarial): un id con '\\x00' faceva risalire un
+    CharacterNotInRepertoireError non catturato da asyncpg -- 500 grezzo
+    invece di uno scarto gestito. L'id atteso e' sempre un uuid4: si valida
+    PRIMA della query, non si lascia decidere al driver."""
+    tenant, _number = await _ctx(db_session)
+    id_ostile = "abc\x00def"
+
+    report = await promozione.promuovi(db_session, tenant_id=tenant.id, ids=[id_ostile])
+
+    assert report.scarti == [Scarto(id=id_ostile, motivo="non_trovato")]
+    assert report.promossi == 0
+
+
+@pytest.mark.asyncio
 async def test_riga_di_altro_tenant_si_scarta(db_session):
     """Il gap IDOR segnalato in review: una riga ESISTE, ha un numero valido
     ed e' promuovibile -- ma appartiene a un tenant diverso da quello con cui
