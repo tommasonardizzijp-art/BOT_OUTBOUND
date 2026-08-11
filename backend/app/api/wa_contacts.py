@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import func, select, update
 
 from app.config import settings
@@ -10,6 +11,8 @@ from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                            WaContact, WaContactStatus)
 from app.services.wa_csv import CsvParseError
 from app.services.wa_ingest import ingerisci_csv
+from app.services.wa_promote import arruolamento
+from app.services.wa_promote.arruolamento import CampagnaNonModificabile
 from app.utils.crypto import decrypt
 from app.utils.phone_pseudonym import mask_phone
 
@@ -87,6 +90,31 @@ async def lista_contatti(campaign_id: str, limit: int = 200, offset: int = 0,
         }
         for cc, c in righe
     ]}
+
+
+class EnrollRequest(BaseModel):
+    campaign_id: str
+    contact_ids: list[str]
+
+
+@router.post("/enroll")
+async def enroll(body: EnrollRequest, db=Depends(get_db)) -> dict:
+    """Fase B, Task 3/4: aggiunge WaContact gia' esistenti a una campagna
+    (arruolamento). Stesso guard 409 di `ingest` se la campagna non e' in
+    bozza -- qui `arruolamento.arruola` lo esprime sollevando
+    `CampagnaNonModificabile` (anche per campagna inesistente, vedi la
+    docstring dell'eccezione), tradotta in HTTPException dal guscio HTTP."""
+    try:
+        report = await arruolamento.arruola(
+            db, campaign_id=body.campaign_id, contact_ids=body.contact_ids)
+    except CampagnaNonModificabile as exc:
+        raise HTTPException(409, str(exc))
+    return {
+        "arruolati": report.arruolati,
+        "gia_presenti": report.gia_presenti,
+        "gia_dnc": report.gia_dnc,
+        "scarti": [{"id": s.id, "motivo": s.motivo} for s in report.scarti],
+    }
 
 
 @router.delete("/{campaign_contact_id}")
