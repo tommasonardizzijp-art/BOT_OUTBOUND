@@ -99,6 +99,22 @@ def etichetta_visibile(titolo: str | None, numero: str | None) -> str | None:
     return mask_phone(numero or t)
 
 
+def e_etichetta_mascherata(etichetta: str | None) -> bool:
+    """L'etichetta e' un segnaposto (numero mascherato), non un nome vero.
+
+    Serve alla fusione: un contatto non ancora in rubrica ha il numero come
+    titolo e viene salvato come '+39.....077'; quando il cliente lo salva in
+    rubrica, la ri-scansione porta il nome vero. Senza distinguere le due cose,
+    la regola "integra, non sovrascrive" terrebbe la maschera per sempre e in
+    Fase B l'operatore approverebbe una lista di maschere invece di nomi.
+
+    Il riconoscimento e' sulla forma prodotta da mask_phone (prefisso, puntini,
+    ultime cifre): non si tenta di indovinare altro.
+    """
+    testo = (etichetta or "").strip()
+    return bool(testo) and "•" in testo
+
+
 def tipo_da_segnali(*, numero_leggibile: bool, testo_pannello: str | None,
                     titolo: str | None) -> str:
     """'individuale' | 'gruppo' | 'ignoto'.
