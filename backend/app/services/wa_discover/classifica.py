@@ -35,7 +35,18 @@ TIPO_IGNOTO = "ignoto"
 
 @dataclass
 class RigaScoperta:
-    titolo: str | None          # None quando il titolo E' il numero (P12)
+    """Una chat scoperta, prima che il salvataggio decida come scriverla.
+
+    `titolo` e' il titolo GREZZO letto dalla sidebar, anche quando e' un numero
+    di telefono: NON va azzerato qui per rispettare P12. La mascheratura e'
+    responsabilita' di `etichetta_visibile`, che il salvataggio applica sempre.
+    Azzerarlo a monte butterebbe via l'informazione prima che qualcuno possa
+    mascherarla, e la riga finirebbe a DB con chat_title NULL e phone_hmac NULL
+    -- senza identita' per nessuna delle due unique, quindi duplicata a ogni
+    ri-scansione (vedi wa_discover/salvataggio.py). P12 si rispetta scrivendo
+    la maschera, non perdendo il dato.
+    """
+    titolo: str | None          # titolo grezzo dalla sidebar; maschera a valle
     numero: str | None          # E.164, gia' normalizzato
     numero_leggibile: bool
     tipo: str                   # TIPO_*
