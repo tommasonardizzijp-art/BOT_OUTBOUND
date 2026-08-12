@@ -39,6 +39,34 @@ def test_wa_session_break_seconds_campaign_override(monkeypatch):
     assert all(abs(s - 60.0) < 5.0 for s in samples)
 
 
+def test_wa_session_break_seconds_non_si_ammassa_sui_bordi(monkeypatch):
+    """La pausa fra mini-sessioni non deve accumularsi sui due estremi.
+
+    Il clamp (`max(lo, min(hi, val))`) non scarta le estrazioni fuori range: le
+    schiaccia sul bound. Con i default WA (20-40 min, sigma 0.6) il 56% delle
+    pause cadeva esattamente su 1200s o 2400s -- una firma peggiore di un
+    ritardo costante, lo stesso difetto misurato e corretto su Instagram con
+    la PR #55. Serve troncamento per RIESTRAZIONE, non bound piu' larghi.
+    """
+    import random
+
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_break_min_min", 20)
+    monkeypatch.setattr(settings, "wa_break_max_min", 40)
+    campaign = SimpleNamespace(session_min_messages=None, session_max_messages=None,
+                                break_min_minutes=None, break_max_minutes=None)
+
+    random.seed(12345)
+    samples = [wa_timing.wa_session_break_seconds(campaign) for _ in range(2000)]
+
+    lo, hi = 20 * 60.0, 40 * 60.0
+    assert all(lo <= s <= hi for s in samples)
+    sui_bordi = sum(1 for s in samples if s in (lo, hi))
+    assert sui_bordi / len(samples) < 0.02, (
+        f"{sui_bordi}/{len(samples)} pause esattamente su {lo}s o {hi}s"
+    )
+
+
 def test_effective_wa_active_hours_parses_HHMM_range(monkeypatch):
     from app.config import settings
     monkeypatch.setattr(settings, "wa_active_hours", "09:30-19:30")
