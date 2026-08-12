@@ -94,7 +94,11 @@ class _FakeBusySession:
 
 
 async def _setup_campaign_account_follower():
-    base = 990_000_000_000 + int(datetime.utcnow().timestamp()) % 100_000
+    # `base` deve essere unico fra due chiamate QUALSIASI, anche consecutive:
+    # e' la chiave di `instagram_accounts.username` (UNIQUE) e di
+    # `followers.ig_user_id`. L'orologio non e' una sorgente di unicita' --
+    # vedi test_setup_helper_non_collide_se_richiamato_nello_stesso_secondo.
+    base = 990_000_000_000 + uuid.uuid4().int % 100_000_000
     acc_id = str(uuid.uuid4())
     async with AsyncSessionLocal() as db:
         db.add(InstagramAccount(
@@ -123,6 +127,23 @@ async def _setup_campaign_account_follower():
         ))
         await db.commit()
         return camp.id, acc_id, follower.id
+
+
+@pytest.mark.asyncio
+async def test_setup_helper_non_collide_se_richiamato_nello_stesso_secondo():
+    """Due setup consecutivi devono poter convivere nel DB di test.
+
+    `base` derivava da `utcnow().timestamp()` a risoluzione di SECONDO: i due
+    test end-to-end di questo file, se eseguiti entro lo stesso secondo,
+    ottenevano lo stesso username e il secondo moriva su
+    "UNIQUE constraint failed: instagram_accounts.username" (il rollback del
+    conftest arriva dopo il commit, quindi la riga del primo resta a terra).
+    Verde su questo PC, dove la suite intera prende 13 minuti; ROSSO in CI,
+    dove prende 2 minuti -- riprodotto due volte di fila sulla PR #68.
+    """
+    primo = await _setup_campaign_account_follower()
+    secondo = await _setup_campaign_account_follower()
+    assert primo[1] != secondo[1]
 
 
 @pytest.mark.asyncio
