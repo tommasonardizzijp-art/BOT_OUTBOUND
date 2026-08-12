@@ -128,3 +128,14 @@
     @apply font-sans;
   }
 }
+
+/* Il popup nativo di un <select> (le <option>) lo disegna il browser, non la
+   nostra CSS: e' sempre su sfondo chiaro indipendentemente dal tema scuro
+   dell'app. Il colore chiaro che usiamo sul <select> chiuso (es. #e7f3ef in
+   selectStyle di scoperti/page.tsx) ci cascata dentro e diventa testo quasi
+   invisibile su sfondo bianco. Fix globale, non per-pagina: qualunque select
+   dell'app ha le opzioni leggibili. */
+select option {
+  color: #111827;
+  background-color: #ffffff;
+}

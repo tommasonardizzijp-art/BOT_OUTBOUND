@@ -185,6 +185,45 @@ export default function ScopertiPage() {
     })
   }
 
+  // "Seleziona tutti i filtrati (tutte le pagine)": la checkbox d'intestazione
+  // opera solo sulla pagina corrente (RIGHE_PER_PAGINA=100) -- con centinaia
+  // di righe selezionare pagina per pagina e' impraticabile (richiesto dopo
+  // il primo giro reale su Primero, 273 righe). Pagina lato server con lo
+  // stesso limite massimo che l'API gia' accetta (500, vedi wa_discover.py),
+  // accumulando SOLO gli id promuovibili -- un gruppo o una riga gia'
+  // promossa non finiscono comunque in selezione, coerente con "seleziona
+  // tutti" della pagina singola qui sopra.
+  const LIMITE_FETCH_TUTTI = 500
+  const [caricandoSelezioneTotale, setCaricandoSelezioneTotale] = useState(false)
+
+  async function selezionaTuttiFiltrati() {
+    if (!numberId) return
+    setCaricandoSelezioneTotale(true)
+    try {
+      const tuttiIds = new Set<string>()
+      let offsetFetch = 0
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const pagina = await waApi.scoperti.list(numberId, {
+          status: filtroStatus,
+          tipoChat: filtroTipoChat === 'tutti' ? undefined : filtroTipoChat,
+          haNumero: filtroHaNumero === 'tutti' ? undefined : filtroHaNumero === 'si',
+          limit: LIMITE_FETCH_TUTTI,
+          offset: offsetFetch,
+        })
+        pagina.chat.forEach((r) => { if (r.promuovibile) tuttiIds.add(r.id) })
+        if (pagina.chat.length < LIMITE_FETCH_TUTTI) break
+        offsetFetch += LIMITE_FETCH_TUTTI
+      }
+      setSelectedIds(tuttiIds)
+      toast.success(`${tuttiIds.size} righe selezionate (tutte le pagine, filtri correnti).`)
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Errore nel selezionare tutte le righe.')
+    } finally {
+      setCaricandoSelezioneTotale(false)
+    }
+  }
+
   // ---- Promozione -----------------------------------------------------------
   const [promuovendo, setPromuovendo] = useState(false)
   const [erroreCompletamento, setErroreCompletamento] = useState<string | null>(null)
@@ -358,14 +397,26 @@ export default function ScopertiPage() {
                     )}
                   </p>
                   {erroreCompletamento && <Errore messaggio={erroreCompletamento} />}
-                  <Button
-                    type="button"
-                    disabled={selectedIds.size === 0 || promuovendo}
-                    onClick={handlePromuovi}
-                    style={{ backgroundColor: 'var(--wa-accent)', color: '#04120e' }}
-                  >
-                    {promuovendo ? 'Promozione...' : `Promuovi selezionati (${selectedIds.size})`}
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={caricandoSelezioneTotale || promuovendo}
+                      onClick={selezionaTuttiFiltrati}
+                      style={{ borderColor: 'var(--wa-border)', color: 'var(--wa-muted)' }}
+                      title="Seleziona tutte le righe promuovibili che combaciano coi filtri, non solo questa pagina"
+                    >
+                      {caricandoSelezioneTotale ? 'Seleziono...' : 'Seleziona tutti i filtrati'}
+                    </Button>
+                    <Button
+                      type="button"
+                      disabled={selectedIds.size === 0 || promuovendo}
+                      onClick={handlePromuovi}
+                      style={{ backgroundColor: 'var(--wa-accent)', color: '#04120e' }}
+                    >
+                      {promuovendo ? 'Promozione...' : `Promuovi selezionati (${selectedIds.size})`}
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="overflow-hidden rounded-xl border" style={{ borderColor: 'var(--wa-border)' }}>
