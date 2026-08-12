@@ -344,7 +344,24 @@ async def scan_number(number_id: str) -> dict:
 
     async with AsyncSessionLocal() as db:
         for row in righe:
-            if row.unread_count <= 0:
+            # L'unread da solo NON e' il criterio giusto, e il 12/08 e' costato
+            # un opt-out perso: la sessione di invio apre la chat per scrivere e
+            # la lascia aperta uscendo, quindi uno STOP che arriva mentre quella
+            # chat e' l'attiva a schermo viene marcato letto all'istante da
+            # WhatsApp Web -- unread torna 0 e la riga spariva prima che qualcuno
+            # ne guardasse la preview. Nel PoC il browser non inviava, non apriva
+            # chat, e la condizione non si presentava mai.
+            #
+            # Il criterio corretto e' la DIREZIONE dell'ultimo messaggio. La
+            # preview della sidebar c'e' anche per le chat lette e non serve
+            # aprire nulla per leggerla: il vincolo di coesistenza (mai aprire
+            # una conversazione) resta intatto.
+            #
+            # La seconda meta' della condizione non e' un dettaglio: su una chat
+            # letta la preview e' l'ultimo messaggio CHIUNQUE l'abbia scritto. Se
+            # e' il nostro, processare la riga marcherebbe `replied` -- che e'
+            # terminale -- un contatto che non ha mai risposto.
+            if row.unread_count <= 0 and row.last_is_outbound:
                 continue
             esito["scansionate"] += 1
             risultato = await process_chat_row(db, tenant_id=tenant_id,

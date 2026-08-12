@@ -657,9 +657,15 @@ async def test_scan_number_processa_le_righe_non_lette(db_session, monkeypatch):
     contatto.chat_title = "Marco"
     await db_session.commit()
 
+    riga_letta_e_nostra = _row("Altro", preview="test", unread=0)
+    # Letta E con l'ultimo messaggio nostro: e' l'unica combinazione che si
+    # salta. Una chat letta il cui ultimo messaggio e' del cliente va invece
+    # processata (test_stop_su_chat_gia_letta_produce_comunque_optout).
+    riga_letta_e_nostra.last_is_outbound = True
+
     righe_finte = [
         _row("Marco", preview="ciao", unread=1),
-        _row("Altro", preview="test", unread=0),  # unread=0, va ignorata
+        riga_letta_e_nostra,
     ]
 
     class _PomFinto:
@@ -826,3 +832,131 @@ async def test_e2e_optout_ferma_tutte_le_campagne_del_contatto(db_session, monke
     assert contatto.do_not_contact is True
     assert cc_a.status == WaContactStatus.opted_out
     assert cc_b.status == WaContactStatus.opted_out
+
+
+def _monta_browser_finto(monkeypatch, righe):
+    """Le tre finzioni che servono a far girare scan_number senza browser:
+    POM, context di Playwright, lucchetto profilo. Estratto qui perche' i
+    test sull'unread ne hanno bisogno uguale ai precedenti."""
+    from app.services import wa_reply_watcher
+
+    class _PomFinto:
+        def __init__(self, page):
+            pass
+
+        async def session_state(self):
+            return "logged_in"
+
+        async def scan_chat_list(self):
+            return righe
+
+    monkeypatch.setattr(wa_reply_watcher, "WhatsAppWebPage", _PomFinto)
+
+    class _ContextFinto:
+        async def new_page(self):
+            class _PageFinta:
+                async def goto(self, *a, **k):
+                    pass
+            return _PageFinta()
+
+    class _BrowserCtx:
+        def __call__(self, number_id, headless=True, proxy_url=None):
+            return self
+
+        async def __aenter__(self):
+            return _ContextFinto()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(wa_reply_watcher, "_open_wa_browser", _BrowserCtx())
+    _lock_profilo_libero(monkeypatch)
+
+    async def _mai_halted():
+        return False
+    monkeypatch.setattr(wa_reply_watcher.bot_state_service, "is_wa_halted", _mai_halted)
+
+
+@pytest.mark.asyncio
+async def test_stop_su_chat_gia_letta_produce_comunque_optout(db_session, monkeypatch):
+    """Il difetto del 12/08, misurato dal vivo: un cliente ha risposto STOP e
+    il watcher non l'ha registrato (0 opt-out su 53 messaggi inviati).
+
+    La sessione di invio DEVE aprire la chat per scrivere, e la lascia aperta
+    uscendo. Se lo STOP arriva mentre quella chat e' l'attiva a schermo,
+    WhatsApp Web la marca letta all'istante: `unread_count` torna a 0 e il
+    filtro del chiamante saltava la riga prima di guardarne la preview. Nel PoC
+    il browser non inviava, quindi non apriva chat e la condizione non poteva
+    presentarsi -- per questo "funzionava nel PoC".
+
+    Il segnale corretto non e' l'unread ma la DIREZIONE dell'ultimo messaggio:
+    la preview della sidebar c'e' anche per le chat lette, e non serve aprire
+    nulla per leggerla (il vincolo di coesistenza resta rispettato)."""
+    from app.services import wa_reply_watcher
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    cc = await make_campaign_contact(db_session, campagna, contatto,
+                                     status=WaContactStatus.completed, current_step=0)
+    await db_session.commit()
+
+    riga = _row("Marco", preview="stop non scrivermi piu'", unread=0)
+    riga.last_is_outbound = False  # l'ultimo messaggio e' del cliente
+    _monta_browser_finto(monkeypatch, [riga])
+
+    esito = await wa_reply_watcher.scan_number(numero.id)
+    assert esito["optout"] == 1
+
+    await db_session.refresh(contatto)
+    await db_session.refresh(cc)
+    await db_session.refresh(campagna)
+    assert contatto.opted_out is True
+    assert contatto.do_not_contact is True
+    # `completed` e' terminale e resta com'e': le campagne MVP sono a un solo
+    # step, quindi lo STOP arriva quasi sempre a sequenza gia' chiusa e li' non
+    # c'e' nulla da fermare. La protezione vera e' `do_not_contact` sul
+    # contatto, che lo tiene fuori da OGNI campagna futura -- ed e' proprio la
+    # riga che il 12/08 non e' mai stata scritta.
+    assert cc.status == WaContactStatus.completed
+    assert campagna.opted_out == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_letta_con_ultimo_messaggio_nostro_resta_ignorata(db_session, monkeypatch):
+    """Il contrappeso al test sopra, e il motivo per cui il filtro unread non
+    si puo' semplicemente togliere.
+
+    Su una chat letta la preview e' l'ultimo messaggio, chiunque l'abbia
+    scritto. Se e' il NOSTRO, processare la riga marcherebbe `replied` un
+    contatto che non ha mai risposto -- e `replied` e' terminale: quel contatto
+    esce dalla campagna. E' lo stesso difetto gia' pagato il 12/08 (2 righe su
+    3 in `replied` avevano zero messaggi inviati), preso dall'altro verso."""
+    from app.services import wa_reply_watcher
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    cc = await make_campaign_contact(db_session, campagna, contatto,
+                                     status=WaContactStatus.completed, current_step=0)
+    await db_session.commit()
+
+    riga = _row("Marco", preview="Buongiorno, le scrivo da Primero...", unread=0)
+    riga.last_is_outbound = True  # l'ultimo messaggio e' il nostro
+    _monta_browser_finto(monkeypatch, [riga])
+
+    esito = await wa_reply_watcher.scan_number(numero.id)
+    assert esito["scansionate"] == 0
+
+    await db_session.refresh(cc)
+    assert cc.status == WaContactStatus.completed
