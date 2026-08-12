@@ -163,12 +163,21 @@ async def test_patch_warmup_day_non_intero_rifiutato(db_session, valore):
 
 @pytest.mark.asyncio
 async def test_patch_warmup_day_override_non_impedisce_avanzamento_automatico_di_domani(
-        db_session):
+        db_session, monkeypatch):
     """Un override oggi non tocca warmup_advanced_date: il prossimo giro di
     advance_wa_warmup_if_needed (di fatto 'domani') avanza comunque il
     numero, indipendentemente dall'override -- nessuna interazione speciale
-    fra i due meccanismi (per design)."""
+    fra i due meccanismi (per design).
+
+    La rampa va accesa esplicitamente: dal 12/08 `wa_warmup_enabled` e' False
+    per default, e con la rampa spenta `advance_wa_warmup_if_needed` e' un
+    no-op totale -- il test misurerebbe il no-op, non l'assenza di
+    interazione fra override e avanzamento.
+    """
+    from app.config import settings
     from app.services import wa_number_manager as wnm
+
+    monkeypatch.setattr(settings, "wa_warmup_enabled", True)
 
     tenant = await make_tenant(db_session)
     n = await make_number(db_session, tenant)
