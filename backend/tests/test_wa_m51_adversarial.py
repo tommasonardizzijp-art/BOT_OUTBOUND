@@ -798,3 +798,59 @@ async def test_e2_una_campagna_senza_contatti_non_parte_e_non_accoda(
         await svc.avvia(db_session, campagna.id)
 
     assert enqueue_spia == []
+
+
+@pytest.mark.asyncio
+async def test_headless_dell_invio_viene_dalla_config_non_e_cablato(db_session, monkeypatch):
+    """Il browser di invio deve poter essere VISIBILE, per collaudo.
+
+    `esegui_mini_sessione` chiamava `_open_wa_browser(..., headless=True)` con
+    il True scritto nel codice: `HEADLESS=false` nell'.env non aveva alcun
+    effetto sull'invio (vale per il login assistito, che passa False
+    esplicito, e per la Fase A discover, che ha il parametro -- non qui).
+    Guardare il primo messaggio partire con i propri occhi era impossibile
+    senza modificare il sorgente.
+
+    Il default resta True: un worker che gira senza nessuno davanti non deve
+    aprire finestre.
+    """
+    import contextlib
+
+    from app.config import settings
+    from app.models.wa import WaCampaignStatus
+    from app.workers import wa_worker
+
+    monkeypatch.setattr(settings, "wa_send_enabled", True)
+    monkeypatch.setattr(settings, "wa_send_headless", False)
+
+    ctx = await _scenario(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    await db_session.commit()
+
+    monkeypatch.setattr(wa_worker, "_ora_locale_corrente", lambda: 11)
+
+    visto = {}
+
+    class _Basta(Exception):
+        pass
+
+    def _registra(*a, **kw):
+        visto.update(kw)
+        raise _Basta()
+
+    monkeypatch.setattr(wa_worker, "_open_wa_browser", _registra)
+
+    @contextlib.asynccontextmanager
+    async def _lock(number_id, **kw):
+        yield "tok"
+    monkeypatch.setattr(wa_worker.wa_profile_lock, "held", _lock)
+
+    try:
+        await wa_worker.esegui_mini_sessione(ctx["number"].id)
+    except Exception:
+        pass   # interessa solo COME e' stato chiamato il browser
+
+    assert visto, "il browser non e' stato aperto: il test non ha misurato niente"
+    assert visto["headless"] is False, (
+        f"headless cablato: atteso False da settings.wa_send_headless, visto {visto['headless']!r}"
+    )

@@ -432,6 +432,15 @@ class Settings(BaseSettings):
     # default originale (09:30-19:30, SDD 10.3) era troppo stretto, osservato
     # piu' volte nei collaudi A2/A3. Europe/Rome.
     wa_active_hours: str = "09:00-20:00"
+    # Finestra del browser di INVIO. Era `headless=True` cablato nella
+    # chiamata di wa_worker.esegui_mini_sessione: HEADLESS=false nell'.env non
+    # aveva effetto sull'invio (ce l'ha sul login assistito, che passa False
+    # esplicito, e sulla Fase A discover, che ha il parametro), quindi guardare
+    # il primo messaggio partire richiedeva di modificare il sorgente.
+    # Default True e non `headless`: il worker gira per giorni senza nessuno
+    # davanti, e una finestra che si apre da sola su un PC di casa non e' un
+    # default sano. Si mette a false per il collaudo, poi si rimette.
+    wa_send_headless: bool = True
     # STIMATO, non misurato: finestra in cui la sincronizzazione post
     # riconnessione rende cieca la guardia (A9/FM16). Da rimisurare quando
     # SYNC_INDICATOR sara' catalogato. Abbassato da 15 a 2 (decisione
