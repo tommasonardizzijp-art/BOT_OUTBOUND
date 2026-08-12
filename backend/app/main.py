@@ -12,7 +12,8 @@ from app.models.account import InstagramAccount
 from app.models.message import Message, MessageStatus
 from sqlalchemy import select, func
 from app.api import accounts, campaigns, campaign_accounts, followers, messages, dashboard, health, leads, anomalies, auth, admin, ops, lead_qualification
-from app.api import tenants, wa_campaigns, wa_contacts, wa_numbers, wa_ops
+from app.api import (tenants, wa_campaigns, wa_contacts, wa_discover,
+                     wa_numbers, wa_ops)
 from fastapi import Depends
 from app.utils.auth_deps import get_current_user
 
@@ -138,6 +139,7 @@ app.include_router(tenants.router, prefix="/api", dependencies=_protected)
 app.include_router(wa_numbers.router, prefix="/api", dependencies=_protected)
 app.include_router(wa_campaigns.router, prefix="/api", dependencies=_protected)
 app.include_router(wa_contacts.router, prefix="/api", dependencies=_protected)
+app.include_router(wa_discover.router, prefix="/api", dependencies=_protected)
 app.include_router(wa_ops.router, prefix="/api", dependencies=_protected)
 
 

@@ -50,9 +50,20 @@ def wa_session_message_count(campaign) -> int:
 
 def wa_session_break_seconds(campaign) -> float:
     """Pausa lunga anti-ban tra una mini-sessione e la successiva sullo
-    stesso numero. Lognormale (sigma 0.6, stesso valore di
-    human_behavior.session_break_seconds: range pienamente coperto senza
-    ammassarsi al centro)."""
+    stesso numero. Lognormale (sigma 0.6) TRONCATA per riestrazione, non
+    clampata.
+
+    Il clamp (`max(lo, min(hi, val))`) non scarta l'estrazione fuori range: la
+    schiaccia sul bound. Coi default WA (20-40 min) mandava il **56%** delle
+    pause esattamente su 1200s o 2400s -- una firma peggiore di un ritardo
+    costante, cioe' lo stesso difetto misurato al 45% sul pacing inbox di
+    Instagram e corretto con la PR #55. La mediana sta sulla media
+    GEOMETRICA sqrt(lo*hi): in scala logaritmica e' il centro naturale, il
+    troncamento taglia code simmetriche e accetta ~2 volte su 3 (stesso
+    ragionamento di inbox_browser/ritmo.py::_troncata, non importato da qui
+    apposta: quel modulo e' di Instagram, questo file resta l'equivalente WA
+    e non un branch condiviso).
+    """
     lo_min, hi_min = _effective_int_pair(
         getattr(campaign, "break_min_minutes", None),
         getattr(campaign, "break_max_minutes", None),
@@ -61,9 +72,15 @@ def wa_session_break_seconds(campaign) -> float:
     lo_s, hi_s = lo_min * 60, hi_min * 60
     if hi_s < lo_s:
         lo_s, hi_s = hi_s, lo_s
-    mid = (lo_s + hi_s) / 2
-    val = random.lognormvariate(math.log(max(1.0, mid)), 0.6)
-    return max(float(lo_s), min(float(hi_s), val))
+    lo_f, hi_f = float(lo_s), float(hi_s)
+    if hi_f <= lo_f:
+        return lo_f
+    mediana = math.sqrt(max(1.0, lo_f) * hi_f)
+    for _ in range(20):
+        val = random.lognormvariate(math.log(mediana), 0.6)
+        if lo_f <= val <= hi_f:
+            return val
+    return mediana
 
 
 def effective_wa_active_hours(campaign) -> tuple[int, int]:

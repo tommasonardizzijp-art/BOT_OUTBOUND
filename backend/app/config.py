@@ -390,9 +390,21 @@ class Settings(BaseSettings):
     # ad ogni riattivazione (decisione precedente e tuttora valida: un
     # numero sospeso non deve ripartire dal cap alto a cui era arrivato) --
     # senza questo flag separato, riattivare un numero con la rampa spenta
-    # la riaccendeva in silenzio. Default True: chi non tocca questo flag
-    # vede lo stesso comportamento di sempre.
-    wa_warmup_enabled: bool = True
+    # la riaccendeva in silenzio.
+    #
+    # Default False dal 12/08, era True. Il default True voleva dire "chi non
+    # tocca il flag vede il comportamento di sempre", ma la decisione di
+    # Tommaso (rampa spenta, 08/08) viveva in UNA riga di UN solo file:
+    # WA_WARMUP_ENABLED=false nell'.env alla radice del repo. Ogni altro
+    # albero -- un worktree di QA, un backend avviato su un'altra porta --
+    # non ha quella riga, quindi girava con la rampa ACCESA e
+    # advance_wa_warmup_if_needed() avanzava warmup_day sui numeri REALI.
+    # Misurato il 12/08: entrambi i numeri Primero avevano
+    # warmup_advanced_date = quel giorno, stampato da un backend di QA su
+    # porta 8020 mentre la produzione girava col flag a false. Lo stato
+    # sicuro non deve dipendere da una riga di .env che il prossimo albero
+    # non avra'. Chi vuole la rampa la accende con WA_WARMUP_ENABLED=true.
+    wa_warmup_enabled: bool = False
     # GRADINI DELLA LISTA QUI SOPRA AL GIORNO -- **NON** messaggi al giorno.
     # Deve restare 1: alzarlo significa SALTARE gradini, non mandare piu'
     # messaggi. Con 10 su una lista di 7 voci un numero nuovo passava da 20 a
@@ -420,6 +432,15 @@ class Settings(BaseSettings):
     # default originale (09:30-19:30, SDD 10.3) era troppo stretto, osservato
     # piu' volte nei collaudi A2/A3. Europe/Rome.
     wa_active_hours: str = "09:00-20:00"
+    # Finestra del browser di INVIO. Era `headless=True` cablato nella
+    # chiamata di wa_worker.esegui_mini_sessione: HEADLESS=false nell'.env non
+    # aveva effetto sull'invio (ce l'ha sul login assistito, che passa False
+    # esplicito, e sulla Fase A discover, che ha il parametro), quindi guardare
+    # il primo messaggio partire richiedeva di modificare il sorgente.
+    # Default True e non `headless`: il worker gira per giorni senza nessuno
+    # davanti, e una finestra che si apre da sola su un PC di casa non e' un
+    # default sano. Si mette a false per il collaudo, poi si rimette.
+    wa_send_headless: bool = True
     # STIMATO, non misurato: finestra in cui la sincronizzazione post
     # riconnessione rende cieca la guardia (A9/FM16). Da rimisurare quando
     # SYNC_INDICATOR sara' catalogato. Abbassato da 15 a 2 (decisione

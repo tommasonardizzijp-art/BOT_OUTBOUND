@@ -397,7 +397,8 @@ async def esegui_mini_sessione(number_id: str) -> dict:
 
     try:
         async with wa_profile_lock.held(number_id) as lock_token:
-            async with _open_wa_browser(number_id, headless=True, proxy_url=proxy_url) as context:
+            async with _open_wa_browser(number_id, headless=settings.wa_send_headless,
+                                        proxy_url=proxy_url) as context:
                 page = await context.new_page()
                 await page.goto(WHATSAPP_WEB_URL, wait_until="domcontentloaded")
                 pom = WhatsAppWebPage(page)

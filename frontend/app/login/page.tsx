@@ -52,6 +52,7 @@ function LoginForm() {
                 value={email}
                 onChange={e => setEmail(e.target.value)}
                 disabled={loading}
+                className="text-white"
               />
             </div>
             <div>
@@ -63,6 +64,7 @@ function LoginForm() {
                 value={password}
                 onChange={e => setPassword(e.target.value)}
                 disabled={loading}
+                className="text-white"
               />
             </div>
             <Button type="submit" className="w-full bg-purple-600 hover:bg-purple-700" disabled={loading}>

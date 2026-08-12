@@ -218,6 +218,52 @@ async def test_rimozione_non_cancella_un_contatto_usato_da_altra_campagna(db_ses
 
 
 @pytest.mark.asyncio
+async def test_enroll_verso_campagna_non_draft_409(db_session, client):
+    """Fase B, Task 3/4: stesso guard 409 di /ingest, qui via
+    CampagnaNonModificabile tradotta dal guscio HTTP."""
+    from app.models.wa import WaCampaignStatus
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number,
+                                      status=WaCampaignStatus.running)
+    contact = await make_contact(db_session, tenant)
+    await db_session.commit()
+
+    r = await client.post("/api/wa/contacts/enroll",
+                          json={"campaign_id": campaign.id, "contact_ids": [contact.id]})
+    assert r.status_code == 409, r.text
+
+
+@pytest.mark.asyncio
+async def test_enroll_con_contatti_validi_200_e_crea_wacampaigncontact(db_session, client):
+    from sqlalchemy import select
+    from app.models.wa import WaCampaignContact
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number)
+    contact_a = await make_contact(db_session, tenant, e164="+393331112223")
+    contact_b = await make_contact(db_session, tenant, e164="+393334445556")
+    await db_session.commit()
+
+    r = await client.post(
+        "/api/wa/contacts/enroll",
+        json={"campaign_id": campaign.id, "contact_ids": [contact_a.id, contact_b.id]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["arruolati"] == 2
+    assert body["gia_presenti"] == 0
+    assert body["gia_dnc"] == 0
+    assert body["scarti"] == []
+
+    righe = (await db_session.execute(
+        select(WaCampaignContact).where(WaCampaignContact.campaign_id == campaign.id)
+    )).scalars().all()
+    assert len(righe) == 2
+    await db_session.refresh(campaign)
+    assert campaign.total_contacts == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stato_terminale", ["replied", "skipped"])
 async def test_rimozione_rifiutata_su_ogni_stato_terminale(db_session, client, stato_terminale):
     """Trovato in whole-branch review: la guardia controllava solo
