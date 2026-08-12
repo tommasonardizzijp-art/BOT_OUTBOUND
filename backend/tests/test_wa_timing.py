@@ -77,3 +77,36 @@ def test_effective_wa_active_hours_parses_HHMM_range(monkeypatch):
 def test_effective_wa_active_hours_campaign_override():
     campaign = SimpleNamespace(active_hours_start="08:00", active_hours_end="12:00")
     assert wa_timing.effective_wa_active_hours(campaign) == (8, 12)
+
+
+def test_ora_locale_col_tz_database_assente_non_ignora_l_ora_legale(monkeypatch):
+    """Su Windows `zoneinfo` senza il pacchetto `tzdata` solleva
+    ZoneInfoNotFoundError: Windows non ha il tz database di sistema. Il
+    fallback era un offset FISSO a UTC+1 (CET), che per i ~7 mesi di ora
+    legale sbaglia di un'ora piena.
+
+    Misurato in produzione il 12/08 alle 19:59 reali: il worker credeva
+    fossero le 18. La finestra oraria configurata 09:00-20:00 valeva di fatto
+    10:00-21:00, quindi il canale non partiva prima delle 10 e scriveva a
+    clienti veri fino alle 21. La finestra oraria e' proprio la protezione che
+    non deve slittare.
+
+    L'orologio di sistema il fuso lo sa gia', ed e' lo stesso che l'operatore
+    legge quando guarda la dashboard."""
+    import builtins
+    from datetime import datetime
+
+    from app.workers import wa_worker
+
+    vero_import = builtins.__import__
+
+    def _import_senza_tzdata(name, *a, **kw):
+        if name == "zoneinfo":
+            raise ImportError("simula Windows senza tzdata")
+        return vero_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", _import_senza_tzdata)
+
+    assert wa_worker._ora_locale_corrente() == datetime.now().hour, (
+        "col tz database assente l'ora non segue piu' l'orologio di sistema: "
+        "la finestra oraria slitta di un'ora durante l'ora legale")
