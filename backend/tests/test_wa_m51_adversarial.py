@@ -62,7 +62,7 @@ async def _scenario(db) -> dict:
 def enqueue_spia(monkeypatch):
     accodate: list[str] = []
 
-    async def _finta(campaign_id: str) -> int:
+    async def _finta(campaign_id: str, **kw) -> int:
         accodate.append(campaign_id)
         return 1
 
@@ -301,7 +301,7 @@ async def test_b2_un_enqueue_rotto_non_ferma_le_altre_campagne(db_session, monke
 
     visti: list[str] = []
 
-    async def _enqueue_capriccioso(campaign_id: str) -> int:
+    async def _enqueue_capriccioso(campaign_id: str, **kw) -> int:
         visti.append(campaign_id)
         if campaign_id == a["campaign"].id:
             raise ConnectionError("redis giu' proprio su questa")
@@ -416,7 +416,7 @@ async def test_b7_due_giri_concorrenti_del_supervisore(db_session, monkeypatch):
     ctx["campaign"].status = WaCampaignStatus.running
     await db_session.commit()
 
-    async def _enqueue(campaign_id: str) -> int:
+    async def _enqueue(campaign_id: str, **kw) -> int:
         await asyncio.sleep(0)
         return 1
 

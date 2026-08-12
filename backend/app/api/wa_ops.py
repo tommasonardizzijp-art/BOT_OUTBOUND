@@ -111,7 +111,10 @@ async def kick_campaign(campaign_id: str, db=Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="campagna inesistente")
     if campaign.status != WaCampaignStatus.running:
         return {"accodati": 0, "motivo": f"campagna in stato {campaign.status.value}"}
-    return {"accodati": await enqueue_wa_workers(campaign_id)}
+    # kick e' il verbo che si usa proprio QUANDO una campagna sembra ferma:
+    # se non anticipasse il job differito non servirebbe a niente.
+    return {"accodati": await enqueue_wa_workers(campaign_id,
+                                                 anticipa_se_differito=True)}
 
 
 @router.post("/campaigns/{campaign_id}/resume")
@@ -161,7 +164,7 @@ async def resume_campaign(campaign_id: str, db=Depends(get_db)) -> dict:
     campaign.status = WaCampaignStatus.running
     await db.commit()
     try:
-        accodati = await enqueue_wa_workers(campaign_id)
+        accodati = await enqueue_wa_workers(campaign_id, anticipa_se_differito=True)
     except Exception as exc:
         logger.error(f"[WA] resume_campaign {campaign_id}: stato gia' committato "
                      f"a running ma enqueue fallito: {exc!r}")

@@ -193,7 +193,7 @@ async def test_kick_su_campagna_non_running_non_accoda_nulla(db_session, monkeyp
 
     accodati = {"n": 0}
 
-    async def _fake_enqueue(campaign_id):
+    async def _fake_enqueue(campaign_id, **kw):
         accodati["n"] += 1
         return 1
     monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
@@ -387,7 +387,7 @@ async def test_resume_campagna_paused_rimette_running_e_accoda(db_session, monke
 
     accodati = {"n": 0}
 
-    async def _fake_enqueue(campaign_id):
+    async def _fake_enqueue(campaign_id, **kw):
         accodati["n"] += 1
         return 1
     monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
@@ -415,7 +415,7 @@ async def test_resume_campagna_non_paused_non_tocca_nulla(db_session, monkeypatc
 
     accodati = {"n": 0}
 
-    async def _fake_enqueue(campaign_id):
+    async def _fake_enqueue(campaign_id, **kw):
         accodati["n"] += 1
         return 1
     monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
@@ -449,7 +449,7 @@ async def test_resume_campagna_paused_con_numero_non_active_non_flippa(db_sessio
 
     accodati = {"n": 0}
 
-    async def _fake_enqueue(campaign_id):
+    async def _fake_enqueue(campaign_id, **kw):
         accodati["n"] += 1
         return 1
     monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
@@ -477,7 +477,7 @@ async def test_resume_campagna_paused_enqueue_fallisce_non_perde_lo_stato(db_ses
     ctx["campaign"].status = WaCampaignStatus.paused
     await db_session.commit()
 
-    async def _fake_enqueue_boom(campaign_id):
+    async def _fake_enqueue_boom(campaign_id, **kw):
         raise ConnectionError("redis giu'")
     monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue_boom)
 
@@ -518,7 +518,7 @@ async def test_resume_due_volte_di_fila_e_idempotente(db_session, monkeypatch):
 
     accodati = {"n": 0}
 
-    async def _fake_enqueue(campaign_id):
+    async def _fake_enqueue(campaign_id, **kw):
         accodati["n"] += 1
         return 1
     monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
@@ -549,7 +549,7 @@ async def test_adv_resume_via_http_reale_persiste_a_db(client_real_db, monkeypat
     from app.models.wa import WaCampaignStatus
     from app.api import wa_ops
 
-    async def _fake_enqueue(campaign_id):
+    async def _fake_enqueue(campaign_id, **kw):
         return 1
     monkeypatch.setattr(wa_ops, "enqueue_wa_workers", _fake_enqueue)
 

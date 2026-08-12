@@ -256,16 +256,22 @@ def _rome_utc_offset_seconds() -> int:
     """Offset UTC corrente di Europe/Rome in secondi (CET=3600 inverno, CEST=7200 estate).
 
     L'app IG invia l'offset live ad ogni richiesta; lo calcoliamo al momento del
-    login cosi' e' corretto per la stagione. Fallback a 3600 (CET) se il tz
-    database non e' disponibile (zoneinfo su Windows puo' richiedere `tzdata`).
-    """
+    login cosi' e' corretto per la stagione. `tzdata` sta nei requirements
+    (zoneinfo su Windows lo richiede, il tz database di sistema non c'e'); il
+    fallback legge l'offset dall'orologio LOCALE invece di rispondere 3600
+    fisso, che in ora legale dichiarava CET mentre il dispositivo viveva in
+    CEST -- un'incoerenza di un'ora nel fingerprint inviato a Instagram, e la
+    stessa che il 12/08 ha spostato la finestra oraria del canale WhatsApp
+    (wa_worker._ora_locale_corrente)."""
     try:
         from datetime import datetime, timezone
         from zoneinfo import ZoneInfo
         off = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Rome")).utcoffset()
         return int(off.total_seconds()) if off else 3600
     except Exception:
-        return 3600
+        from datetime import datetime
+        off = datetime.now().astimezone().utcoffset()
+        return int(off.total_seconds()) if off else 3600
 
 
 async def _build_session(cookies: dict, username: str) -> dict:

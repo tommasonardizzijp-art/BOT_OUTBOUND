@@ -1173,3 +1173,137 @@ async def test_d21_claim_confine_esatto_lock_timeout(db_session, monkeypatch):
     preso = await wa_worker.claim_next_wa_contact(
         db_session, number_id=ctx["number"].id, worker_id="w1")
     assert preso is not None and preso[0].locked_by == "w1"
+
+
+class _PoolFinto:
+    """Il minimo di ARQ che serve a enqueue_wa_workers: la coda e' uno zset
+    finto, e enqueue_job torna None se il job_id c'e' gia' -- che e'
+    esattamente il comportamento che ha causato l'incidente."""
+
+    def __init__(self, gia_in_coda: dict | None = None):
+        self.coda = dict(gia_in_coda or {})
+        self.zadd_chiamate = []
+
+    async def enqueue_job(self, _fn, *args, _job_id=None, **kw):
+        if _job_id in self.coda:
+            return None            # ARQ scarta il duplicato, in silenzio
+        self.coda[_job_id] = 0
+        return object()
+
+    async def zscore(self, chiave, membro):
+        return self.coda.get(membro)
+
+    async def zadd(self, chiave, mapping):
+        self.zadd_chiamate.append(mapping)
+        self.coda.update(mapping)
+
+    async def aclose(self):
+        pass
+
+
+def _monta_pool(monkeypatch, pool):
+    async def _create_pool(*a, **kw):
+        return pool
+    monkeypatch.setattr(wa_worker.arq, "create_pool", _create_pool)
+
+
+@pytest.mark.asyncio
+async def test_riprendere_una_campagna_anticipa_il_job_gia_schedulato(
+        db_session, monkeypatch):
+    """Il 12/08 Tommaso ha spento il bot a campagna running, l'ha rimessa in
+    pausa e ripresa: la UI diceva 'running' e non partiva NIENTE.
+
+    Il job di invio ha un _job_id fisso per numero (`wa:send:<id>`), e ARQ
+    scarta in silenzio un enqueue con un id gia' presente. Il job differito
+    dal break anti-ban era in coda con lo score a +16 minuti: `riprendi()`
+    ristampava next_action_at sulle righe, l'enqueue veniva scartato, e il
+    worker restava addormentato fino allo score vecchio. Nessun errore da
+    nessuna parte -- lo stato a schermo diceva 'In corso'.
+
+    Chi riprende a mano deve poter ripartire. Il job in coda si ANTICIPA
+    invece di scartarlo, senza mai duplicarlo (l'id resta uno)."""
+    import time
+    from app.models.wa import WaCampaignStatus
+
+    ctx = await _scenario_claim(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    await db_session.commit()
+
+    fra_16_minuti = time.time() * 1000 + 16 * 60 * 1000
+    job_id = wa_worker.wa_send_job_id(ctx["number"].id)
+    pool = _PoolFinto({job_id: fra_16_minuti})
+    _monta_pool(monkeypatch, pool)
+
+    n = await wa_worker.enqueue_wa_workers(ctx["campaign"].id,
+                                           anticipa_se_differito=True)
+
+    assert n == 1, "l'utente ha ripreso e non gli e' stato accodato nulla"
+    assert pool.zadd_chiamate, "il job non e' stato anticipato"
+    assert len(pool.coda) == 1, "il job e' stato duplicato invece che anticipato"
+    nuovo = pool.coda[job_id]
+    assert nuovo < fra_16_minuti, "lo score non e' stato anticipato"
+
+
+@pytest.mark.asyncio
+async def test_anticipare_non_azzera_la_pausa_anti_ban(db_session, monkeypatch):
+    """Il contrappeso, e il motivo per cui non si anticipa a 'adesso'.
+
+    Il break fra mini-sessioni e' una protezione anti-ban, non un ritardo da
+    saltare. Ripartire a tempo zero manderebbe il messaggio successivo
+    attaccato al precedente -- esattamente la firma che WhatsApp cerca, e la
+    stessa famiglia di errore delle due protezioni abbassate insieme il 09/08.
+
+    Si taglia l'attesa lunga, non il delay fra due invii.
+
+    Il delay e' fissato a mano di proposito: e' lognormale, e un'asserzione
+    tipo `score > adesso` passerebbe anche con l'anticipo a tempo zero, per i
+    microsecondi che passano fra la lettura dell'orologio nel test e quella
+    dentro la funzione. Un test cosi' non prova niente -- verificato
+    rimettendo il difetto."""
+    import time
+    from app.models.wa import WaCampaignStatus
+    from app.services import wa_timing
+
+    ctx = await _scenario_claim(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    await db_session.commit()
+
+    monkeypatch.setattr(wa_timing, "wa_send_delay_seconds", lambda: 30.0)
+
+    ora = time.time() * 1000
+    job_id = wa_worker.wa_send_job_id(ctx["number"].id)
+    pool = _PoolFinto({job_id: ora + 16 * 60 * 1000})
+    _monta_pool(monkeypatch, pool)
+
+    await wa_worker.enqueue_wa_workers(ctx["campaign"].id,
+                                       anticipa_se_differito=True)
+
+    attesa_s = (pool.coda[job_id] - ora) / 1000
+    assert attesa_s >= 29, (
+        f"riparte fra {attesa_s:.1f}s: salta il delay anti-ban di 30s")
+
+
+@pytest.mark.asyncio
+async def test_il_supervisore_automatico_non_anticipa_niente(db_session, monkeypatch):
+    """Il cron che riaccoda le campagne running NON deve anticipare: li' un
+    job differito e' differito per una ragione (cap esaurito, fuori finestra,
+    break di sessione), e anticiparlo a ogni giro annullerebbe il pacing.
+
+    Solo un'azione umana esplicita -- avvia, riprendi, kick -- sposta lo
+    score. Per questo il default e' False."""
+    import time
+    from app.models.wa import WaCampaignStatus
+
+    ctx = await _scenario_claim(db_session)
+    ctx["campaign"].status = WaCampaignStatus.running
+    await db_session.commit()
+
+    fra_16_minuti = time.time() * 1000 + 16 * 60 * 1000
+    job_id = wa_worker.wa_send_job_id(ctx["number"].id)
+    pool = _PoolFinto({job_id: fra_16_minuti})
+    _monta_pool(monkeypatch, pool)
+
+    await wa_worker.enqueue_wa_workers(ctx["campaign"].id)   # default
+
+    assert not pool.zadd_chiamate, "il flusso automatico ha spostato lo score"
+    assert pool.coda[job_id] == fra_16_minuti

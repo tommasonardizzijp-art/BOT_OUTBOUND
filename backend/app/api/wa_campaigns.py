@@ -10,12 +10,12 @@ e serializzazione.
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.database import get_db
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
-                           WaCampaignType, WaContact, WaNumber, WaNumberStatus,
-                           WaSequenceStep)
+                           WaCampaignType, WaContact, WaContactStatus, WaNumber,
+                           WaNumberStatus, WaSequenceStep)
 from app.services import wa_campaign_service as svc
 from app.utils import events
 
@@ -337,6 +337,24 @@ async def kpi(campaign_id: str, db=Depends(get_db)) -> dict:
 
     inviati = campagna.sent or 0
 
+    # Un CONTEGGIO delle righe che possono ancora partire, non la sottrazione
+    # `total_contacts - inviati` che c'era prima. Quella ci metteva dentro
+    # chiunque non avesse ricevuto, compreso chi non ricevera' MAI: il 12/08 la
+    # dashboard prometteva 193 messaggi sulla campagna Primero, ma 6 erano
+    # `skipped` per 'no_existing_chat' -- contatti senza chat preesistente, che
+    # la regola v2 del canale non contatta, con next_action_at NULL. Ne sono
+    # partiti 187, e il contatore non sarebbe mai arrivato a zero.
+    #
+    # Il difetto peggiorava da solo: ogni skipped, e ogni opt-out arrivato
+    # prima del nostro invio, restava li' per sempre.
+    da_inviare = await db.scalar(
+        select(func.count(WaCampaignContact.id)).where(
+            WaCampaignContact.campaign_id == campaign_id,
+            WaCampaignContact.status.in_([WaContactStatus.queued,
+                                          WaContactStatus.in_sequence]),
+        )
+    ) or 0
+
     def _pct(n: int) -> float:
         """0.0 senza inviati (niente da dividere). Clampato in [0, 100]:
         n fuori da [0, inviati] non dovrebbe succedere (opted_out/failed
@@ -353,7 +371,7 @@ async def kpi(campaign_id: str, db=Depends(get_db)) -> dict:
         "stato": campagna.status.value,
         "caricati": campagna.total_contacts or 0,
         "inviati": inviati,
-        "da_inviare": max(0, (campagna.total_contacts or 0) - inviati),
+        "da_inviare": da_inviare,
         "risposti": campagna.replied or 0,
         "optout": campagna.opted_out or 0,
         "falliti": campagna.failed or 0,
