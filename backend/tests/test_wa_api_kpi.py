@@ -35,7 +35,46 @@ async def test_kpi_derivati_calcolati_sugli_inviati_non_sui_caricati(db_session)
     kpi = await wa_campaigns.kpi(campaign.id, db=db_session)
     assert kpi["tasso_risposta"] == 25.0     # 5/20
     assert kpi["tasso_optout"] == 10.0       # 2/20
-    assert kpi["da_inviare"] == 80
+
+
+@pytest.mark.asyncio
+async def test_da_inviare_non_conta_chi_non_ricevera_mai(db_session):
+    """'da inviare' era una sottrazione, non un conteggio: total_contacts
+    meno gli inviati. Cosi' ci finiva dentro chiunque non avesse ricevuto,
+    compreso chi non ricevera' MAI.
+
+    Misurato sulla campagna Primero del 12/08: la dashboard diceva 193 da
+    inviare, ma 6 erano `skipped` per 'no_existing_chat' -- contatti senza una
+    chat preesistente, che la regola v2 del canale non contatta e che hanno
+    next_action_at NULL. Ne sarebbero partiti 187. Il numero non sarebbe mai
+    arrivato a zero: a campagna finita la dashboard avrebbe continuato a
+    promettere 6 messaggi che non esistono.
+
+    Peggiora da solo nel tempo: ogni skipped, e ogni opt-out arrivato prima
+    del nostro invio, resta contato per sempre fra i 'da inviare'.
+
+    Si contano le righe che possono ancora partire -- queued e in_sequence --
+    e nient'altro."""
+    from app.models.wa import WaContactStatus
+    from tests.factories_wa import make_campaign_contact, make_contact
+
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number)
+    campaign.total_contacts, campaign.sent = 6, 2
+
+    attesi = [WaContactStatus.queued, WaContactStatus.queued,
+              WaContactStatus.in_sequence]
+    mai = [WaContactStatus.skipped, WaContactStatus.completed,
+           WaContactStatus.opted_out]
+    for stato in attesi + mai:
+        contatto = await make_contact(db_session, tenant)
+        await make_campaign_contact(db_session, campaign, contatto, status=stato)
+    await db_session.commit()
+
+    kpi = await wa_campaigns.kpi(campaign.id, db=db_session)
+    assert kpi["da_inviare"] == 3, (
+        "conta anche chi non partira' mai (skipped/completed/opted_out)")
 
 
 @pytest.mark.asyncio
