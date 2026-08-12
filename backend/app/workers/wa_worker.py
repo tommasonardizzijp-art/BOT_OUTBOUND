@@ -764,9 +764,28 @@ async def wa_send_task(ctx: dict, number_id: str) -> None:
     raise Retry(defer=int(break_s))
 
 
-async def enqueue_wa_workers(campaign_id: str) -> int:
+async def enqueue_wa_workers(campaign_id: str, *,
+                             anticipa_se_differito: bool = False) -> int:
     """Fan-out: un job per numero della campagna (in MVP il numero e' uno).
-    Stessa forma di work_enqueue.enqueue_dm_workers_with_redis."""
+    Stessa forma di work_enqueue.enqueue_dm_workers_with_redis.
+
+    `anticipa_se_differito` distingue CHI sta accodando, e non e' un dettaglio:
+    il 12/08 una campagna ripresa a mano e' rimasta ferma senza che niente
+    segnalasse un problema. Il job ha un _job_id fisso per numero e ARQ scarta
+    in silenzio i duplicati, quindi il job differito dal break anti-ban restava
+    in coda con lo score vecchio (+16 minuti) mentre la UI diceva "In corso".
+
+    - Flusso AUTOMATICO (default False): non si tocca niente. Li' un job
+      differito lo e' per una ragione -- cap esaurito, fuori finestra, break di
+      sessione -- e anticiparlo a ogni giro del supervisore annullerebbe il
+      pacing.
+    - Azione UMANA (avvia/riprendi/kick): si anticipa lo score. Chi preme
+      "riprendi" deve vedere la campagna ripartire.
+
+    Mai a tempo zero, pero': si anticipa a `adesso + wa_send_delay_seconds()`.
+    Il break e' una protezione anti-ban, non un ritardo da saltare -- ripartire
+    attaccati al messaggio precedente e' la firma che WhatsApp cerca. Si taglia
+    l'attesa lunga, non il delay fra due invii."""
     from app.database import AsyncSessionLocal
     from app.models.wa import WaCampaign
 
@@ -784,6 +803,28 @@ async def enqueue_wa_workers(campaign_id: str) -> int:
                                           _job_id=wa_send_job_id(number_id))
             if job is not None:
                 n += 1
+            elif anticipa_se_differito:
+                # Il job c'e' gia': lo si sposta, non se ne crea un altro --
+                # l'id resta uno solo e l'invariante "un solo job per numero"
+                # regge. Si anticipa solo se lo score e' PIU' LONTANO del
+                # delay minimo: un job gia' imminente non va toccato, sarebbe
+                # solo un modo di anticiparlo sotto la soglia anti-ban.
+                import time as _time
+
+                from app.services import wa_timing
+
+                job_id = wa_send_job_id(number_id)
+                quando = _time.time() * 1000 + wa_timing.wa_send_delay_seconds() * 1000
+                score = await redis.zscore("arq:queue", job_id)
+                if score is not None and score > quando:
+                    await redis.zadd("arq:queue", {job_id: quando})
+                    n += 1
+                    logger.info(f"[WA] enqueue {number_id}: job gia' schedulato fra "
+                                f"{(score - _time.time() * 1000) / 1000:.0f}s, "
+                                "anticipato su richiesta esplicita")
+                else:
+                    logger.info(f"[WA] enqueue {number_id}: job gia' imminente, "
+                                "lasciato dov'e'")
             else:
                 # ARQ scarta in silenzio un enqueue con _job_id gia' presente
                 # (job differito da un Retry precedente, es. dopo

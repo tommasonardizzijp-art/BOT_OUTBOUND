@@ -218,7 +218,11 @@ async def _accoda_worker(campaign_id: str) -> None:
     from app.workers.wa_worker import enqueue_wa_workers
 
     try:
-        n = await enqueue_wa_workers(campaign_id)
+        # anticipa_se_differito: qui si arriva da avvia() o riprendi(), cioe'
+        # da un gesto esplicito sulla UI. Senza, un resume trovava il job gia'
+        # in coda col vecchio score del break e la campagna restava ferma
+        # mostrando "In corso" (12/08).
+        n = await enqueue_wa_workers(campaign_id, anticipa_se_differito=True)
     except Exception as exc:
         logger.error(f"[WA] campagna {campaign_id}: avviata, ma accodamento del "
                      f"worker fallito ({type(exc).__name__}) -- il supervisore "
