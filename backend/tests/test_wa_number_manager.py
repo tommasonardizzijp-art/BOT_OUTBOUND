@@ -19,7 +19,21 @@ def _campaign(daily_limit=None):
     return SimpleNamespace(daily_limit=daily_limit)
 
 
-def test_effective_cap_uses_warmup_step_when_warming(monkeypatch):
+@pytest.fixture
+def rampa_accesa(monkeypatch):
+    """Accende la rampa di warmup per i test che ne verificano il COMPORTAMENTO.
+
+    Serve perche' il default di `wa_warmup_enabled` e' False (vedi
+    test_la_rampa_e_spenta_per_default): prima questi test ereditavano la
+    rampa accesa dal default, cioe' misuravano il comportamento giusto per la
+    ragione sbagliata -- bastava cambiare il default per farli diventare rossi
+    senza che il codice della rampa avesse cambiato una riga.
+    """
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_warmup_enabled", True)
+
+
+def test_effective_cap_uses_warmup_step_when_warming(monkeypatch, rampa_accesa):
     from app.config import settings
     monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
     monkeypatch.setattr(settings, "wa_daily_cap_default", 20)
@@ -27,11 +41,27 @@ def test_effective_cap_uses_warmup_step_when_warming(monkeypatch):
     assert wnm.effective_wa_daily_cap(number, _campaign()) == 30
 
 
-def test_effective_cap_past_warmup_uses_last_step(monkeypatch):
+def test_effective_cap_past_warmup_uses_last_step(monkeypatch, rampa_accesa):
     from app.config import settings
     monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
     number = _number(daily_cap=200, warmup_day=99)
     assert wnm.effective_wa_daily_cap(number, _campaign()) == 100
+
+
+def test_la_rampa_e_spenta_per_default():
+    """Lo stato sicuro non deve dipendere da una riga di .env.
+
+    La decisione "rampa spenta" (08/08) viveva SOLO in
+    `WA_WARMUP_ENABLED=false` nell'.env del root del repo. Ogni altro albero
+    -- un worktree di QA, un backend avviato su un'altra porta -- non ha quella
+    riga e quindi girava col default True: la rampa tornava accesa in
+    silenzio, e `advance_wa_warmup_if_needed` avanzava `warmup_day` sui numeri
+    REALI. Misurato il 12/08: entrambi i numeri Primero avevano
+    `warmup_advanced_date` = quel giorno, stampato da un backend di QA su
+    porta 8020, mentre il runtime di produzione girava col flag a false.
+    """
+    from app.config import settings
+    assert settings.wa_warmup_enabled is False
 
 
 def test_effective_cap_ignora_il_gradino_se_la_rampa_e_disabilitata(monkeypatch):
@@ -46,12 +76,16 @@ def test_effective_cap_ignora_il_gradino_se_la_rampa_e_disabilitata(monkeypatch)
     assert wnm.effective_wa_daily_cap(number, _campaign()) == 200
 
 
-def test_effective_cap_flag_true_di_default_comportamento_invariato(monkeypatch):
-    """Non-regressione esplicita: con wa_warmup_enabled=True (default, non
-    toccato) il gradino torna a comandare come prima del flag."""
+def test_effective_cap_col_flag_acceso_il_gradino_comanda(monkeypatch, rampa_accesa):
+    """L'altra faccia del flag: acceso, il gradino torna a comandare il min().
+
+    Si chiamava `..._flag_true_di_default_comportamento_invariato` e asseriva
+    che True fosse il default. Dal 12/08 il default e' False, e la rampa la
+    accende la fixture: il comportamento sotto test e' "flag acceso", che non
+    e' cambiato, e ora il test lo dice invece di dedurlo dal default.
+    """
     from app.config import settings
     monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
-    assert settings.wa_warmup_enabled is True   # non toccato, e' il default
     number = _number(daily_cap=200, warmup_day=3)
     assert wnm.effective_wa_daily_cap(number, _campaign()) == 30
 
@@ -209,7 +243,7 @@ def _make_wa_number(tenant_id, **over):
 
 @pytest.mark.asyncio
 async def test_la_rampa_sale_un_gradino_al_giorno_in_MESSAGGI(
-        db_session, monkeypatch, _tenant_warmup):
+        db_session, monkeypatch, _tenant_warmup, rampa_accesa):
     """IL test della rampa, e l'unico che avrebbe intercettato il bug di M5.
 
     Asserisce sui MESSAGGI AL GIORNO, non sull'indice: `warmup_day` e' un
@@ -302,7 +336,7 @@ def test_la_configurazione_DI_DEFAULT_produce_una_rampa_graduale():
 
 @pytest.mark.asyncio
 async def test_advance_wa_warmup_avanza_di_un_solo_gradino(
-        db_session, monkeypatch, _tenant_warmup):
+        db_session, monkeypatch, _tenant_warmup, rampa_accesa):
     from app.config import settings
     monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
     monkeypatch.setattr(settings, "wa_warmup_advance_steps_per_day", 1)
@@ -343,7 +377,7 @@ async def test_advance_wa_warmup_non_avanza_nessun_numero_se_la_rampa_e_disabili
 
 @pytest.mark.asyncio
 async def test_il_passo_e_in_GRADINI_non_in_messaggi(
-        db_session, monkeypatch, _tenant_warmup):
+        db_session, monkeypatch, _tenant_warmup, rampa_accesa):
     """Guardia sull'unita' di misura del passo, che e' l'errore da cui nasce
     tutto: con una lista lunga e un passo di 3, l'indice deve salire di 3
     POSIZIONI (non di 3 messaggi, e non di 3 x qualcosa)."""
@@ -420,7 +454,7 @@ async def test_advance_wa_warmup_ignora_numeri_non_active(
 
 @pytest.mark.asyncio
 async def test_advance_wa_warmup_override_manuale_oggi_non_blocca_avanzamento_di_domani(
-        db_session, monkeypatch, _tenant_warmup):
+        db_session, monkeypatch, _tenant_warmup, rampa_accesa):
     """Un override manuale (PATCH warmup_day) non tocca warmup_advanced_date:
     la volta successiva che il cron/boot chiama advance_wa_warmup_if_needed
     (di fatto 'domani', qui simulato con la guardia None/non-oggi) il numero
@@ -489,7 +523,7 @@ async def test_config_warmup_steps_malformata_non_uccide_il_boot(
 
 @pytest.mark.asyncio
 async def test_incremento_negativo_in_config_non_fa_retrocedere_la_rampa(
-        db_session, monkeypatch, _tenant_warmup):
+        db_session, monkeypatch, _tenant_warmup, rampa_accesa):
     """Un WA_WARMUP_ADVANCE_STEPS_PER_DAY negativo portava warmup_day sotto zero, e
     sotto zero il gradino esce dal min() di effective_wa_daily_cap: una
     configurazione sbagliata RIMUOVEVA il tetto anti-ban invece di rallentare

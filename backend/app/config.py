@@ -390,9 +390,21 @@ class Settings(BaseSettings):
     # ad ogni riattivazione (decisione precedente e tuttora valida: un
     # numero sospeso non deve ripartire dal cap alto a cui era arrivato) --
     # senza questo flag separato, riattivare un numero con la rampa spenta
-    # la riaccendeva in silenzio. Default True: chi non tocca questo flag
-    # vede lo stesso comportamento di sempre.
-    wa_warmup_enabled: bool = True
+    # la riaccendeva in silenzio.
+    #
+    # Default False dal 12/08, era True. Il default True voleva dire "chi non
+    # tocca il flag vede il comportamento di sempre", ma la decisione di
+    # Tommaso (rampa spenta, 08/08) viveva in UNA riga di UN solo file:
+    # WA_WARMUP_ENABLED=false nell'.env alla radice del repo. Ogni altro
+    # albero -- un worktree di QA, un backend avviato su un'altra porta --
+    # non ha quella riga, quindi girava con la rampa ACCESA e
+    # advance_wa_warmup_if_needed() avanzava warmup_day sui numeri REALI.
+    # Misurato il 12/08: entrambi i numeri Primero avevano
+    # warmup_advanced_date = quel giorno, stampato da un backend di QA su
+    # porta 8020 mentre la produzione girava col flag a false. Lo stato
+    # sicuro non deve dipendere da una riga di .env che il prossimo albero
+    # non avra'. Chi vuole la rampa la accende con WA_WARMUP_ENABLED=true.
+    wa_warmup_enabled: bool = False
     # GRADINI DELLA LISTA QUI SOPRA AL GIORNO -- **NON** messaggi al giorno.
     # Deve restare 1: alzarlo significa SALTARE gradini, non mandare piu'
     # messaggi. Con 10 su una lista di 7 voci un numero nuovo passava da 20 a
