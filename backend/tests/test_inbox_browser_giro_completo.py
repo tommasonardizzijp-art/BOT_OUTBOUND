@@ -303,3 +303,71 @@ async def test_il_segnalibro_avanza_anche_quando_la_riga_non_dice_la_sua_eta(mon
         assert camp.inbox_cursor_at == datetime(2026, 3, 2, 9, 15), (
             f"il cursore doveva scendere alla data del thread, e' {camp.inbox_cursor_at}"
         )
+
+
+@pytest.mark.asyncio
+async def test_dopo_tre_aperture_fallite_di_fila_si_verifica_il_reset(monkeypatch):
+    """Misurato il 12/08 sul campo: 4 aperture fallite nei 25 secondi PRIMA che
+    il controllo di fine giro si accorgesse che la lista era ripartita dalla
+    cima. Erano righe che a quel punto non esistevano piu': quattro pause pagate
+    per niente, e quattro tentativi bruciati dei tre disponibili per riga.
+    Tre fallimenti di fila non sono sfortuna: si va a vedere subito, e il resto
+    del lotto — fatto di righe svanite — si butta invece di lavorarlo."""
+    from app.services.inbox_browser.pagina import StatoScorrimento
+
+    async with AsyncSessionLocal() as db:
+        camp = Campaign(
+            name="t-reset-anticipato", status=CampaignStatus.listing,
+            source_type="scrape", scrape_mode="dm_threads", inbox_engine="browser",
+        )
+        db.add(camp)
+        await db.commit()
+        await db.refresh(camp)
+
+        righe = [
+            RigaVisibile(indice=i, nome=f"Svanita {i}", ultimo_nostro=None,
+                         non_letta=False, testo_grezzo=f"Svanita {i}\nciao")
+            for i in range(6)
+        ]
+
+        async def decidi_fine_lista_fake(page_, falliti, lingua, su_righe):
+            return "fine"
+
+        async def non_apre_mai(nome):
+            return None
+
+        spia_apri: list = []
+        await _monta(monkeypatch, camp, righe, decidi_fine_lista_fake, spia_apri,
+                     apri_riga_fake=non_apre_mai)
+
+        # Un solo lotto: dopo, il DOM non offre piu' niente.
+        letture = {"n": 0}
+
+        async def leggi_una_volta_sola(page_, lingua):
+            letture["n"] += 1
+            return righe if letture["n"] == 1 else []
+        monkeypatch.setattr(scrape_inbox_browser, "leggi_righe_visibili", leggi_una_volta_sola)
+
+        # Prima si e' in profondita', poi la lista risulta ripartita dalla cima.
+        letture_stato = {"n": 0}
+
+        async def stato_finto(page_):
+            letture_stato["n"] += 1
+            return StatoScorrimento(altezza=30000, al_fondo=False,
+                                    top=30000 if letture_stato["n"] == 1 else 500)
+        monkeypatch.setattr(scrape_inbox_browser, "stato_lista", stato_finto)
+
+        lanci = {"n": 0}
+
+        async def lancia_finto(page_):
+            lanci["n"] += 1
+            return StatoScorrimento(altezza=30000, al_fondo=True, top=600)
+        monkeypatch.setattr(scrape_inbox_browser, "lancia", lancia_finto)
+
+        await scrape_inbox_browser.run_inbox_browser_list(camp.id, db, camp)
+
+        assert len(spia_apri) == 3, (
+            f"doveva fermarsi dopo 3 fallimenti di fila e buttare il resto del "
+            f"lotto, invece ha tentato {len(spia_apri)} righe: {spia_apri}"
+        )
+        assert lanci["n"] >= 1, "dopo il reset doveva provare a recuperare la posizione"

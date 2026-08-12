@@ -81,6 +81,12 @@ MAX_LANCI_RECUPERO = 40
 # lavorata, 0.15-0.5s l'una) smettono di pagare un viaggio di rete a testa.
 INTERVALLO_CONTROLLO_STOP_S = 2.0
 
+# Dopo quante aperture fallite di fila si va a vedere se la lista e' ripartita
+# dalla cima, invece di aspettare il controllo di fine giro. Due sono ancora
+# spiegabili come sfortuna (la verifica post-click esiste apposta e a volte
+# scarta righe buone); tre di fila, no.
+CONTROLLO_RESET_DOPO_FALLIMENTI = 3
+
 
 def gia_esaminata(chiave: str | None, viste: set[str]) -> bool:
     """True se questa riga e' gia' passata sotto gli occhi in QUESTA sessione.
@@ -343,6 +349,42 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
         # Fin dove si era arrivati a scorrere, in pixel: la misura di
         # riferimento per accorgersi che la lista e' ripartita dalla cima.
         ultimo_top: int | None = None
+        falliti_di_fila = 0
+
+        async def _controlla_reset() -> bool:
+            """La lista e' ripartita dalla cima? Se si', recupera e ritorna True.
+
+            Solo letture del DOM, nessuna richiesta verso Instagram.
+            """
+            nonlocal ultimo_top
+            stato = await stato_lista(page)
+            if not lista_ripartita_da_capo(ultimo_top, stato.top):
+                if stato.top is not None:
+                    ultimo_top = stato.top
+                return False
+
+            logger.warning(
+                f"[InboxBrowser] lista ripartita da capo: ero a {ultimo_top}px, "
+                f"ora sono a {stato.top}px (navigazioni spontanee finora: "
+                f"{len(navigazioni)}) — risalgo con i lanci"
+            )
+            emit_event(campaign_id, "scrape_batch",
+                       "La lista dei messaggi e' ripartita dalla cima: "
+                       "recupero la posizione senza rileggere tutto", level="warn")
+            # Il lotto in coda parla di righe che non esistono piu': tenerlo
+            # significa spendere un'apertura fallita a testa (e un tentativo
+            # dei tre disponibili) per scoprire una cosa che gia' sappiamo.
+            righe_del_giro.clear()
+            obiettivo = ultimo_top or 0
+            for _ in range(MAX_LANCI_RECUPERO):
+                stato = await lancia(page)
+                if stato.top is None or stato.top >= obiettivo * 0.9:
+                    break
+                if stato.al_fondo:
+                    break
+            if stato.top is not None:
+                ultimo_top = stato.top
+            return True
 
         while True:
             esito_stop = await _deve_fermarsi()
@@ -360,24 +402,7 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
             # scorso. Senza questo, un reset lasciava il motore a riattraversare
             # tutta la lista dall'inizio un gesto alla volta — e' il
             # "ricomincia da capo" riportato dal vivo.
-            stato_ora = await stato_lista(page)
-            if lista_ripartita_da_capo(ultimo_top, stato_ora.top):
-                logger.warning(
-                    f"[InboxBrowser] lista ripartita da capo: ero a {ultimo_top}px, "
-                    f"ora sono a {stato_ora.top}px (navigazioni spontanee finora: "
-                    f"{len(navigazioni)}) — risalgo con i lanci"
-                )
-                emit_event(campaign_id, "scrape_batch",
-                           "La lista dei messaggi e' ripartita dalla cima: "
-                           "recupero la posizione senza rileggere tutto", level="warn")
-                obiettivo = ultimo_top or 0
-                for _ in range(MAX_LANCI_RECUPERO):
-                    stato_ora = await lancia(page)
-                    if stato_ora.top is None or stato_ora.top >= obiettivo * 0.9:
-                        break
-                    if stato_ora.al_fondo:
-                        break
-            ultimo_top = stato_ora.top if stato_ora.top is not None else ultimo_top
+            await _controlla_reset()
 
             if not righe_del_giro:
                 await raccogli(await leggi_righe_visibili(page, LINGUA))
@@ -427,6 +452,7 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                 if ha_aperto:
                     username = await apri_riga(page, riga.indice, riga.nome, LINGUA, account.username)
                     if username:
+                        falliti_di_fila = 0
                         testo_pagina = await page.evaluate("() => document.body.innerText")
                         dati = DatiContatto(
                             username=username,
@@ -491,6 +517,7 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                         # username None: verifica post-click fallita, profilo
                         # sparito, oppure — il caso di gran lunga piu' frequente
                         # (misurato) — riga uscita dal DOM prima del click.
+                        falliti_di_fila += 1
                         # Nessuna scrittura, ma la riga va rimessa in gioco:
                         # toglierla dalla memoria di sessione la fa ricompare
                         # al prossimo campionamento che la incontra. Senza
@@ -505,6 +532,17 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                                 f"{MAX_TENTATIVI_RIGA} tentativi — lasciata alla "
                                 f"prossima sessione"
                             )
+                        # Un fallimento isolato e' normale (la verifica
+                        # post-click esiste apposta). Diversi di fila no: e'
+                        # il modo in cui un reset della lista si manifesta
+                        # PRIMA che il controllo di fine giro lo veda.
+                        # Misurato il 12/08: 4 aperture fallite nei 25 secondi
+                        # precedenti al rilevamento, tutte su righe che a quel
+                        # punto non esistevano piu'.
+                        if falliti_di_fila >= CONTROLLO_RESET_DOPO_FALLIMENTI:
+                            falliti_di_fila = 0
+                            if await _controlla_reset():
+                                break   # il resto del lotto e' roba svanita
 
                 contatore.registra(riconosciuta_prima)
                 # La pausa dipende da cosa si e' FATTO, non da dove ci si trova:
