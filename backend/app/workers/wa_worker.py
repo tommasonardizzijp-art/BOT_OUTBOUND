@@ -151,14 +151,26 @@ def _ora_locale_corrente() -> int:
     italiano, finestra oraria Europe/Rome); quando arrivera' il multi-lingua,
     questo diventa un campo del tenant, non una costante.
 
-    Fallback a UTC+1 (CET) se il tz database non e' disponibile: stesso
-    problema gia' documentato in manual_login._rome_utc_offset_seconds
-    (zoneinfo su Windows puo' richiedere il pacchetto `tzdata`)."""
+    Il fallback NON e' un offset fisso, e la differenza si e' pagata in
+    produzione. Su Windows `zoneinfo` senza il pacchetto `tzdata` solleva
+    ZoneInfoNotFoundError (Windows non ha il tz database di sistema), e il
+    vecchio fallback a UTC+1 (CET) sbagliava di un'ora piena per i ~7 mesi di
+    ora legale: il 12/08 alle 19:59 reali il worker credeva fossero le 18, e
+    la finestra 09:00-20:00 valeva di fatto 10:00-21:00 -- il canale non
+    partiva prima delle 10 e scriveva a clienti veri fino alle 21. La finestra
+    oraria e' esattamente la protezione che non deve slittare.
+
+    `datetime.now()` e' l'orologio locale di sistema: il DST lo rispetta gia',
+    ed e' lo stesso orario che l'operatore legge guardando la dashboard. Per
+    un MVP a fuso italiano fisso (SDD Q6) e' piu' affidabile di un offset
+    scritto a mano. `tzdata` sta nei requirements e resta la via principale;
+    questo e' solo il paracadute. Stesso difetto in
+    manual_login._rome_utc_offset_seconds, corretto insieme a questo."""
     try:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo("Europe/Rome")).hour
     except Exception:
-        return datetime.now(timezone(timedelta(hours=1))).hour
+        return datetime.now().hour
 
 
 # Timeout con cui ARQ uccide un job (task_queue.WorkerSettings.job_timeout,
