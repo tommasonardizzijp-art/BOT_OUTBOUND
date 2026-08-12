@@ -6,8 +6,9 @@ from datetime import datetime
 
 from app.models.tenant import Tenant
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
-                           WaCampaignType, WaContact, WaContactStatus, WaNumber,
-                           WaNumberStatus, WaSendCondition, WaSequenceStep)
+                           WaCampaignType, WaContact, WaContactStatus,
+                           WaDiscoveredChat, WaNumber, WaNumberStatus,
+                           WaSendCondition, WaSequenceStep)
 from app.utils.crypto import encrypt
 from app.utils.phone_pseudonym import hmac_phone
 
@@ -64,6 +65,43 @@ async def make_campaign(db, tenant, number, *, name="Campagna Test",
     db.add(step)
     await db.flush()
     return camp, step
+
+
+async def make_discovered_chat(db, tenant, number, *,
+                               chat_title: str | None = "Chat Test",
+                               display_name: str | None = "Chat Test",
+                               e164: str | None = "auto",
+                               tipo_chat: str = "individuale",
+                               status: str = "nuovo",
+                               numero_leggibile: bool | None = None) -> WaDiscoveredChat:
+    """Una riga di staging (Fase A auto-discover), patrimonio condiviso a
+    partire dalla Fase B (wa_promote) -- aggiunta qui, non nel file di test,
+    perche' Task 4 (API GET/POST discovered-chats) e i test adversarial del
+    modulo la riuseranno di sicuro, stesso ragionamento che ha messo
+    make_contact/make_campaign qui invece che nei singoli file di test.
+
+    `e164="auto"` (sentinella, non None) genera un numero random univoco per
+    lo stesso motivo di `make_number`/`make_contact`: un default fisso
+    farebbe collidere test diversi sulla UNIQUE(number_id, phone_hmac).
+    Passare `e164=None` esplicito per una riga SENZA numero (gruppo, o
+    pannello info non apribile) -- a differenza di WaContact qui e' un caso
+    legittimo, le due colonne sono NULLABLE.
+    """
+    if e164 == "auto":
+        e164 = f"+3935{uuid.uuid4().int % 10**8:08d}"
+    encrypted_phone = encrypt(e164) if e164 else None
+    phone_hmac = hmac_phone(e164) if e164 else None
+    if numero_leggibile is None:
+        numero_leggibile = phone_hmac is not None
+    riga = WaDiscoveredChat(
+        id=str(uuid.uuid4()), tenant_id=tenant.id, number_id=number.id,
+        chat_title=chat_title, display_name=display_name,
+        encrypted_phone=encrypted_phone, phone_hmac=phone_hmac,
+        numero_leggibile=numero_leggibile, tipo_chat=tipo_chat, status=status,
+    )
+    db.add(riga)
+    await db.flush()
+    return riga
 
 
 async def make_campaign_contact(db, campaign, contact, *,

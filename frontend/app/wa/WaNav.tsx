@@ -6,10 +6,15 @@
 // che dice a colpo d'occhio "sei nel mondo WhatsApp".
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { ArrowLeftRight, LayoutGrid, Phone, PlusCircle } from 'lucide-react'
+import { ArrowLeftRight, LayoutGrid, PlusCircle, Search, Phone } from 'lucide-react'
 
 const navItems = [
   { href: '/wa', label: 'Campagne', icon: LayoutGrid },
+  // Fase B: approvazione delle chat trovate dall'auto-discover verso
+  // WaContact -- sta fra "Campagne" (dove i contatti arruolati finiscono
+  // dopo) e "Numeri" (da cui l'operatore sceglie quale numero guardare qui),
+  // stesso ordine logico del flusso scoperta -> promozione -> campagna.
+  { href: '/wa/scoperti', label: 'Scoperti', icon: Search },
   { href: '/wa/numeri', label: 'Numeri', icon: Phone },
   { href: '/wa/campagne/nuova', label: 'Nuova campagna', icon: PlusCircle },
 ]

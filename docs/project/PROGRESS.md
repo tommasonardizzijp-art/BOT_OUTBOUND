@@ -1236,6 +1236,38 @@ Nuovo motore per la Fase Lista delle campagne `scrape_mode=dm_threads`: apre le 
 
 ---
 
+## [2026-08-11] Canale WhatsApp — Fase B: promozione contatti scoperti + arruolamento in campagna
+
+PR#65 (fix collaudo Fase A, DOM reale) mergiata su `main` come prerequisito. Fase B implementata su branch `feat/wa-fase-b-promozione` (worktree dedicato), 6 task (implementer + reviewer dedicato ciascuno, come da skill `sviluppo-modulo`): promuove le righe approvate di `wa_discovered_chats` (staging della Fase A) in `WaContact`, poi le arruola in una `WaCampaign` esistente riusando il motore M3 già collaudato — nessuna modifica al motore di invio.
+
+**Difetto Task 0 (gruppi con un numero letto per errore dal pannello info)**: chiuso **solo** lato promozione — `regole.promuovibile()` esclude `tipo_chat='gruppo'` **per costruzione**, anche se un id di gruppo arriva alla funzione bypassando la UI. Il secondo fix suggerito nel prompt AVVIO (guard su "N partecipanti" nel testo del pannello, lato Fase A) **non è stato implementato**: `docs/whatsapp/wa-dom-catalog.md:239-243` misura un recall 1/6 su quel segnale — darebbe un falso senso di sicurezza sulla maggioranza dei casi. Verificato sul DB condiviso l'11/08: 4 gruppi (non 3, il prompt AVVIO era indietro) avevano `numero_leggibile=true`, tutti già correttamente `tipo_chat='gruppo'` — il fix sulla promozione basta a coprirli.
+
+**File nuovi principali**:
+- `backend/app/services/wa_promote/regole.py` — decisione pura `promuovibile(riga)`, nessun I/O
+- `backend/app/services/wa_promote/promozione.py` — `wa_discovered_chats` → `WaContact`, riusa `phone_hmac`/`encrypted_phone` così come sono (mai ricalcolati), `status` non torna mai indietro
+- `backend/app/services/wa_promote/arruolamento.py` — `WaContact` → `WaCampaignContact` di una campagna `draft`
+- `backend/app/api/wa_discover.py` — `GET/POST /wa/discovered-chats` (lista + promozione)
+- `backend/app/api/wa_contacts.py` — + `POST /wa/contacts/enroll`
+- `backend/app/utils/ids.py` — `uuid_valido()`, validazione id condivisa
+- `frontend/app/wa/scoperti/page.tsx` — UI di approvazione (selezione → promuovi → report → arruola in campagna → report)
+
+**Tre bug reali trovati e corretti in review, prima del merge**:
+1. **IDOR**: `promozione.promuovi()` non verificava il tenant — un id di `wa_discovered_chats` di un altro tenant (se indovinato/esistente) sarebbe stato promosso silenziosamente. Aggiunto `tenant_id` obbligatorio, stesso motivo `"non_trovato"` per id inesistente e id di tenant sbagliato (nessuna differenza osservabile dall'esterno). Stesso principio applicato di conseguenza in `arruolamento.arruola()` (isolamento tenant fra `WaContact` e campagna) e nell'endpoint (`tenant_id` sempre risolto da `WaNumber` via `number_id`, mai da un campo client).
+2. **P12**: una maschera di numero (es. `+39•••••077`) poteva finire in `WaContact.display_name`/`chat_title`, inclusa la sovrascrittura silenziosa di un nome vero già salvato sul ramo di riuso/gap-fill.
+3. **500 grezzo su id con null byte**: asyncpg solleva un'eccezione non catturata su `db.get()` con un id malformato — validazione uuid esplicita prima di ogni query, in tutti e tre i punti che caricano un id esterno.
+
+**QA di fine modulo**: adversarial 37/38 pass via chiamate HTTP dirette contro dati sintetici (tenant/numero di test dedicati, **mai** contro i 273 contatti reali di Primero — promozione/arruolamento reali su quei dati richiedono una decisione di Tommaso, non un collaudo automatico). Invariante di dominio verificata via SQL su tutto il DB condiviso: zero righe `gruppo` mai `promosso`. Review finale di branch (multi-angolo): 9 finding, 5 corretti (gap-fill `chat_title` mancante su riuso, guard `None` mancante, `motivo` non esposto dal backend — il frontend lo ri-derivava con l'ordine dei controlli invertito rispetto a `regole.py` —, filtro `status=''` trattato come "nessun filtro", validazione uuid duplicata), 4 accettati come limitazioni note/scelte di design già motivate (N+1 query per-id coerente con `wa_ingest.py`, race su `total_contacts` fra `arruola()` e l'ingest CSV esistente su ingest concorrente — richiederebbe toccare `wa_ingest.py`, fuori scope —, triplicazione intenzionale del pattern SAVEPOINT).
+
+**Non eseguiti in questo giro**: i 28 test manuali UI (scritti in `.superpowers/sdd/qa-wa-fase-b-tests.md`) richiedono un login reale nel browser — un agente non può/deve inserire una password o un token per conto dell'utente. Da eseguire con Tommaso al tastiera, oppure lui stesso segue la checklist.
+
+**Comportamento atteso**: dalla pagina `/wa/scoperti`, un operatore seleziona un numero WhatsApp, filtra le chat scoperte dalla Fase A (i gruppi restano sempre visibili, mai nascosti, solo marcati non promuovibili), seleziona righe approvate e promuove — quelle con numero diventano `WaContact` (dedup su `phone_hmac` verso contatti esistenti), poi le arruola in una campagna `draft` esistente. Il motore M3 (invio, cap, warmup, breaker, opt-out) è invariato: la Fase B si ferma a "la riga `WaCampaignContact` è in coda", mai un avvio di campagna automatico.
+
+**Prossimo passo**: Tommaso esegue i 28 test manuali (o autorizza un giro con login), poi collaudo/decisione su quando promuovere per davvero i 273 contatti reali di Primero e avviare la prima campagna.
+
+**File**: `backend/app/services/wa_promote/*` (nuovo), `backend/app/api/wa_discover.py` (nuovo), `backend/app/utils/ids.py` (nuovo), `backend/app/api/wa_contacts.py`, `backend/app/main.py`, `frontend/app/wa/scoperti/page.tsx` (nuovo), `frontend/app/wa/WaNav.tsx`, `frontend/lib/waApi.ts`. Piano: `docs/superpowers/plans/2026-08-11-wa-fase-b-promozione.md`. Prompt AVVIO: `docs/superpowers/prompts/2026-08-11-whatsapp-fase-B-promozione-AVVIO.md`.
+
+---
+
 ## Storico audit
 
 | Data | File corrente | Scope | Esito |
