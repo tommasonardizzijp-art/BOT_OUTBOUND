@@ -135,6 +135,11 @@ async def test_g4_status_cap_effettivo_e_il_minimo_tra_i_numeri_attivi(db_sessio
 
     await _ritira_numeri_attivi_preesistenti(db_session)
     monkeypatch.setattr(settings, "wa_warmup_steps", "20,20,30,40,60,80,100")
+    # La rampa va accesa esplicitamente: dal 12/08 wa_warmup_enabled e' False
+    # per default, e col flag spento il gradino non entra nel min() -- il caso
+    # sotto test ("un numero in warmup e' il collo di bottiglia") non esisterebbe
+    # e il cap effettivo sarebbe 50, il daily_cap nudo dell'altro numero.
+    monkeypatch.setattr(settings, "wa_warmup_enabled", True)
 
     tenant = await make_tenant(db_session)
     # Un numero fuori warmup (warmup_day=0): il tetto e' il suo daily_cap "nudo".
