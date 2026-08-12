@@ -315,8 +315,13 @@ async def test_process_row_replied_emette_evento(db_session, monkeypatch):
     contatto = await make_contact(db_session, tenant)
     contatto.chat_title = "Marco"
     campagna, step = await make_campaign(db_session, tenant, numero)
+    # current_step=0 esplicito: `in_sequence` significa che uno step E' stato
+    # inviato, e il default della factory e' -1 (stato di arruolamento). Il
+    # gate su current_step >= 0 rifiuta la combinazione impossibile
+    # in_sequence + mai inviato -- vedi
+    # test_riga_completed_ma_mai_inviata_non_diventa_replied.
     await make_campaign_contact(db_session, campagna, contatto,
-                                status=WaContactStatus.in_sequence)
+                                status=WaContactStatus.in_sequence, current_step=0)
     await db_session.commit()
 
     await wa_reply_watcher.process_chat_row(
@@ -378,6 +383,116 @@ async def test_contatto_completed_che_risponde_diventa_replied(db_session, monke
     assert cc.replied_at_step == 0
     assert campagna.replied == 1
     assert [a[1] for a, _ in emessi] == ["wa.reply.received"]
+
+
+@pytest.mark.asyncio
+async def test_chi_non_ha_ancora_ricevuto_il_messaggio_non_diventa_replied(db_session):
+    """Un messaggio in arrivo PRIMA del nostro invio non e' una risposta.
+
+    `_campagna_attiva_del_contatto` includeva `queued` di proposito ("copre il
+    caso simmetrico raro: risposta arrivata prima che partisse il nostro
+    invio"). Ma `replied` e' TERMINALE: quel contatto non riceve mai il
+    messaggio della campagna. Non e' una statistica sbagliata, e' un contatto
+    scartato in silenzio senza essere mai stato contattato.
+
+    Misurato dal vivo il 12/08 sulla campagna dei 246 Primero: 2 righe su 3 in
+    `replied` avevano `current_step=-1` e ZERO messaggi inviati -- erano
+    conversazioni gia' in corso col cliente, che il watcher ha letto come
+    risposte. Su un numero con molte chat vive la perdita e' silenziosa e
+    grande.
+    """
+    from app.services.wa_reply_watcher import process_chat_row
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Alessio Tutti A Tavola"
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    cc = await make_campaign_contact(db_session, campagna, contatto,
+                                     status=WaContactStatus.queued, current_step=-1)
+    await db_session.commit()
+
+    esito = await process_chat_row(
+        db_session, tenant_id=tenant.id, wa_number_id=numero.id,
+        row=_row("Alessio Tutti A Tavola", preview="allora ci vediamo domani"))
+
+    assert esito["esito"] == "ignorato", (
+        "un messaggio arrivato prima del nostro invio non e' una risposta")
+    await db_session.refresh(cc)
+    await db_session.refresh(campagna)
+    assert cc.status == WaContactStatus.queued, "la riga deve restare inviabile"
+    assert cc.next_action_at is not None, "una riga non terminale ha un appuntamento"
+    assert campagna.replied == 0
+
+
+@pytest.mark.asyncio
+async def test_riga_completed_ma_mai_inviata_non_diventa_replied(db_session):
+    """Lo stato da solo non basta: serve current_step >= 0.
+
+    `current_step` vale -1 all'arruolamento e passa a 0 col primo invio: e' il
+    marcatore di "ha ricevuto". Una riga chiusa senza aver mai inviato (skip poi
+    chiusura) non deve poter diventare replied solo perche' lo stato lo
+    consentirebbe.
+    """
+    from app.services.wa_reply_watcher import process_chat_row
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    cc = await make_campaign_contact(db_session, campagna, contatto,
+                                     status=WaContactStatus.completed, current_step=-1)
+    await db_session.commit()
+
+    esito = await process_chat_row(
+        db_session, tenant_id=tenant.id, wa_number_id=numero.id,
+        row=_row("Marco", preview="ciao tutto bene?"))
+
+    assert esito["esito"] == "ignorato"
+    await db_session.refresh(cc)
+    assert cc.status == WaContactStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_uno_stop_prima_dell_invio_resta_onorato(db_session):
+    """Non-regressione del fix sopra: il gate vale SOLO per `replied`.
+
+    Un opt-out non dipende dall'aver ricevuto qualcosa da noi -- se il cliente
+    scrive STOP a un numero con cui era gia' in conversazione, quel STOP vale, e
+    il contatto non va contattato. Stringere anche questo ramo significherebbe
+    mandare marketing a chi ha detto di no.
+    """
+    from app.services.wa_reply_watcher import process_chat_row
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    await make_campaign_contact(db_session, campagna, contatto,
+                                status=WaContactStatus.queued, current_step=-1)
+    await db_session.commit()
+
+    esito = await process_chat_row(
+        db_session, tenant_id=tenant.id, wa_number_id=numero.id,
+        row=_row("Marco", preview="STOP"))
+
+    assert esito["esito"] == "optout"
+    await db_session.refresh(contatto)
+    await db_session.refresh(campagna)
+    assert contatto.opted_out is True
+    assert contatto.do_not_contact is True
+    assert campagna.opted_out == 1, "l'opt-out va contato sulla campagna anche pre-invio"
 
 
 @pytest.mark.asyncio
