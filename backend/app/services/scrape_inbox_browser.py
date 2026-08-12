@@ -39,7 +39,7 @@ from app.services.inbox_browser.riconoscimento import ArchivioNomi, ContatoreZon
 from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
 from app.services.inbox_browser.salvataggio import DatiContatto, salva_contatto
 from app.services.inbox_browser.segnalibro import (
-    nuovo_cursore, riga_da_saltare, soglia_in_ore,
+    nuovo_cursore, nuovo_cursore_da_data, riga_da_saltare, soglia_in_ore,
 )
 from app.services.inbox_browser.testo import (
     analizza_riga_lista, e_segnaposto, estrai_data_thread, estrai_ultimo_messaggio,
@@ -446,9 +446,24 @@ async def run_inbox_browser_list(campaign_id: str, db, campaign) -> int | None:
                         # verificata), non solo per i contatti nuovi — anche
                         # un contatto gia' noto ma appena riaggiornato e'
                         # comunque un punto vero della lista attraversato.
-                        eta = eta_riga_in_ore(analizzata.data_relativa, LINGUA)
-                        campaign.inbox_cursor_at = nuovo_cursore(
-                            campaign.inbox_cursor_at, eta, datetime.utcnow())
+                        # Prima la data ASSOLUTA del thread appena aperto (gia'
+                        # in mano, e leggibile anche sulle chat vecchie, dove
+                        # l'eta' relativa della riga non lo e' — vedi
+                        # nuovo_cursore_da_data). L'eta' della riga resta come
+                        # ripiego per quando il thread non l'ha data.
+                        if dati.last_message_at is not None:
+                            campaign.inbox_cursor_at = nuovo_cursore_da_data(
+                                campaign.inbox_cursor_at, dati.last_message_at)
+                        else:
+                            eta = eta_riga_in_ore(analizzata.data_relativa, LINGUA)
+                            if eta is None:
+                                logger.debug(
+                                    f"[InboxBrowser] cursore fermo: ne' data del "
+                                    f"thread ne' eta' della riga leggibili per "
+                                    f"{riga.nome!r} (riga: {analizzata.data_relativa!r})"
+                                )
+                            campaign.inbox_cursor_at = nuovo_cursore(
+                                campaign.inbox_cursor_at, eta, datetime.utcnow())
                         campaign.inbox_cursor_updated_at = datetime.utcnow()
                         if esito == "creato":
                             already += 1

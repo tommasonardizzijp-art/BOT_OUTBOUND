@@ -15,8 +15,9 @@ from app.services.inbox_browser.pagina import RigaVisibile
 
 
 class _FakePage:
-    def __init__(self):
+    def __init__(self, testo_pagina=""):
         self.url = "https://www.instagram.com/direct/inbox/"
+        self.testo_pagina = testo_pagina
 
     def on(self, event, handler):
         pass
@@ -28,7 +29,17 @@ class _FakePage:
         return None
 
     async def evaluate(self, script, *args):
-        return ""
+        # Il motore interroga il DOM per tre cose diverse con la stessa
+        # chiamata: le righe, i contenitori scrollabili e il testo della
+        # pagina. Rispondere a tutte con la stessa stringa faceva esplodere
+        # `stato_lista` ('str' object has no attribute 'get') — errore del
+        # fake, non del motore, ma il motore lo inghiottiva marcando la
+        # campagna in errore, cioe' un test verde per il motivo sbagliato.
+        if "document.body.innerText" in script:
+            return self.testo_pagina
+        if "nonLetta" in script:
+            return {"viewport": {"w": 1920, "h": 940}, "righe": []}
+        return []
 
 
 class _FakeBrowserSession:
@@ -46,8 +57,8 @@ class _FakeBrowserSession:
 
 
 async def _monta(monkeypatch, camp, righe_iniziali, decidi_fine_lista_fake, spia_apri=None,
-                 apri_riga_fake=None):
-    page = _FakePage()
+                 apri_riga_fake=None, testo_pagina=""):
+    page = _FakePage(testo_pagina)
     _FakeBrowserSession.pagina_condivisa = page
     monkeypatch.setattr("app.browser.context_manager.BrowserSession", _FakeBrowserSession)
     monkeypatch.setattr("app.utils.events.emit", lambda *a, **k: None)
@@ -250,4 +261,45 @@ async def test_una_riga_che_non_si_apre_mai_non_gira_in_tondo(monkeypatch):
 
         assert len(spia_apri) == scrape_inbox_browser.MAX_TENTATIVI_RIGA, (
             f"attesi {scrape_inbox_browser.MAX_TENTATIVI_RIGA} tentativi, spia={spia_apri}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_il_segnalibro_avanza_anche_quando_la_riga_non_dice_la_sua_eta(monkeypatch):
+    """Misurato il 12/08: 184 aperture, cursore fermo al giorno prima. Il motore
+    aggiornava il segnalibro SOLO dall'eta' relativa della riga ('5 sett'), che
+    sulle chat vecchie non e' leggibile — mentre la data assoluta del thread
+    appena aperto lo era 146 volte su 146. Risultato: il segnalibro si segnava
+    di aver lavorato (`inbox_cursor_updated_at` avanzava) ma non FIN DOVE, e la
+    modalita' 'riprendi da dove eri arrivato' era di fatto inerte."""
+    from datetime import datetime
+
+    async with AsyncSessionLocal() as db:
+        cursore_iniziale = datetime(2026, 7, 28, 18, 41)
+        camp = Campaign(
+            name="t-cursore-data-thread", status=CampaignStatus.listing,
+            source_type="scrape", scrape_mode="dm_threads", inbox_engine="browser",
+            inbox_cursor_at=cursore_iniziale,
+        )
+        db.add(camp)
+        await db.commit()
+        await db.refresh(camp)
+
+        # Riga senza eta' leggibile (due sole righe di testo: nessuna data).
+        riga = RigaVisibile(
+            indice=0, nome="Chat Vecchia", ultimo_nostro=None, non_letta=False,
+            testo_grezzo="Chat Vecchia\nTu: ciao",
+        )
+
+        async def decidi_fine_lista_fake(page_, falliti, lingua, su_righe):
+            return "fine"
+
+        await _monta(monkeypatch, camp, [riga], decidi_fine_lista_fake,
+                     testo_pagina="2 mar 2026, 09:15\nCiao come va\nScrivi un messaggio...")
+
+        await scrape_inbox_browser.run_inbox_browser_list(camp.id, db, camp)
+
+        await db.refresh(camp)
+        assert camp.inbox_cursor_at == datetime(2026, 3, 2, 9, 15), (
+            f"il cursore doveva scendere alla data del thread, e' {camp.inbox_cursor_at}"
         )

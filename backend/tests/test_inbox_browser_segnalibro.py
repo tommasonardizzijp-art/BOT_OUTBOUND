@@ -105,3 +105,42 @@ def test_un_cursore_nel_futuro_non_produce_una_soglia_negativa():
     """Orologi sfasati o dati sporchi: una soglia negativa farebbe saltare
     l'intera lista."""
     assert soglia_in_ore(ADESSO + timedelta(hours=5), ADESSO) is None
+
+
+# ── il cursore deve avanzare anche sulle chat vecchie ──────────────────────
+# Misurato il 12/08 sul campo: 184 aperture, cursore fermo al giorno di prima.
+# L'eta' relativa della riga tornava illeggibile su tutte (le chat vecchie non
+# dicono piu' '5 sett'), mentre la data assoluta del thread aperto era corretta
+# 146 volte su 146. Il segnalibro si segnava di aver lavorato ma non fin dove.
+def test_il_cursore_scende_con_la_data_assoluta_del_thread():
+    from datetime import datetime
+
+    from app.services.inbox_browser.segnalibro import nuovo_cursore_da_data
+
+    cursore = datetime(2026, 7, 28, 18, 41)
+    piu_vecchia = datetime(2026, 3, 2, 9, 0)
+    assert nuovo_cursore_da_data(cursore, piu_vecchia) == piu_vecchia
+
+
+def test_una_chat_recente_non_riporta_su_il_cursore():
+    """Il cursore scende soltanto: e' la stessa regola di `nuovo_cursore`, e
+    serve perche' dopo un reset della lista la sessione dopo ripartirebbe da
+    piu' in alto."""
+    from datetime import datetime
+
+    from app.services.inbox_browser.segnalibro import nuovo_cursore_da_data
+
+    cursore = datetime(2026, 3, 2, 9, 0)
+    assert nuovo_cursore_da_data(cursore, datetime(2026, 8, 11, 22, 0)) == cursore
+
+
+def test_senza_data_del_thread_il_cursore_resta_dov_e():
+    """Nel dubbio non si sposta niente: un cursore spostato per errore fa
+    saltare in silenzio le chat che stanno in mezzo."""
+    from datetime import datetime
+
+    from app.services.inbox_browser.segnalibro import nuovo_cursore_da_data
+
+    cursore = datetime(2026, 7, 28, 18, 41)
+    assert nuovo_cursore_da_data(cursore, None) == cursore
+    assert nuovo_cursore_da_data(None, None) is None

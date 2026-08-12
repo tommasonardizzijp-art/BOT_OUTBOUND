@@ -59,6 +59,31 @@ def nuovo_cursore(cursore_attuale: datetime | None, eta_ore: float | None,
     return min(cursore_attuale, candidato)
 
 
+def nuovo_cursore_da_data(cursore_attuale: datetime | None,
+                          data_thread: datetime | None) -> datetime | None:
+    """Come `nuovo_cursore`, ma partendo dalla data ASSOLUTA del thread aperto.
+
+    Il punto 2 del disegno qui sopra — la data si legge dalla riga, mai aprendo
+    il thread — vale per DECIDERE SE SALTARE, che e' la decisione presa prima di
+    aprire e che deve restare a costo zero. Non vale per AGGIORNARE il cursore:
+    li' il thread e' gia' aperto e la sua data assoluta e' gia' in mano, quindi
+    usarla non costa niente ed e' molto piu' affidabile.
+
+    Misurato il 12/08: su 184 aperture il cursore non e' avanzato di un giorno,
+    perche' l'eta' relativa della riga tornava illeggibile ogni volta (le chat
+    vecchie non dicono piu' '5 sett'), mentre la data assoluta del thread era
+    corretta 146 volte su 146. Il segnalibro era inerte: si segnava di aver
+    lavorato, ma non si segnava mai FIN DOVE.
+
+    Stessa regola di sempre: il cursore scende soltanto.
+    """
+    if data_thread is None:
+        return cursore_attuale
+    if cursore_attuale is None:
+        return data_thread
+    return min(cursore_attuale, data_thread)
+
+
 def soglia_in_ore(cursore: datetime | None, adesso: datetime) -> float | None:
     """A quante ore fa corrisponde il cursore, adesso."""
     if cursore is None:
