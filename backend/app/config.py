@@ -312,6 +312,13 @@ class Settings(BaseSettings):
     proven_account_threshold: int = 30
 
     # Browser
+    # Probabilita' di sbagliare un carattere INTERNO di una parola durante la
+    # digitazione umana (human_input.human_type), poi corretto con Backspace.
+    # Era 0.08 cablato nel sorgente; alzata a 0.10 su osservazione diretta di
+    # Tommaso al browser durante la campagna del 12/08. Vale per ENTRAMBI i
+    # canali: human_type e' condivisa fra WhatsApp e i DM Instagram.
+    human_typo_probability: float = 0.10
+
     browser_profiles_dir: str = "./data/browser_profiles"
     headless: bool = True
 
