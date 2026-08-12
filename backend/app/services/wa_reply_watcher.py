@@ -338,7 +338,13 @@ async def scan_number(number_id: str) -> dict:
     riga con unread>0. Short-lived, nessun sleep lungo."""
     from app.database import AsyncSessionLocal
 
-    esito = {"scansionate": 0, "optout": 0, "replied": 0, "non_associati": 0, "motivo": None}
+    # senza_preview e' diagnostico e sta nell'esito di proposito: sulle chat
+    # lette il DOM non restituisce la preview, ed e' un difetto del POM ancora
+    # da capire. Contarlo invece di ignorarlo in silenzio e' l'unico modo di
+    # accorgersi se un giorno diventa la maggioranza delle righe -- il 12/08
+    # erano 34 su 47, e nessuno se n'era accorto perche' non le contava nessuno.
+    esito = {"scansionate": 0, "optout": 0, "replied": 0, "non_associati": 0,
+             "senza_preview": 0, "motivo": None}
 
     if await bot_state_service.is_wa_halted():
         esito["motivo"] = "wa_halted"
@@ -394,6 +400,29 @@ async def scan_number(number_id: str) -> dict:
             # terminale -- un contatto che non ha mai risposto.
             if row.unread_count <= 0 and row.last_is_outbound:
                 continue
+
+            # Una preview vuota e' assenza di informazione, non un messaggio
+            # vuoto: non ci si decide nulla. Senza questo controllo la riga
+            # arriva a process_chat_row, non passa looks_like_stop (giustamente,
+            # non c'e' testo) e cade nel ramo `replied` -- marcando "ha
+            # risposto" un contatto che non ha scritto niente. E' successo il
+            # 12/08 alle 16:33: 34 righe su 47 sono tornate dal DOM con la
+            # preview vuota e hanno prodotto 32 falsi `replied` su dati veri.
+            #
+            # Perche' solo ora: il filtro sull'unread qui sopra lo nascondeva.
+            # Una chat NON letta la preview ce l'ha sempre -- e' il messaggio
+            # appena arrivato. Sulle chat gia' lette il DOM della sidebar non
+            # la restituisce, e il resto della pipeline dava per scontato un
+            # testo che li' non c'e'.
+            #
+            # Il gate opt-out non ne esce indebolito: uno STOP ha per
+            # definizione del testo. Si perde al piu' un `replied` per una
+            # risposta di solo allegato -- che non e' un gate legale, e vale
+            # infinitamente meno di 32 risposte inventate.
+            if not (row.preview or "").strip():
+                esito["senza_preview"] += 1
+                continue
+
             esito["scansionate"] += 1
             risultato = await process_chat_row(db, tenant_id=tenant_id,
                                                wa_number_id=number_id, row=row)

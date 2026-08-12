@@ -1014,6 +1014,54 @@ async def test_stop_su_chat_gia_letta_produce_comunque_optout(db_session, monkey
 
 
 @pytest.mark.asyncio
+async def test_riga_senza_preview_non_produce_nessuna_decisione(db_session, monkeypatch):
+    """Costato 32 falsi `replied` su dati veri, il 12/08 alle 16:33.
+
+    Appena tolto il filtro sull'unread e' emerso che sulle chat LETTE il DOM
+    della sidebar non restituisce la preview: su 47 righe scansionate, 34
+    sono arrivate con `preview=''`. Una riga senza testo non e' uno STOP, non
+    passa `looks_like_stop`, e cadeva dritta nel ramo `replied` -- marcando
+    come "ha risposto" 32 contatti che non avevano scritto niente.
+
+    Il filtro unread>0 nascondeva il difetto perche' una chat NON letta la
+    preview ce l'ha sempre: e' l'ultimo messaggio arrivato. Togliendolo si e'
+    scoperto che il resto della pipeline dava per scontato un testo che li'
+    non c'e'.
+
+    Una preview vuota e' assenza di informazione, non un messaggio vuoto: non
+    ci si decide nulla, ne' un opt-out ne' una risposta. Il gate opt-out non
+    ne esce indebolito -- uno STOP ha per definizione del testo."""
+    from app.services import wa_reply_watcher
+    from app.models.wa import WaCampaignStatus, WaContactStatus
+    from tests.factories_wa import make_campaign, make_campaign_contact, make_number
+
+    tenant = await make_tenant(db_session)
+    numero = await make_number(db_session, tenant)
+    contatto = await make_contact(db_session, tenant)
+    contatto.chat_title = "Marco"
+    campagna, _ = await make_campaign(db_session, tenant, numero,
+                                      status=WaCampaignStatus.running)
+    cc = await make_campaign_contact(db_session, campagna, contatto,
+                                     status=WaContactStatus.completed, current_step=0)
+    await db_session.commit()
+
+    vuota = _row("Marco", preview="", unread=0)
+    vuota.last_is_outbound = False
+    solo_spazi = _row("Marco", preview="   ", unread=1)
+    solo_spazi.last_is_outbound = False
+    _monta_browser_finto(monkeypatch, [vuota, solo_spazi])
+
+    esito = await wa_reply_watcher.scan_number(numero.id)
+    assert esito["scansionate"] == 0
+    assert esito["senza_preview"] == 2
+
+    await db_session.refresh(cc)
+    assert cc.status == WaContactStatus.completed, (
+        "una riga senza testo ha marcato 'replied' un contatto che non ha "
+        "scritto nulla")
+
+
+@pytest.mark.asyncio
 async def test_chat_letta_con_ultimo_messaggio_nostro_resta_ignorata(db_session, monkeypatch):
     """Il contrappeso al test sopra, e il motivo per cui il filtro unread non
     si puo' semplicemente togliere.
