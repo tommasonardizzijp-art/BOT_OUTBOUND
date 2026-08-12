@@ -33,8 +33,11 @@ from sqlalchemy import create_engine
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# Le 9 tabelle che la 025 crea (8 wa_* + tenants). Usato sia per fabbricare lo
-# schema "pre" (tutto tranne queste) sia per verificare il diff "post".
+# Le 9 tabelle che la catena 025->head CREA da zero (8 wa_* + tenants). Usato
+# sia per fabbricare lo schema "pre" (tutto tranne queste) sia per verificare il
+# diff "post". NON e' "solo quelle della 025": qualunque migrazione successiva
+# che fa `create_table` va aggiunta qui, altrimenti create_all fabbrica la
+# tabella nello schema "pre" e la migrazione muore su "table already exists".
 WA_NEW_TABLES = {
     "tenants",
     "wa_numbers",
@@ -44,6 +47,7 @@ WA_NEW_TABLES = {
     "wa_campaign_contacts",
     "wa_messages",
     "wa_inbound_events",
+    "wa_discovered_chats",  # 032
 }
 
 # Colonne che una migrazione SUCCESSIVA alla 025 aggiunge a una tabella GIA'
@@ -57,8 +61,11 @@ WA_NEW_TABLES = {
 # solo posto da aggiornare quando una nuova migrazione aggiunge una colonna.
 POST_024_COLUMNS = {
     "bot_state": ["wa_halted", "wa_halted_reason", "wa_halted_at", "wa_halted_by"],  # 027
-    "campaigns": ["enrichment_level"],  # 029
+    "campaigns": ["enrichment_level",                                    # 029
+                  "inbox_cursor_at", "inbox_cursor_updated_at"],         # 033
     "instagram_accounts": ["daily_likes_today", "daily_likes_date"],  # 030
+    "followers": ["last_message_at", "last_message_from",             # 031
+                  "last_message_text", "source_channel"],
 }
 
 
