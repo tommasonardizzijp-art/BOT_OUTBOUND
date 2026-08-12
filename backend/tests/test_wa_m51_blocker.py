@@ -168,7 +168,7 @@ async def test_t2_avviare_una_campagna_accoda_il_worker(db_session, monkeypatch)
 
     accodate = []
 
-    async def _finta_enqueue(campaign_id: str) -> int:
+    async def _finta_enqueue(campaign_id: str, **kw) -> int:
         accodate.append(campaign_id)
         return 1
 
@@ -189,7 +189,7 @@ async def test_t2_redis_giu_non_annulla_l_avvio(db_session, monkeypatch):
     from app.models.wa import WaCampaignStatus
     from app.services import wa_campaign_service as svc
 
-    async def _enqueue_rotta(campaign_id: str) -> int:
+    async def _enqueue_rotta(campaign_id: str, **kw) -> int:
         raise ConnectionError("redis irraggiungibile")
 
     monkeypatch.setattr("app.workers.wa_worker.enqueue_wa_workers", _enqueue_rotta)
@@ -258,7 +258,7 @@ async def test_t3_recover_non_riavvia_da_solo(client, db_session, monkeypatch):
 
     accodate = []
 
-    async def _finta_enqueue(campaign_id: str) -> int:
+    async def _finta_enqueue(campaign_id: str, **kw) -> int:
         accodate.append(campaign_id)
         return 1
     monkeypatch.setattr("app.workers.wa_worker.enqueue_wa_workers", _finta_enqueue)
@@ -345,7 +345,7 @@ async def test_t4_la_scadenza_del_timer_toglie_ancora_il_cooldown(db_session, mo
 def _enqueue_spia(monkeypatch):
     accodate: list[str] = []
 
-    async def _finta_enqueue(campaign_id: str) -> int:
+    async def _finta_enqueue(campaign_id: str, **kw) -> int:
         accodate.append(campaign_id)
         return 1
 

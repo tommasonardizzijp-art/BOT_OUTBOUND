@@ -113,7 +113,7 @@ async def test_e2e_dall_avvio_al_messaggio_inviato(db_session, monkeypatch):
 
     accodate: list[str] = []
 
-    async def _finta_enqueue(campaign_id):
+    async def _finta_enqueue(campaign_id, **kw):
         accodate.append(campaign_id)
         return 1
     monkeypatch.setattr("app.workers.wa_worker.enqueue_wa_workers", _finta_enqueue)
@@ -205,7 +205,7 @@ async def test_e2e_uno_stop_in_chat_ferma_l_invio(db_session, monkeypatch):
     pom = PomConStop()
     _doppi_del_browser(monkeypatch, pom)
 
-    async def _finta_enqueue(campaign_id):
+    async def _finta_enqueue(campaign_id, **kw):
         return 1
     monkeypatch.setattr("app.workers.wa_worker.enqueue_wa_workers", _finta_enqueue)
     monkeypatch.setattr(wa_worker, "_ora_locale_corrente", lambda: 11)
