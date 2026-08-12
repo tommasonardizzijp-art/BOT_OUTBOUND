@@ -14,6 +14,8 @@ import asyncio
 import math
 import random
 
+from app.config import settings
+
 # Tasti adiacenti su QWERTY, per generare typo plausibili.
 QWERTY_ADJACENT: dict[str, str] = {
     'q': 'wa',   'w': 'qes',  'e': 'wrd',  'r': 'etf',  't': 'ryg',
@@ -22,6 +24,16 @@ QWERTY_ADJACENT: dict[str, str] = {
     'h': 'gyun', 'j': 'huim', 'k': 'jiol', 'l': 'kop',
     'z': 'asx',  'x': 'zdc',  'c': 'xfv',  'v': 'cgb',  'b': 'vhn',
     'n': 'bhm',  'm': 'nj',
+    # Fila dei numeri. Mancava, e le cifre erano l'unica classe di caratteri
+    # immune ai typo: `typo_char('3')` tornava None, quindi nella ricerca di
+    # WhatsApp Web -- dove si digita un E.164 di 13 caratteri -- il ramo del
+    # typo veniva estratto regolarmente e poi non produceva niente. Zero errori
+    # sui numeri, sempre, nella fase in cui un umano sbaglia di piu'.
+    # I vicini restano SULLA FILA: un numero di telefono si batte sulla riga in
+    # alto, e un typo che producesse una lettera sarebbe l'errore di un'altra
+    # tastiera.
+    '1': '2',    '2': '13',   '3': '24',   '4': '35',   '5': '46',
+    '6': '57',   '7': '68',   '8': '79',   '9': '80',   '0': '9',
 }
 
 
@@ -63,8 +75,14 @@ async def human_type(page, element, text: str, *, timing_multiplier: float = 1.0
                 await asyncio.sleep(random.uniform(0.25, 1.0))
 
             for char_idx, char in enumerate(word):
-                # Typo: ~8% per carattere in parole >3 lettere, mai sul primo o l'ultimo.
-                if len(word) > 3 and 0 < char_idx < len(word) - 1 and random.random() < 0.08:
+                # Typo su un carattere INTERNO di una parola/blocco piu' lungo di
+                # 3: mai sul primo ne' sull'ultimo, che sono quelli che si
+                # sbagliano di meno. La probabilita' e' configurabile
+                # (HUMAN_TYPO_PROBABILITY, default 0.10, era 0.08 cablato):
+                # tararla e' una decisione di anti-detection, non una modifica
+                # al sorgente.
+                if (len(word) > 3 and 0 < char_idx < len(word) - 1
+                        and random.random() < settings.human_typo_probability):
                     wrong = typo_char(char)
                     if wrong:
                         err_delay = random.lognormvariate(math.log(base_ms), 0.45)

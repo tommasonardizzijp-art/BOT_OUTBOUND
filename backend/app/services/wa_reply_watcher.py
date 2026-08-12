@@ -102,32 +102,32 @@ async def _incrementa_contatore_campagna(db, campaign_id: str, campo: str) -> No
                      .values({campo: colonna + 1}))
 
 
-async def _campagna_attiva_del_contatto(db, contact_id: str) -> WaCampaignContact | None:
-    """La riga wa_campaign_contacts a cui attribuire una risposta, se c'e' --
-    usata sia per l'evento opt-out (campaign_id per il log) sia per la
-    transizione a replied.
-
-    `completed` e' incluso, non solo `in_sequence`: le campagne MVP sono a un
-    solo step (SDD Q29), quindi appena l'invio finisce il contatto passa a
-    `completed` e non torna mai `in_sequence`. Cercando solo `in_sequence` il
-    ramo replied era irraggiungibile in produzione -- il watcher non marcava
-    mai una risposta, non emetteva l'evento e non incrementava il contatore
-    proprio nello scenario normale (risposta che arriva ore o giorni dopo
-    l'unico messaggio). `queued` copre il caso simmetrico raro: risposta
-    arrivata prima che partisse il nostro invio.
-
-    Ordine per stato e non per data: SDD Q2 ammette max 1 campagna running
+def _priorita_riga():
+    """Ordine per stato e non per data: SDD Q2 ammette max 1 campagna running
     per numero, quindi in MVP le righe candidate sono realisticamente una
     sola. Se ce ne fossero piu' d'una (campagne diverse chiuse in momenti
     diversi), una sequenza ancora viva vale piu' di una gia' chiusa: e'
     quella che deve fermarsi."""
     from sqlalchemy import case
 
-    priorita = case(
+    return case(
         (WaCampaignContact.status == WaContactStatus.in_sequence, 0),
         (WaCampaignContact.status == WaContactStatus.queued, 1),
         else_=2,
     )
+
+
+async def _campagna_attiva_del_contatto(db, contact_id: str) -> WaCampaignContact | None:
+    """La riga wa_campaign_contacts cui attribuire un evento OPT-OUT, se c'e'
+    (serve il campaign_id per il log, il contatore e il breaker).
+
+    Include `queued` di proposito, e qui e' giusto: un opt-out non dipende
+    dall'aver ricevuto qualcosa da noi. Se il cliente scrive STOP a un numero
+    con cui era gia' in conversazione, quel STOP vale -- stringere anche questo
+    ramo significherebbe mandare marketing a chi ha detto di no.
+
+    Per la transizione a `replied` serve invece la funzione sotto: la' `queued`
+    e' esattamente il caso da escludere."""
     return await db.scalar(
         select(WaCampaignContact)
         .where(
@@ -136,7 +136,46 @@ async def _campagna_attiva_del_contatto(db, contact_id: str) -> WaCampaignContac
                                           WaContactStatus.completed,
                                           WaContactStatus.queued]),
         )
-        .order_by(priorita)
+        .order_by(_priorita_riga())
+    )
+
+
+async def _riga_da_marcare_replied(db, contact_id: str) -> WaCampaignContact | None:
+    """La riga da portare a `replied`, se e solo se ha GIA' RICEVUTO il nostro
+    messaggio.
+
+    `completed` e' incluso, non solo `in_sequence`: le campagne MVP sono a un
+    solo step (SDD Q29), quindi appena l'invio finisce il contatto passa a
+    `completed` e non torna mai `in_sequence`. Cercando solo `in_sequence` il
+    ramo replied era irraggiungibile in produzione -- nessun replied, nessun
+    evento, nessun contatore proprio nello scenario normale (risposta che
+    arriva ore o giorni dopo l'unico messaggio).
+
+    `queued` invece NON c'e' piu', e serve dire perche' era stato incluso: il
+    commento originale diceva che copriva "il caso simmetrico raro: risposta
+    arrivata prima che partisse il nostro invio". Ma quel caso non e' una
+    risposta, e `replied` e' TERMINALE: la riga esce dalla campagna e quel
+    contatto non riceve mai il messaggio. Non e' una statistica sbagliata, e'
+    un contatto scartato in silenzio senza essere mai stato contattato.
+    Misurato dal vivo il 12/08 sulla campagna dei 246 di Primero: **2 righe su
+    3** in `replied` avevano ZERO messaggi inviati -- conversazioni gia' in
+    corso col cliente, lette come risposte. Su un numero con molte chat vive la
+    perdita e' silenziosa e proporzionale al traffico legittimo.
+
+    `current_step >= 0` e' il secondo cancello, e non e' ridondante con lo
+    stato: `current_step` vale -1 all'arruolamento e passa a 0 col primo invio,
+    quindi e' il marcatore diretto di "ha ricevuto". Una riga chiusa senza aver
+    mai inviato (skip e poi chiusura) resta fuori anche se lo stato da solo la
+    ammetterebbe."""
+    return await db.scalar(
+        select(WaCampaignContact)
+        .where(
+            WaCampaignContact.contact_id == contact_id,
+            WaCampaignContact.status.in_([WaContactStatus.in_sequence,
+                                          WaContactStatus.completed]),
+            WaCampaignContact.current_step >= 0,
+        )
+        .order_by(_priorita_riga())
     )
 
 
@@ -192,7 +231,7 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
         except Exception as exc:
             logger.error(f"[WA] alert 'basta' ambiguo non inviato: {type(exc).__name__}")
 
-    cc_attiva = await _campagna_attiva_del_contatto(db, contatto.id)
+    cc_attiva = await _riga_da_marcare_replied(db, contatto.id)
     if cc_attiva is not None:
         cc_attiva.status = WaContactStatus.replied
         cc_attiva.replied_at_step = cc_attiva.current_step
