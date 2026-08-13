@@ -18,7 +18,7 @@ from app.services.wa_discover.classifica import (
     TIPO_GRUPPO, TIPO_IGNOTO, TIPO_INDIVIDUALE, RigaScoperta,
 )
 from app.services.wa_discover.salvataggio import salva_scoperta, tipo_vincente
-from app.utils.phone_pseudonym import hmac_phone
+from app.utils.phone_pseudonym import hmac_e164
 
 from tests.test_wa_discover_modello import _scoperte_di, numero_wa  # noqa: F401
 
@@ -37,7 +37,7 @@ async def test_il_numero_non_finisce_mai_in_chiaro(db_session, numero_wa):
     assert len(trovate) == 1
     salvata = trovate[0]
     assert salvata.chat_title is None
-    assert salvata.phone_hmac == hmac_phone("393421460077")
+    assert salvata.phone_hmac == hmac_e164("393421460077")
     assert "3421460077" not in (salvata.chat_title or "")
     assert "3421460077" not in (salvata.display_name or "")
 
@@ -58,7 +58,7 @@ async def test_riscansione_aggiorna_e_non_duplica(db_session, numero_wa):
     tutte = await _scoperte_di(db_session, numero_wa.id)
     assert len(tutte) == 1
     assert tutte[0].numero_leggibile is True         # il dato migliore vince
-    assert tutte[0].phone_hmac == hmac_phone("393421460077")
+    assert tutte[0].phone_hmac == hmac_e164("393421460077")
     assert tutte[0].tipo_chat == TIPO_INDIVIDUALE
     assert tutte[0].chat_title == "Fulvio"
 
@@ -80,7 +80,7 @@ async def test_fusione_non_perde_il_numero_gia_salvato(db_session, numero_wa):
 
     tutte = await _scoperte_di(db_session, numero_wa.id)
     assert len(tutte) == 1
-    assert tutte[0].phone_hmac == hmac_phone("393421460077"), \
+    assert tutte[0].phone_hmac == hmac_e164("393421460077"), \
         "il numero gia' salvato non deve sparire"
     assert tutte[0].numero_leggibile is True
     assert tutte[0].tipo_chat == TIPO_INDIVIDUALE, \
@@ -157,7 +157,7 @@ async def test_una_riga_promossa_non_torna_indietro(db_session, numero_wa):
     assert len(tutte) == 1, "la ri-scansione di una riga promossa non deve duplicarla"
     assert tutte[0].status == "promosso", \
         "una riga gia' promossa non deve tornare 'nuovo'"
-    assert tutte[0].phone_hmac == hmac_phone("393421460077"), \
+    assert tutte[0].phone_hmac == hmac_e164("393421460077"), \
         "la fusione continua a integrare anche su una riga promossa"
 
 
@@ -200,7 +200,7 @@ async def test_due_scansioni_concorrenti_stessa_chat_una_riga_sola(numero_wa):
             select(WaDiscoveredChat).where(WaDiscoveredChat.number_id == number_id)
         )).scalars().all()
     assert len(righe) == 1, "due scoperte concorrenti sulla stessa chat devono produrre una riga sola"
-    assert righe[0].phone_hmac == hmac_phone("393421460077")
+    assert righe[0].phone_hmac == hmac_e164("393421460077")
 
 
 @pytest.mark.asyncio

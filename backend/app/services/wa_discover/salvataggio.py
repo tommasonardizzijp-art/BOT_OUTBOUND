@@ -34,7 +34,7 @@ from app.services.wa_discover.classifica import (
     etichetta_visibile,
 )
 from app.utils.crypto import encrypt
-from app.utils.phone_pseudonym import hmac_phone
+from app.utils.phone_pseudonym import hmac_e164
 
 # Rango del tipo chat in una fusione: 'ignoto' e' l'unico stato che puo'
 # avanzare. Tra individuale e gruppo non c'e' un ordine di merito -- se un
@@ -144,7 +144,13 @@ async def salva_scoperta(db, tenant_id: str, number_id: str, riga: RigaScoperta)
     """
     etichetta = etichetta_visibile(riga.titolo, riga.numero)
     encrypted_phone = encrypt(riga.numero) if riga.numero else None
-    phone_hmac = hmac_phone(riga.numero) if riga.numero else None
+    # hmac_e164, non hmac_phone: riga.numero e' nudo (senza '+'), ed e'
+    # esattamente il punto in cui il '+' andava ricomposto e non lo era mai
+    # stato (AVVIO 12/08 §1) -- 246 contatti su 258 sono nati da qui nella
+    # forma sbagliata, invisibili al reply-watcher finche' non e' arrivato
+    # il cerotto (PR #75) e poi la migrazione (probe_hmac_duplicati.py +
+    # migra_hmac_forma_canonica.py, 13/08).
+    phone_hmac = hmac_e164(riga.numero) if riga.numero else None
 
     esistente = await _trova_esistente(db, number_id, etichetta, phone_hmac)
 
