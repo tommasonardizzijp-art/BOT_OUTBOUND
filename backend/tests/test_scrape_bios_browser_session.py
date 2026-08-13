@@ -1,4 +1,5 @@
 """Mini-sessione browser: rispetta il cap, scrapa i claimati, ritorna il defer."""
+import uuid
 from datetime import datetime
 import pytest
 
@@ -443,7 +444,11 @@ async def _anoop2_false(*a, **k): return False
 async def test_soft_block_threshold_pauses_campaign(monkeypatch):
     """Fix C: al N-esimo soft-block consecutivo (contatore pinnato al threshold),
     la campagna va in PAUSA e il defer e' None (stop al 429->defer->429), non un retry."""
-    base = 970000000000 + int(datetime.utcnow().timestamp()) % 100000
+    # uuid4(), non l'orologio: due test avviati nello stesso secondo
+    # generavano lo stesso base e collidevano sulla UNIQUE(campaign_id,
+    # ig_user_id) -- l'orologio non e' una sorgente di unicita' (stesso
+    # difetto gia' corretto altrove dalla PR #69).
+    base = 970000000000 + (uuid.uuid4().int % 100000)
     async with AsyncSessionLocal() as db:
         camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
         db.add(camp); await db.flush()
