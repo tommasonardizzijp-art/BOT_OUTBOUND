@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -301,6 +302,18 @@ class WaCampaignContact(Base):
 class WaMessage(Base):
     """Log invii, analogo di Message (SDD 5.2 wa_messages)."""
     __tablename__ = "wa_messages"
+    __table_args__ = (
+        # Indice unico PARZIALE, non una UniqueConstraint piena sulla tripla
+        # (AVVIO 12/08 §5, migration 034): wa_sender.py permette una riga
+        # nuova quando la precedente per lo stesso step e' 'failed' (retry).
+        # Solo 'sending'/'sent' sono lo stato che il codice applicativo gia'
+        # tratta come "invio gia' registrato, non rimandare" -- l'indice
+        # rispecchia quell'invariante, non lo stringe.
+        Index("uq_wa_messages_campaign_contact_step_attivo",
+             "campaign_id", "contact_id", "step_index", unique=True,
+             postgresql_where=text("status IN ('sending', 'sent')"),
+             sqlite_where=text("status IN ('sending', 'sent')")),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True,
                                     default=lambda: str(uuid.uuid4()))
