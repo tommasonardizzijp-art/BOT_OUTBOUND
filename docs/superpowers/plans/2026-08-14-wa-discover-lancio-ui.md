@@ -1388,6 +1388,33 @@ async def test_chat_sconosciuta_apre_il_pannello(conta_aperture):
 
 
 @pytest.mark.asyncio
+async def test_chat_col_numero_nel_titolo_si_salta_per_hmac(conta_aperture):
+    # Il caso che il primo tentativo sul campo aveva mancato: 194 righe su 241
+    # hanno il titolo mascherato a DB, quindi il confronto per titolo non
+    # scatta mai. La chiave e' l'hmac.
+    from app.utils.phone_pseudonym import hmac_phone
+
+    decisione = await wa_discover_run._decidi_riga(
+        _PaginaFinta(), {"titolo": "+39 334 802 8109", "titolo_e_numero": True},
+        titoli_noti=set(), hmac_noti={hmac_phone("+393348028109")})
+
+    assert decisione.saltata is True
+    assert decisione.riga is None
+    assert conta_aperture == []
+
+
+@pytest.mark.asyncio
+async def test_numero_nel_titolo_MAI_visto_non_si_salta(conta_aperture):
+    decisione = await wa_discover_run._decidi_riga(
+        _PaginaFinta(), {"titolo": "+39 334 802 8109", "titolo_e_numero": True},
+        titoli_noti=set(), hmac_noti=set())
+
+    assert decisione.saltata is False
+    assert decisione.riga is not None       # risolta dal titolo, senza aprire
+    assert conta_aperture == []
+
+
+@pytest.mark.asyncio
 async def test_senza_titoli_noti_si_comporta_come_prima(conta_aperture):
     decisione = await wa_discover_run._decidi_riga(
         _PaginaFinta(), {"titolo": "Chiunque", "titolo_e_numero": False})
@@ -1494,19 +1521,34 @@ Subito dopo `titolo = grezza.get("titolo")` (riga 105), prima del ramo `titolo_e
     # su PRIMERO MAGAZZINO (78 chat in 16 minuti). Su 900 chat sono ore, e il
     # discover periodico diventerebbe impraticabile.
     #
+    # LA CHIAVE E' L'HMAC, NON IL TITOLO. Provato sul campo il 14/08 e
+    # fallito: su 241 righe in staging, 194 hanno il titolo MASCHERATO
+    # (`+39•••••761`, vincolo P12) perche' il titolo E' il numero, mentre dal
+    # DOM quel titolo arriva in chiaro. Confrontando i titoli il salto scatta
+    # su 47 righe su 241 invece che su 232 -- cioe' quasi mai, proprio dove
+    # servirebbe di piu'. Il titolo resta il ripiego per le chat con un nome
+    # vero, che un numero nel titolo non ce l'hanno.
+    #
     # Conseguenza dichiarata: un contatto che cambia numero mantenendo lo
     # stesso nome non viene riverificato. Per lo scopo -- trovare chi ci ha
     # scritto di nuovo -- e' accettabile.
-    if titoli_noti and titolo in titoli_noti:
+    if titolo and titolo in titoli_noti:
         return DecisioneRiga(riga=None, ha_aperto=False, saltata=True)
+    if grezza.get("titolo_e_numero"):
+        numero_dal_titolo = classifica.numero_dal_titolo(titolo)
+        if numero_dal_titolo is not None and hmac_phone(numero_dal_titolo) in hmac_noti:
+            return DecisioneRiga(riga=None, ha_aperto=False, saltata=True)
 ```
 
 e la firma diventa:
 
 ```python
 async def _decidi_riga(page, grezza: dict, *,
-                       titoli_noti: set[str] | None = None) -> DecisioneRiga:
+                       titoli_noti: set[str] | None = None,
+                       hmac_noti: set[str] | None = None) -> DecisioneRiga:
 ```
+
+con `titoli_noti = titoli_noti or set()` e `hmac_noti = hmac_noti or set()` come prima riga del corpo, così i 13 test esistenti che chiamano `_decidi_riga(page, grezza)` continuano a passare. `hmac_phone` si importa da `app.utils.phone_pseudonym`, `classifica` è già importato nel modulo.
 
 - [ ] **Step 5: Conta i salti in `_esegui_scan`**
 
@@ -1524,18 +1566,27 @@ Nel dizionario iniziale (riga 153-156):
 Subito dopo `esito["dichiarato"] = await sidebar.totale_dichiarato(page)` (riga 193):
 
 ```python
-    # Titoli gia' in staging CON un numero: quelli senza vanno riprovati, e'
+    # Righe gia' in staging CON un numero: quelle senza vanno riprovate, e'
     # proprio il caso in cui il pannello non era arrivato.
+    #
+    # Si tengono DUE insiemi perche' le due chiavi coprono popolazioni
+    # diverse: l'hmac copre le chat il cui titolo e' il numero (194 su 241
+    # misurate il 14/08, e il loro chat_title a DB e' mascherato quindi
+    # inconfrontabile), il titolo copre quelle con un nome vero (47 su 241).
+    # Un titolo mascherato non entra nell'insieme dei titoli: non
+    # combacerebbe mai con quello che arriva dal DOM.
     from app.models.wa import WaDiscoveredChat
     noti = await db.execute(
-        select(WaDiscoveredChat.chat_title).where(
+        select(WaDiscoveredChat.chat_title, WaDiscoveredChat.phone_hmac).where(
             WaDiscoveredChat.number_id == number_id,
-            WaDiscoveredChat.chat_title.is_not(None),
             WaDiscoveredChat.phone_hmac.is_not(None)))
-    titoli_noti = {t for (t,) in noti.all()}
-    if titoli_noti:
-        logger.info(f"[WaDiscover] {number_id}: {len(titoli_noti)} chat gia' note "
-                    "con numero, non verranno riaperte")
+    coppie = noti.all()
+    hmac_noti = {h for _, h in coppie}
+    titoli_noti = {t for t, _ in coppie if t and "•" not in t}
+    if hmac_noti:
+        logger.info(f"[WaDiscover] {number_id}: {len(hmac_noti)} chat gia' note "
+                    f"col numero ({len(titoli_noti)} anche per titolo), "
+                    "non verranno riaperte")
 ```
 
 `select` va importato in cima al modulo se non c'è già (oggi è importato dentro `esegui_discover_run`; spostalo fra gli import di modulo).
@@ -1543,7 +1594,8 @@ Subito dopo `esito["dichiarato"] = await sidebar.totale_dichiarato(page)` (riga 
 Nel corpo del `for`, sostituisci le righe 224-233 con:
 
 ```python
-            decisione = await _decidi_riga(page, grezza, titoli_noti=titoli_noti)
+            decisione = await _decidi_riga(page, grezza, titoli_noti=titoli_noti,
+                                           hmac_noti=hmac_noti)
             if decisione.saltata:
                 esito["saltate_gia_note"] += 1
             elif decisione.riga is not None:
@@ -1567,12 +1619,25 @@ E nel calcolo di fine giro (riga 264) i salti entrano nel raccolto, altrimenti o
                 "(si ritentano al giro dopo)")
 ```
 
-- [ ] **Step 6: Esegui i test e verifica che passino**
+- [ ] **Step 6: Togli la pausa alle righe saltate**
+
+Alla riga 246 il motore aspetta dopo **ogni** riga. Una riga saltata non ha toccato WhatsApp — nessun click, nessuna apertura — e non c'è nessun ritmo da mascherare: pagarla è tempo buttato su una lista da 900. Sostituisci:
+
+```python
+            # Le righe saltate non hanno toccato WhatsApp: nessuna pausa da
+            # pagare. E' quello che rende rapido il ritorno al punto dove il
+            # giro precedente si era fermato, invece di ricamminare la lista
+            # a 0,3 secondi per riga.
+            if not decisione.saltata:
+                await asyncio.sleep(campiona_pausa(zona_pausa("piena", decisione.ha_aperto)))
+```
+
+- [ ] **Step 7: Esegui i test e verifica che passino**
 
 Run: `cd backend && ./venv/Scripts/python.exe -m pytest tests/test_wa_discover_incrementale.py tests/test_wa_discover_run.py -v`
-Expected: tutti verdi. I 13 test esistenti di `test_wa_discover_run.py` **devono restare verdi**: `titoli_noti` ha default `None`, quindi il comportamento senza incrementale non cambia.
+Expected: tutti verdi. I 13 test esistenti di `test_wa_discover_run.py` **devono restare verdi**: `titoli_noti` e `hmac_noti` hanno default `None`, quindi il comportamento senza incrementale non cambia.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add backend/app/services/wa_discover_run.py backend/tests/test_wa_discover_incrementale.py
