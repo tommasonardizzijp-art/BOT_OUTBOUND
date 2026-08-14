@@ -143,7 +143,7 @@ aggiornate       int
 saltate_gia_note int                  ← righe che l'incrementale non ha ricliccato
 non_verificate   int
 dichiarato       int NULL             ← aria-rowcount
-copertura        numeric NULL
+copertura        int NULL             ← percentuale 0-100, non una frazione
 motivo           String30             ← i 10 valori del motore
 sync_letta       int NULL
 sync_stato       letta | assente | ignota
