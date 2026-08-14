@@ -522,6 +522,13 @@ class Settings(BaseSettings):
     # senza limite dei 'completed' farebbe crescere la lista per sempre.
     wa_reply_scan_window_days: int = 3
 
+    # Un profilo WhatsApp costa ~1,2 GB misurati (M0). Sotto questa soglia il
+    # discover non parte: il caso peggiore non e' uno scan lento, e' l'OOM che
+    # uccide a meta' la mini-sessione d'invio che sta girando accanto.
+    wa_discover_ram_min_mb: int = 1500
+    # Quante run mostrare nello storico di /wa/scoperti.
+    wa_discover_storico_limit: int = 10
+
     # Lock Redis cross-processo sul profilo browser IG (C.2, passo 4): TTL
     # CORTO + rinnovo automatico dentro il chokepoint (context_manager),
     # non lungo per prudenza come il lock WA sopra (90min, gia' causa di un
