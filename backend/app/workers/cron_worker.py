@@ -172,6 +172,20 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     conta gia' wa_send_job_id ("un solo job di invio per numero"), qui usata al
     contrario -- si riaccoda e basta, e se il job c'era non succede niente.
 
+    C'e' pero' un QUINTO scenario, che e' l'unico che questo cron NON puo'
+    riparare riaccodando -- ed e' quello dell'incidente 14/08. Se il worker
+    principale viene ucciso mentre un `wa:send:*` e' checked-out, la sua chiave
+    `arq:in-progress:` resta orfana e ARQ salta per sempre quel job (fino alla
+    scadenza del TTL, fino a un'ora). Qui l'enqueue viene scartato perche' il
+    job ESISTE ancora: il supervisore contava "0 riaccodate", cioe' leggeva un
+    congelamento come normalita'. Da ora, quando l'enqueue viene scartato, si
+    guarda Redis per distinguere un job sano (schedulato nel futuro: break
+    anti-ban fra mini-sessioni) da uno congelato (score gia' scaduto + chiave
+    in-progress presente) e in quel caso si ALLARMA. Si allarma e basta: la
+    riparazione (cancellare la chiave) sta nella pulizia all'avvio del worker
+    principale, perche' e' l'unico processo che sa se il job sia davvero in
+    esecuzione -- vedi `_segnala_se_congelato` qui sotto.
+
     Il filtro "almeno una riga eleggibile ADESSO" non e' un'ottimizzazione: e'
     cio' che impedisce di aprire il browser ogni quindici minuti su una
     campagna che non ha piu' niente da fare, cioe' rumore su un canale il cui
@@ -191,7 +205,7 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     from app.services import bot_state_service
     from app.workers.wa_worker import enqueue_wa_workers
 
-    esito = {"controllate": 0, "riaccodate": 0}
+    esito = {"controllate": 0, "riaccodate": 0, "congelate": 0}
 
     if await bot_state_service.is_wa_halted():
         # A canale fermo il job uscirebbe subito con motivo 'wa_halted' senza
@@ -204,7 +218,9 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
 
     async with AsyncSessionLocal() as db:
         righe = (await db.execute(
-            select(WaCampaign.id)
+            # wa_number_id oltre all'id: serve a costruire il job id
+            # (`wa:send:{number_id}`) per il controllo di congelamento sotto.
+            select(WaCampaign.id, WaCampaign.wa_number_id)
             .join(WaNumber, WaNumber.id == WaCampaign.wa_number_id)
             .join(WaCampaignContact, WaCampaignContact.campaign_id == WaCampaign.id)
             .join(WaContact, WaContact.id == WaCampaignContact.contact_id)
@@ -224,20 +240,71 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
             .distinct()
         )).all()
 
-    for (campaign_id,) in righe:
+    for campaign_id, number_id in righe:
         esito["controllate"] += 1
         try:
             if await enqueue_wa_workers(campaign_id):
                 esito["riaccodate"] += 1
                 logger.warning(f"[WA] supervisore: campagna {campaign_id} era "
                                "running senza job di invio, riaccodata")
+            elif await _segnala_se_congelato(ctx, campaign_id, number_id):
+                esito["congelate"] += 1
         except Exception as exc:
             # Un guasto su una campagna non deve fermare le altre: stesso
             # pattern per-elemento gia' in uso in wa_session_healthcheck.
-            logger.error(f"[WA] supervisore: riaccodamento di {campaign_id} "
+            logger.error(f"[WA] supervisore: controllo di {campaign_id} "
                          f"fallito ({type(exc).__name__})")
 
     return esito
+
+
+async def _segnala_se_congelato(ctx: dict, campaign_id: str, number_id: str) -> bool:
+    """Enqueue scartato da ARQ: il job esiste gia'. Sano o congelato?
+
+    ⚠️ Solo allarme, MAI la cancellazione della chiave in-progress. Questo cron
+    gira in un processo diverso da quello che esegue il job (coda dedicata,
+    ARQ_CRON_QUEUE) e non ha modo di sapere se il worker principale lo stia
+    davvero eseguendo: cancellare da qui una chiave di un job VIVO lo farebbe
+    ripescare da un secondo poll -> seconda mini-sessione sullo stesso numero.
+    La riparazione sta all'avvio del worker principale
+    (wa_job_recovery.clear_orphan_wa_send_locks), l'unico punto in cui "nessun
+    job di questo processo e' in corso" e' vero per costruzione.
+    """
+    from loguru import logger
+
+    from app.services import notifier
+    from app.services.wa_job_recovery import wa_send_job_congelato
+
+    redis = ctx.get("redis")
+    proprio = redis is None
+    if proprio:
+        # Il worker ARQ mette sempre il pool in ctx['redis'] (come gia' fa
+        # telegram_commands): il fallback copre solo una chiamata fuori dal
+        # worker, e chiude il pool che apre.
+        import arq
+
+        from app.services.work_enqueue import arq_redis_settings
+        redis = await arq.create_pool(arq_redis_settings())
+    try:
+        job_id = await wa_send_job_congelato(redis, number_id)
+    finally:
+        if proprio:
+            await redis.aclose()
+
+    if job_id is None:
+        return False
+
+    logger.error(f"[WA] supervisore: campagna {campaign_id} eleggibile ma il job "
+                 f"{job_id} e' CONGELATO (in coda con lo score scaduto e la "
+                 "chiave in-progress ancora presente): nessun invio partira' "
+                 "finche' non si sblocca")
+    await notifier.send_telegram(
+        f"WhatsApp: job di invio CONGELATO ({job_id}). La campagna "
+        f"{campaign_id} ha contatti pronti ma nessuno esegue il job: una "
+        "chiave in-progress orfana (worker ucciso a meta' sessione) lo tiene "
+        f"fermo. Sblocco manuale: DEL arq:in-progress:{job_id}",
+        level="error")
+    return True
 
 
 async def wa_deadman_ping(ctx: dict) -> dict:
