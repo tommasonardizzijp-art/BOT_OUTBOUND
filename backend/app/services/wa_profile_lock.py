@@ -33,7 +33,13 @@ class WaProfileBusy(Exception):
     """Il profilo e' gia' in uso da un altro consumatore (invio/health-check/scan)."""
 
 
-def _lock_key(number_id: str) -> str:
+def lock_key(number_id: str) -> str:
+    """Nome della chiave del lucchetto. Pubblica (era `_lock_key`) perche' la
+    sua PRESENZA e' il segnale "qualcuno sta davvero lavorando su questo
+    numero", e serve anche a chi vuole solo leggerlo con un pool gia' in mano
+    (wa_job_recovery.wa_send_job_congelato). Sola lettura: acquisire e
+    rilasciare restano compito di `held`, che e' l'unico posto in cui il
+    confronto sul token e' fatto bene."""
     return f"wa:profile-lock:{number_id}"
 
 
@@ -55,7 +61,7 @@ async def held(number_id: str, *, ttl_min: int | None = None):
     valore a Redis e' ancora il TOKEN di questa acquisizione."""
     ttl_s = (ttl_min if ttl_min is not None else settings.wa_profile_lock_ttl_min) * 60
     token = uuid.uuid4().hex
-    key = _lock_key(number_id)
+    key = lock_key(number_id)
 
     redis = await arq.create_pool(arq_redis_settings())
     try:
@@ -93,7 +99,7 @@ async def renew(number_id: str, token: str, *, ttl_min: int | None = None) -> bo
     corso, e il chiamante non ha nulla di sensato da fare con l'errore --
     resta il TTL gia' impostato piu' il cap wall-clock del chiamante."""
     ttl_s = (ttl_min if ttl_min is not None else settings.wa_profile_lock_ttl_min) * 60
-    key = _lock_key(number_id)
+    key = lock_key(number_id)
     try:
         redis = await arq.create_pool(arq_redis_settings())
         try:

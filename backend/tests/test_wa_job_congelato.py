@@ -178,6 +178,39 @@ async def test_supervisore_segnala_il_job_congelato(db_session, _enqueue_scartat
 
 
 @pytest.mark.asyncio
+async def test_supervisore_muto_mentre_la_mini_sessione_lavora(db_session, _enqueue_scartato,
+                                                               _telegram_spia, fake_redis):
+    """ARQ toglie il job dal sorted set solo in `finish_job`: per TUTTA la
+    durata di una mini-sessione normale (8-17 minuti) lo score in coda resta
+    quello vecchio e la chiave in-progress c'e'. A Redis, alla lettera, e'
+    identico a un congelamento -- e il supervisore gira ogni 15 minuti, quindi
+    senza questo controllo urlerebbe a ogni giro mentre tutto va bene, cioe'
+    insegnerebbe a ignorare l'allarme prima del congelamento vero.
+
+    Cio' che distingue i due casi e' il lucchetto di profilo, che
+    esegui_mini_sessione tiene per tutta la sessione e rinnova a ogni
+    messaggio."""
+    import time
+
+    from app.services import wa_profile_lock
+    from app.workers import cron_worker
+    from app.workers.wa_worker import wa_send_job_id
+
+    ctx_db = await _scenario_eleggibile(db_session)
+    number_id = ctx_db["numero"].id
+    job_id = wa_send_job_id(number_id)
+    await fake_redis.zadd("arq:queue", {job_id: time.time() * 1000 - 60_000})
+    await fake_redis.set(f"arq:in-progress:{job_id}", b"1")
+    await fake_redis.set(wa_profile_lock.lock_key(number_id),
+                         f"token-vivo:{int(time.time() * 1000)}")
+
+    esito = await cron_worker.wa_campaign_supervisor({"redis": fake_redis})
+
+    assert esito["congelate"] == 0
+    assert _telegram_spia == []
+
+
+@pytest.mark.asyncio
 async def test_supervisore_muto_sul_break_fra_mini_sessioni(db_session, _enqueue_scartato,
                                                             _telegram_spia, fake_redis):
     """Controprova: job schedulato nel FUTURO e nessuna chiave in-progress. E' il

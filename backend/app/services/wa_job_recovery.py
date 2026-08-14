@@ -80,7 +80,29 @@ async def wa_send_job_congelato(redis, number_id: str) -> str | None:
 
     Score scaduto ma senza chiave in-progress non e' un congelamento: e' un job
     che il worker raccogliera' al prossimo poll (mezzo secondo).
+
+    ⚠️ Score scaduto + in-progress NON bastano. ARQ toglie il job dal sorted set
+    solo in `finish_job` (arq/worker.py: `tr.zrem(self.queue_name, job_id)`),
+    quindi per TUTTA la durata di una mini-sessione normale -- 8-17 minuti, e il
+    supervisore gira ogni 15 -- lo stato a Redis e' identico a quello di un
+    congelamento. Senza il terzo controllo l'allarme suonerebbe a ogni giro
+    mentre il canale invia benissimo, cioe' insegnerebbe a ignorarlo.
+
+    Il terzo controllo e' il lucchetto di profilo (`wa:profile-lock:{number_id}`),
+    l'unico segnale che dice "qualcuno sta DAVVERO lavorando su questo numero":
+    esegui_mini_sessione lo tiene per tutta la sessione e lo rinnova a ogni
+    messaggio. Se il worker muore a meta', il lucchetto resta orfano finche' non
+    lo raccoglie release_stale_wa_profile_locks (cron :05/:20/:35/:50, soglia
+    wa_profile_lock_stale_min=25 min): il congelamento viene quindi segnalato con
+    al piu' una mezz'ora di ritardo, invece che mai. Si riusa quella disciplina
+    invece di introdurre una soglia nuova.
+
+    Finestra residua dichiarata, non chiusa: fra l'inizio del job e
+    l'acquisizione del lucchetto ci sono i cancelli di precheck (pochi secondi).
+    Un tick del supervisore che cadesse esattamente li' darebbe un falso
+    allarme: secondi contro minuti, si accetta.
     """
+    from app.services import wa_profile_lock
     from app.services.work_enqueue import ARQ_MAIN_QUEUE
     from app.workers.wa_worker import wa_send_job_id
 
@@ -89,5 +111,7 @@ async def wa_send_job_congelato(redis, number_id: str) -> str | None:
     if score is None or score > time.time() * 1000:
         return None
     if not await redis.exists(f"{IN_PROGRESS_PREFIX}{job_id}"):
+        return None
+    if await redis.exists(wa_profile_lock.lock_key(number_id)):
         return None
     return job_id

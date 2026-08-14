@@ -179,9 +179,13 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     scadenza del TTL, fino a un'ora). Qui l'enqueue viene scartato perche' il
     job ESISTE ancora: il supervisore contava "0 riaccodate", cioe' leggeva un
     congelamento come normalita'. Da ora, quando l'enqueue viene scartato, si
-    guarda Redis per distinguere un job sano (schedulato nel futuro: break
-    anti-ban fra mini-sessioni) da uno congelato (score gia' scaduto + chiave
-    in-progress presente) e in quel caso si ALLARMA. Si allarma e basta: la
+    guarda Redis per distinguere un job sano -- schedulato nel futuro (break
+    anti-ban fra mini-sessioni) oppure in esecuzione adesso (lucchetto di
+    profilo presente: ARQ lascia il job in coda con lo score vecchio per tutta
+    la sessione, quindi score scaduto + chiave in-progress da soli NON bastano
+    a dire "congelato") -- da uno congelato davvero, e in quel caso si ALLARMA.
+    Il predicato completo, col perche' di ognuno dei tre controlli, sta in
+    wa_job_recovery.wa_send_job_congelato. Si allarma e basta: la
     riparazione (cancellare la chiave) sta nella pulizia all'avvio del worker
     principale, perche' e' l'unico processo che sa se il job sia davvero in
     esecuzione -- vedi `_segnala_se_congelato` qui sotto.
