@@ -2323,12 +2323,206 @@ git commit -m "feat(wa): testata con esito dello scan e storico in /wa/scoperti"
 
 ---
 
+
+## Task 10: Chiusura delle run orfane
+
+**Files:**
+- Modify: `backend/app/services/wa_discover_runs.py`
+- Modify: `backend/app/services/wa_discover_gate.py`
+- Modify: `backend/app/config.py`
+- Test: `backend/tests/test_wa_discover_run_orfana.py`
+
+**Interfaces:**
+- Consumes: `run_attiva`, `chiudi_run` (Task 2), `puo_lanciare` (Task 3)
+- Produces: `async def chiudi_se_orfana(db, number_id) -> bool` in `wa_discover_runs`
+
+**Perché questo task esiste.** La review del Task 2 ha notato che la lista adversarial promette di verificare che "una run lasciata `running` non blocchi il numero per sempre", ma nessun task implementava chi la chiude. Con l'indice unico parziale del Task 1, una run `running` che nessuno chiude rende quel numero **non più scansionabile finché qualcuno non entra nel DB a mano** — e i modi per arrivarci esistono già: worker ARQ ucciso a metà scan, macchina riavviata, processo OOM. Oggi 14/08 è successo tre volte in poche ore con gli script manuali, ogni volta lasciando un lucchetto Redis orfano da rimuovere a mano.
+
+Si risolve **nel gate invece che in un cron**: chi tenta di scansionare è esattamente chi ha bisogno che la run vecchia sia chiusa, e un cron in più è un pezzo in più che può a sua volta rompersi in silenzio. Auto-guarigione nel punto in cui serve.
+
+- [ ] **Step 1: Aggiungi l'impostazione**
+
+In `backend/app/config.py`, accanto alle altre `wa_discover_*`:
+
+```python
+    # Oltre questo tempo una run 'running' non e' piu' credibile: uno scan
+    # lungo su 900 chat sta sotto le 3 ore, e il TTL del lucchetto di profilo
+    # e' 90 minuti -- se il lucchetto e' scaduto e la run e' ancora aperta,
+    # il worker che doveva chiuderla non c'e' piu'.
+    wa_discover_run_orfana_min: int = 240
+```
+
+- [ ] **Step 2: Scrivi il test che fallisce**
+
+Crea `backend/tests/test_wa_discover_run_orfana.py`:
+
+```python
+from datetime import datetime, timedelta
+
+import pytest
+
+from app.services import wa_discover_gate, wa_discover_runs
+from tests.factories_wa import make_discover_run, make_number, make_tenant
+
+
+@pytest.mark.asyncio
+async def test_run_recente_non_viene_chiusa(db_session):
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id, number_id=number.id)
+    await db_session.commit()
+
+    assert await wa_discover_runs.chiudi_se_orfana(db_session, number.id) is False
+    assert await wa_discover_runs.run_attiva(db_session, number.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_run_vecchia_viene_chiusa_come_orfana(db_session):
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
+                                          number_id=number.id)
+    run.started_at = datetime.utcnow() - timedelta(hours=9)
+    await db_session.commit()
+
+    assert await wa_discover_runs.chiudi_se_orfana(db_session, number.id) is True
+    await db_session.commit()
+
+    assert await wa_discover_runs.run_attiva(db_session, number.id) is None
+    chiusa = await wa_discover_runs.ultima_run(db_session, number.id)
+    assert chiusa.stato == "failed"
+    assert chiusa.motivo == "run_orfana"
+
+
+@pytest.mark.asyncio
+async def test_senza_nessuna_run_non_fa_niente(db_session):
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await db_session.commit()
+
+    assert await wa_discover_runs.chiudi_se_orfana(db_session, number.id) is False
+
+
+@pytest.mark.asyncio
+async def test_il_gate_sblocca_il_numero_dopo_aver_chiuso_l_orfana(db_session, monkeypatch):
+    # L'invariante che conta: un worker morto NON deve rendere il numero
+    # non piu' scansionabile per sempre.
+    async def _async_none(*a, **kw):
+        return None
+
+    async def _async_false(*a, **kw):
+        return False
+
+    monkeypatch.setattr(wa_discover_gate.bot_state_service, "is_wa_halted", _async_false)
+    monkeypatch.setattr(wa_discover_gate.wa_profile_lock, "profilo_occupato_da", _async_none)
+    monkeypatch.setattr(wa_discover_gate, "ram_libera_mb", lambda: 4000)
+
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
+                                          number_id=number.id)
+    run.started_at = datetime.utcnow() - timedelta(hours=9)
+    await db_session.commit()
+
+    assert await wa_discover_gate.puo_lanciare(db_session, number) is None
+
+
+@pytest.mark.asyncio
+async def test_il_gate_rifiuta_ancora_se_la_run_e_recente(db_session, monkeypatch):
+    async def _async_none(*a, **kw):
+        return None
+
+    async def _async_false(*a, **kw):
+        return False
+
+    monkeypatch.setattr(wa_discover_gate.bot_state_service, "is_wa_halted", _async_false)
+    monkeypatch.setattr(wa_discover_gate.wa_profile_lock, "profilo_occupato_da", _async_none)
+    monkeypatch.setattr(wa_discover_gate, "ram_libera_mb", lambda: 4000)
+
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id, number_id=number.id)
+    await db_session.commit()
+
+    assert await wa_discover_gate.puo_lanciare(db_session, number) == "scan_gia_in_corso"
+```
+
+- [ ] **Step 3: Esegui il test e verifica che fallisca**
+
+Run: `cd backend && ./venv/Scripts/python.exe -m pytest tests/test_wa_discover_run_orfana.py -v`
+Expected: FAIL con `AttributeError: module 'app.services.wa_discover_runs' has no attribute 'chiudi_se_orfana'`
+
+- [ ] **Step 4: Implementa `chiudi_se_orfana`**
+
+In `backend/app/services/wa_discover_runs.py`. Aggiungi `"run_orfana"` a `MOTIVI_NON_GUASTO`? **No**: una run orfana è un guasto vero e deve restare `failed` — è l'unica traccia che un worker è morto.
+
+```python
+async def chiudi_se_orfana(db, number_id: str) -> bool:
+    """Chiude una run rimasta 'running' oltre ogni tempo credibile.
+
+    True se ne ha chiusa una. Serve perche' l'indice unico parziale rende un
+    numero non piu' scansionabile finche' esiste una run aperta: un worker
+    ucciso a meta' scan, senza questa, lo blocca per sempre.
+
+    Si chiama dal gate e non da un cron di proposito: chi tenta di
+    scansionare e' esattamente chi ha bisogno che la vecchia sia chiusa, e un
+    cron in piu' e' un pezzo in piu' che puo' rompersi in silenzio.
+    """
+    run = await run_attiva(db, number_id)
+    if run is None:
+        return False
+    limite = datetime.utcnow() - timedelta(minutes=settings.wa_discover_run_orfana_min)
+    if run.started_at > limite:
+        return False
+    logger.warning(f"[WaDiscover] run {run.id} su {number_id} aperta da oltre "
+                   f"{settings.wa_discover_run_orfana_min} minuti: chiusa come orfana "
+                   "(il worker che doveva chiuderla non c'e' piu')")
+    await chiudi_run(db, run.id, {},
+                     errore=f"run rimasta aperta oltre {settings.wa_discover_run_orfana_min} "
+                            "minuti senza che nessuno la chiudesse")
+    # chiudi_run scrive motivo='errore_imprevisto' per la via dell'errore: qui
+    # il motivo vero e' un altro, e distinguerlo serve a chi legge lo storico.
+    run.motivo = "run_orfana"
+    await db.flush()
+    return True
+```
+
+Servono gli import di `timedelta`, `settings` e `logger` in cima al modulo.
+
+- [ ] **Step 5: Collega il gate**
+
+In `backend/app/services/wa_discover_gate.py`, **prima** del controllo `run_attiva`:
+
+```python
+    # Auto-guarigione: una run che nessuno ha chiuso non deve bloccare il
+    # numero per sempre. Va prima del controllo qui sotto, altrimenti la
+    # guardia rifiuterebbe basandosi su una run morta.
+    await wa_discover_runs.chiudi_se_orfana(db, number.id)
+
+    if await wa_discover_runs.run_attiva(db, number.id) is not None:
+        return "scan_gia_in_corso"
+```
+
+- [ ] **Step 6: Esegui i test e verifica che passino**
+
+Run: `cd backend && ./venv/Scripts/python.exe -m pytest tests/test_wa_discover_run_orfana.py tests/test_wa_discover_gate.py -v`
+Expected: 13 passed (5 nuovi + gli 8 del Task 3, che devono restare verdi)
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add backend/app/services/wa_discover_runs.py backend/app/services/wa_discover_gate.py backend/app/config.py backend/tests/test_wa_discover_run_orfana.py
+git commit -m "feat(wa): il gate chiude da solo le run rimaste aperte"
+```
+
+---
+
 ## Chiusura del modulo
 
 Protocollo obbligatorio della skill `sviluppo-modulo`, nell'ordine:
 
 1. **Lista test manuali UI, minimo 20**, scritta come la eseguirebbe Tommaso, passo per passo. Salvala in `.superpowers/sdd/qa-wa-discover-lancio-tests.md`. Casi che non possono mancare: bottone su numero mai scansionato · su numero già scansionato · durante una campagna che invia (deve rifiutare con la frase giusta) · durante un'altra scansione · su numero `pending_qr`/`retired` · col kill-switch alzato · doppio click ravvicinato · ricarica della pagina a scansione in corso · toast unico a fine scansione · storico che si apre e mostra le run in ordine · riscansione da `/wa/scoperti` che fa comparire le chat nuove senza ricaricare.
-2. **Lista adversarial, minimo 30**, in `.superpowers/sdd/qa-wa-discover-lancio-adversarial.md`. Criterio di PASS **invertito**: passa se il sistema si difende. Obbligatorie: due `POST` concorrenti veri con `asyncio.gather` su sessioni DB indipendenti (deve vincerne uno solo — l'indice unico parziale è lì per questo) · `number_id` di un altro tenant · `number_id` malformato, vuoto, di 10k caratteri, con null byte · run lasciata `running` a mano e verifica che il numero non resti bloccato per sempre · worker ARQ spento e `POST` (deve dare `accodamento_fallito` e chiudere la run) · Redis irraggiungibile durante il gate · lock di un altro numero presente · RAM sotto soglia simulata · motivo del motore non mappato in `MOTIVO_LABEL` (la UI non deve restare muta) · `detail` oggetto nel 409 che non deve mai diventare `[object Object]` · invarianti SQL a fine run: nessuna run `running` orfana, nessun `wa_messages` scritto durante uno scan **filtrando per number_id**, nessun numero in chiaro in `wa_discover_runs.errore`.
+2. **Lista adversarial, minimo 30**, in `.superpowers/sdd/qa-wa-discover-lancio-adversarial.md`. Criterio di PASS **invertito**: passa se il sistema si difende. Obbligatorie: due `POST` concorrenti veri con `asyncio.gather` su sessioni DB indipendenti (deve vincerne uno solo — l'indice unico parziale è lì per questo) · `number_id` di un altro tenant · `number_id` malformato, vuoto, di 10k caratteri, con null byte · run lasciata `running` a mano oltre il TTL, e verifica che il gate del Task 10 la chiuda e sblocchi il numero · due `chiudi_run` concorrenti sulla stessa run con `asyncio.gather` (la riga finale dev'essere coerente, mai un ibrido `failed` con i contatori di una raccolta riuscita) · worker ARQ spento e `POST` (deve dare `accodamento_fallito` e chiudere la run) · Redis irraggiungibile durante il gate · lock di un altro numero presente · RAM sotto soglia simulata · motivo del motore non mappato in `MOTIVO_LABEL` (la UI non deve restare muta) · `detail` oggetto nel 409 che non deve mai diventare `[object Object]` · invarianti SQL a fine run: nessuna run `running` orfana, nessun `wa_messages` scritto durante uno scan **filtrando per number_id**, nessun numero in chiaro in `wa_discover_runs.errore`.
 3. **Fix loop fino al 100%.** "Quasi tutti" = modulo non chiuso.
 4. **Review finale dell'intero branch** (`superpowers:requesting-code-review`).
 5. **PR verso `main`.** Migrazione `035` da applicare **prima** del riavvio del backend: una colonna mancante è un 500 al primo `GET`.
