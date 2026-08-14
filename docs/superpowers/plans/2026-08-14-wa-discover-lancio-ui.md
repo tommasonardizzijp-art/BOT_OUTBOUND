@@ -1008,7 +1008,7 @@ e la voce in fondo a `WorkerSettings.functions`, dopo `run_organic_session_task`
 - [ ] **Step 5: Esegui i test e verifica che passino**
 
 Run: `cd backend && ./venv/Scripts/python.exe -m pytest tests/test_wa_discover_worker.py -v`
-Expected: 5 passed
+Expected: 4 passed (il blocco contiene 4 funzioni test_* piu un helper _sessione_finta, che pytest non colleziona)
 
 - [ ] **Step 6: Commit**
 
