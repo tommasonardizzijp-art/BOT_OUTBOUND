@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 
 from app.models.wa import WaDiscoverRun
 
@@ -31,7 +31,15 @@ MOTIVI_NON_GUASTO = {
 # dentro un messaggio d'eccezione. Stesso pattern di scripts/poc_wa/wa_lib.py
 # (mask_pii): sequenze di 6+ cifre, separate o no, sono quasi certamente un
 # numero e non servono a diagnosticare il guasto.
-_NUM_RE = re.compile(r"\d(?:[\s.\-/]?\d){5,}")
+#
+# [\s.\-/]{0,3}, non [\s.\-/]? (un solo separatore): con due separatori
+# consecutivi -- doppio spazio, o il doppio no-break space visto in un
+# titolo WhatsApp vero ('Sofia\xa0\xa0D'ari') -- la versione a un solo
+# carattere lascia scoperto il pezzo di cifre prima del secondo separatore
+# (verificato: "333\xa0\xa01234567" -> "333\xa0\xa0<num>", "333" in chiaro).
+# {0,3} copre i casi osservati senza normalizzare gli spazi Unicode prima:
+# un carattere in piu' nella stessa regex, niente passaggio aggiuntivo.
+_NUM_RE = re.compile(r"\d(?:[\s.\-/]{0,3}\d){5,}")
 
 
 def _sanifica_errore(errore: str) -> str:
@@ -63,33 +71,52 @@ async def apri_run(db, *, tenant_id: str, number_id: str,
 
 
 async def chiudi_run(db, run_id: str, esito: dict, *, errore: str | None = None) -> None:
-    """Scrive l'esito e chiude la run. Idempotente: una run gia' chiusa non
-    viene toccata -- il worker puo' chiamare questa due volte (percorso
-    normale + guardia nel finally) e la seconda non deve cancellare la prima.
-    """
-    run = await db.scalar(select(WaDiscoverRun).where(WaDiscoverRun.id == run_id))
-    if run is None or run.stato != "running":
-        return
+    """Scrive l'esito e chiude la run. Compare-and-swap SQL, non
+    SELECT-poi-scrivi: un solo UPDATE ... WHERE id=:id AND stato='running'.
 
+    Il worker (Task 4, a fine scan) e l'endpoint (Task 5, quando
+    l'accodamento ARQ fallisce) possono chiamare questa funzione sulla
+    STESSA run quasi in contemporanea. Con una SELECT seguita da uno UPDATE
+    in Python (versione precedente) la guardia 'if run.stato != running' non
+    e' atomica fra sessioni diverse: due chiamate indipendenti la superano
+    entrambe e scrivono, in ordine imprevedibile, producendo un ibrido --
+    riprodotto 3/3 in review con due chiudi_run in asyncio.gather su due
+    sessioni indipendenti (una chiudeva con successo, l'altra con errore: la
+    riga finale mescolava stato='failed' coi contatori della run riuscita).
+    Il WHERE nell'UPDATE e' la guardia, valutata dal DB in una singola
+    operazione atomica: se un'altra sessione ha gia' chiuso la run, la
+    UPDATE non tocca nessuna riga e non si scrive nulla -- stessa idempotenza
+    di prima, garantita dal DB e non da un controllo Python fra due query
+    separate.
+    """
+    ora = datetime.utcnow()
     if errore is not None:
-        run.stato = "failed"
-        run.motivo = "errore_imprevisto"
-        run.errore = _sanifica_errore(errore)[:2000]
+        valori = {
+            "stato": "failed",
+            "motivo": "errore_imprevisto",
+            "errore": _sanifica_errore(errore)[:2000],
+            "finished_at": ora,
+        }
     else:
         motivo = esito.get("motivo", "completato")
-        run.stato = "done" if motivo in MOTIVI_NON_GUASTO else "failed"
-        run.motivo = motivo
-        run.salvate = esito.get("salvate", 0)
-        run.aggiornate = esito.get("aggiornate", 0)
-        run.saltate_gia_note = esito.get("saltate_gia_note", 0)
-        run.non_verificate = esito.get("non_verificate", 0)
-        run.dichiarato = esito.get("dichiarato")
-        run.copertura = calcola_copertura(esito)
-        run.sync_letta = esito.get("sync_letta")
-        run.sync_stato = esito.get("sync_stato", "ignota")
+        valori = {
+            "stato": "done" if motivo in MOTIVI_NON_GUASTO else "failed",
+            "motivo": motivo,
+            "salvate": esito.get("salvate", 0),
+            "aggiornate": esito.get("aggiornate", 0),
+            "saltate_gia_note": esito.get("saltate_gia_note", 0),
+            "non_verificate": esito.get("non_verificate", 0),
+            "dichiarato": esito.get("dichiarato"),
+            "copertura": calcola_copertura(esito),
+            "sync_letta": esito.get("sync_letta"),
+            "sync_stato": esito.get("sync_stato", "ignota"),
+            "finished_at": ora,
+        }
 
-    run.finished_at = datetime.utcnow()
-    await db.flush()
+    await db.execute(
+        update(WaDiscoverRun)
+        .where(WaDiscoverRun.id == run_id, WaDiscoverRun.stato == "running")
+        .values(**valori))
 
 
 async def run_attiva(db, number_id: str) -> WaDiscoverRun | None:
