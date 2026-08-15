@@ -17,8 +17,12 @@ from app.models.wa import WaDiscoverRun
 # si chiude 'done' anche con questi, perche' il sistema ha fatto la cosa
 # giusta (non ha scansionato, e ha detto perche').
 MOTIVI_NON_GUASTO = {
+    # "sync_ignota" NON c'e' piu': dal 15/08 il gate procede su "ignota"
+    # invece di fermarsi (puo_scansionare_lettura), quindi il motore non lo
+    # produce piu' come esito di rifiuto. Lo stato resta visibile in
+    # sync_stato, solo non e' piu' un motivo di run.
     "completato", "raccolta_parziale", "fermato_dopo_stallo",
-    "sync_sotto_soglia", "sync_ignota", "sidebar_coperta", "wa_halted",
+    "sync_sotto_soglia", "sidebar_coperta", "wa_halted",
     "numero_non_attivo", "profilo_occupato", "sessione_non_loggata",
 }
 

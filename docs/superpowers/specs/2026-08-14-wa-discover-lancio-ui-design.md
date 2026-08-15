@@ -213,8 +213,16 @@ Il lavoro da fare, in ordine:
 1. **Ricatturare il selettore** di Impostazioni dal DOM vero e aggiornare
    `docs/whatsapp/wa-dom-catalog.md`.
 2. **Separare i tre `None`** in `letta` / `assente` / `ignota`.
-3. Su `ignota`: **attendere e ritentare** fino a un tetto, poi chiudere la run
-   con quel motivo invece di procedere alla cieca.
+3. ~~Su `ignota`: attendere e ritentare fino a un tetto, poi chiudere la run
+   con quel motivo invece di procedere alla cieca.~~ **Corretto il 15/08**:
+   verificato che il selettore non trova MAI la voce (punto 1 non fatto,
+   sessione scarica), quindi "ignota" è lo stato permanente su questo
+   profilo — attendere e rifiutare avrebbe spento il discover del tutto, non
+   protetto una scansione alla cieca. Su `ignota` si **procede**, dichiarando
+   il motivo; niente ritentativo (aspettare non cambia un selettore
+   sbagliato); la rete di sicurezza resta la copertura (§5/G7), non questo
+   gate. Quando il punto 1 sarà fatto e il selettore verificato funzionante,
+   si potrà tornare a far rifiutare "ignota" — non prima.
 
 Fatto extra da registrare nel catalogo DOM: **WhatsApp sincronizza solo mentre
 il browser è aperto**. Un numero appena collegato ha bisogno di una finestra di
@@ -284,7 +292,8 @@ Test, uno per comportamento distinto:
 - salto delle chat note in `_decidi_riga`: nota con numero → salta; nota senza
   numero → apre; sconosciuta → apre;
 - tri-stato del gate sync: `letta` / `assente` / `ignota`, e su `ignota` la run
-  si chiude senza scansionare;
+  **procede** (corretto il 15/08: il selettore non trova mai la voce su
+  questo profilo, fermarsi qui avrebbe spento il discover del tutto);
 - chiusura della run: su successo, su eccezione del motore, su worker morto
   (run `running` orfana oltre il TTL);
 - conteggio di copertura con i salti inclusi.
