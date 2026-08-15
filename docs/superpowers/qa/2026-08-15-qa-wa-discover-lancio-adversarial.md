@@ -38,23 +38,38 @@ Livello misto: browser per cio' che la UI esprime, chiamata diretta all'API (scr
 ## B. Numeri ostili (13-18)
 
 13. `wa_discover_run_orfana_min` e `wa_discover_job_timeout_s` impostati a valori incoerenti (`orfana_min` sotto `job_timeout_s/60`) → l'avvio del backend deve fallire con un `ValueError` esplicito (il `model_validator`, Task 10), non un comportamento silenziosamente sbagliato in produzione.
+    - **PASS (15/08)** — nessun test dedicato esisteva. Script nuovo `backend/scripts/qa_wa_discover/adv_b_numeri_ostili.py`: `Settings.model_validate()` coi default reali passa, con `orfana_min=100` contro `job_timeout_s=21600` (360 min) solleva `ValidationError` esplicito che nomina `wa_discover_run_orfana_min`.
 14. `copertura` calcolata con `salvate+aggiornate+saltate_gia_note` superiore al `dichiarato` (es. dichiarato sceso fra un giro e l'altro) → clampata a 100, mai un valore tipo 137 mostrato in UI.
+    - **PASS (15/08)** — gia' coperto da `test_copertura_non_supera_cento` in `backend/tests/test_wa_discover_runs_servizio.py` (test unit puro e deterministico), rieseguito ora.
 15. `dichiarato = 0` o `dichiarato = null` → `copertura` resta `None`/non calcolata, mai una divisione per zero che fa esplodere l'endpoint.
+    - **PASS (15/08)** — gia' coperto da `test_copertura_none_se_il_dichiarato_manca` e `test_copertura_none_se_il_dichiarato_e_zero` nello stesso file, rieseguiti ora.
 16. Contatori (`salvate`, `aggiornate`, `saltate_gia_note`, `non_verificate`) a valori enormi (simulare scrivendo direttamente a DB un intero grande) → la UI li mostra senza overflow di formattazione ne' crash del rendering.
+    - **PASS parziale (15/08)** — verificata solo la meta' backend (nessun frontend in esecuzione): script nuovo, contatori a 10^15 scritti a DB, `GET /discover` risponde 200 col valore intatto nel JSON (nessun overflow/troncamento silenzioso lato server). La parte UI (formattazione, non-crash del rendering) resta da fare quando il frontend e' in esecuzione.
 17. `wa_discover_ram_min_mb` mockato a un valore negativo o a zero → il gate non deve rifiutare tutto ne' lasciare passare sempre per errore di confronto: verificare il comportamento reale e documentarlo.
+    - **PASS/documentato (15/08)** — nessun crash con soglia 0 o -500. Comportamento reale osservato: con soglia <= 0 la guardia RAM non rifiuta MAI (`ram_libera_mb()` e' sempre >= 0), quindi diventa un no-op permanente -- conseguenza diretta e prevedibile del confronto `<`, non un comportamento indefinito.
 18. `soglia_sync` passata a `esegui_discover_run` fuori range (negativa, o 1000) → nessun crash del gate di sincronizzazione, comportamento definito (o rifiuta sempre, o non rifiuta mai, ma senza eccezione non gestita).
+    - **PASS (15/08)** — stesso script. `puo_scansionare`/`puo_scansionare_lettura` chiamate con soglia -50 e 1000 su vari input: nessuna eccezione, comportamento coerente col semplice confronto numerico (soglia -50 non rifiuta mai, soglia 1000 rifiuta sempre le percentuali numeriche, i casi `assente`/`ignota`/`None` restano `True` per design indipendentemente dalla soglia).
 
 ## C. Stringhe e id ostili (19-25)
 
 19. `number_id` di un ALTRO tenant → `404` (mai un dato di un tenant che trapela in un altro, IDOR).
+    - **N/A, non come scritto (15/08)** — verificato leggendo `app/models/user.py` e `app/utils/auth_deps.py`: `User` non ha un `tenant_id`, un solo ruolo globale admin/operator, nessuno scoping per-tenant sui token. Non esiste "il tenant di chi chiede" da confrontare col numero. La barriera IDOR reale che il codice implementa e' un'altra (il tenant si risolve sempre dal numero, mai dal client) -- verificata per davvero al caso 31.
 20. `number_id` malformato (non un UUID, es. `"abc"`) → `404` pulito, non un 500 da errore di parsing DB.
+    - **PASS (15/08)** — script nuovo `backend/scripts/qa_wa_discover/adv_c_number_id_ostili.py`: GET con `number_id="abc"` → 404 pulito.
 21. `number_id` vuoto (`POST /wa/numbers//discover` o path-param assente) → errore di routing gestito (404/422), non un 500.
+    - **PASS (15/08)** — stesso script, `/api/wa/numbers//discover` → 404 di routing.
 22. `number_id` da 10.000 caratteri → rifiutato/gestito senza crash del router ne' query DB con un parametro assurdo che va in timeout.
+    - **PASS (15/08)** — stesso script, 10.000 caratteri → gestito (404), nessun hang, nessun 500.
 23. `number_id` con un null byte (`\x00`) incorporato → rifiutato o sanificato, nessun errore DB grezzo esposto all'utente.
+    - **PASS (15/08)** — stesso script, `%00` nel path → gestito, mai riflesso nel corpo della risposta.
 24. Un motivo del motore NON presente in `MOTIVO_LABEL`/`MOTIVO_LABEL_SCAN` (scrivere a DB un valore inventato tipo `"motivo_mai_visto"` su una run gia' chiusa) → la UI mostra il codice grezzo, non una cella vuota, "undefined" o un crash di rendering.
+    - **SKIP, verificato solo staticamente (15/08)** — richiede rendering frontend vero; nessun runner di test JS in questo repo (`frontend/package.json` non ha script `"test"`). Letto il sorgente: `frontend/app/wa/numeri/page.tsx` e `.../scoperti/page.tsx` usano `MOTIVO_LABEL[motivo] ?? motivo` (fallback esplicito al codice grezzo) -- struttura corretta, ma non e' un'esecuzione vera. Da eseguire per davvero quando il frontend e' in esecuzione.
 25. `errore` di una run chiusa contenente un numero di telefono in chiaro nel testo dell'eccezione originale (es. un motore che un giorno solleva con un numero nel messaggio) → verificato che la sanificazione lo maschera prima di finire a DB (test gia' coperto a livello unit, qui riverificare end-to-end passando dal worker vero).
+    - **PASS (15/08)** — script nuovo `backend/scripts/qa_wa_discover/adv_c25_masking_worker_reale.py`: `wa_discover_worker.wa_discover_task()` VERO (non `chiudi_run` isolato, non una sessione condivisa col test) con un motore che solleva un'eccezione reale contenente `+39 342 146 0077` -- colonna `errore` a DB mascherata, nessuna sequenza di cifre in chiaro.
 
 ## D. Il `detail` oggetto e il client (26-28)
+
+**SKIP in blocco (15/08)** — i tre casi 26-28 richiedono un browser vero col frontend in esecuzione (toast, rendering del client `waApi.ts`, comportamento del polling dopo una disconnessione simulata). Non eseguibile ora, nessun equivalente piu' debole tentato.
 
 26. **`detail` oggetto `{codice, messaggio}` nel 409**: forzare OGNI codice di rifiuto (`numero_non_attivo`, `canale_fermo`, `browser_occupato`, `scan_gia_in_corso`, `ram_insufficiente`, `accodamento_fallito`) e verificare in UI che il toast mostri SEMPRE la frase leggibile, MAI la stringa letterale `[object Object]` ne' `Errore 409` generico.
 27. Risposta col `Content-Type` sbagliato o corpo non-JSON dal backend (simulabile con un proxy/mock) → il client (`req<T>` in `waApi.ts`) non deve sollevare un'eccezione non gestita che rompe la pagina — verificare il fallback `Errore {status}`.
@@ -63,38 +78,63 @@ Livello misto: browser per cio' che la UI esprime, chiamata diretta all'API (scr
 ## E. Permessi e tampering (29-32)
 
 29. Chiamata diretta all'endpoint SENZA autenticazione (`get_current_user` non superato) → `401`/`403`, mai l'esecuzione dello scan.
+    - **PASS (15/08)** — script nuovo `backend/scripts/qa_wa_discover/adv_e_permessi_tampering.py`: app REALE, JWT attivo per davvero (`jwt_secret` obbligatorio, validato in `app/config.py` -- il commento "legacy mode" in `main.py` e' superato dal validator), POST senza `Authorization` → 401.
+    - Nota a margine (non uno dei 49 casi): il commento in `app/main.py` ("When JWT_SECRET is empty, get_current_user returns a synthetic admin") e' stale -- `validate_jwt_secret` in `app/config.py` rifiuta un `jwt_secret` vuoto/corto, quindi quel ramo "legacy" non e' raggiungibile. Non e' un difetto di sicurezza (l'auth e' PIU' rigida di quanto il commento suggerisca), solo un commento da correggere altrove.
 30. Chiamata con un JWT/sessione di un utente valido ma senza i permessi sul tenant del numero (se il modello di permessi lo prevede) → rifiutata, non IDOR.
+    - **N/A (15/08)** — stesso motivo del caso 19: nessuno scoping per-tenant sulla sessione autenticata in questo sistema.
 31. Tampering sul body del `POST` (aggiungere campi extra tipo `{"tenant_id": "..."}` per provare a forzare un tenant diverso da quello del numero) → ignorato, il `tenant_id` della run resta SEMPRE quello risolto dal numero lato server, mai dal client (il modulo lo dichiara esplicitamente in `wa_numbers.py`).
+    - **PASS (15/08)** — stesso script: POST con `{"tenant_id": <tenant estraneo>}` nel body → 200, la run aperta ha il `tenant_id` VERO risolto dal numero, non quello iniettato.
 32. Chiamare `wa_discover_runs.chiudi_run`/`apri_run` direttamente (bypassando l'endpoint, come farebbe uno script interno malevolo o buggato) con un `number_id` inesistente → nessuna eccezione non gestita, comportamento definito.
+    - **PASS (15/08)** — stesso script: `apri_run` con `tenant_id`/`number_id` inesistenti solleva `IntegrityError` (FK mancante, comportamento DEFINITO, non un crash muto); `chiudi_run` su un `run_id` inesistente e' un no-op silenzioso (CAS, 0 righe toccate, nessuna eccezione).
 
 ## F. Macchina a stati (33-37)
 
 33. Doppio `approve` concettuale: due `POST` sequenziali (non concorrenti) sullo stesso numero, il secondo DOPO che il primo ha gia' aperto la run → il secondo riceve `409 scan_gia_in_corso` in modo deterministico.
+    - **PASS (15/08)** — script nuovo `backend/scripts/qa_wa_discover/adv_f_macchina_stati.py`: gate REALE (solo Redis/RAM/kill-switch mockati verdi), due POST in sequenza sullo stesso numero → 1° 200, 2° 409 `scan_gia_in_corso`.
 34. `POST` su un numero `pending_qr`/`qr_required`/`disconnected`/`retired`/`suspended` → sempre `409 numero_non_attivo`, mai uno scan che parte su un numero non pronto.
+    - **PASS (15/08)** — stesso script, tutti e 6 gli stati non-`active` (`pending_qr`, `qr_required`, `disconnected`, `cooldown`, `suspended`, `retired`) testati per davvero (il test esistente copriva solo `retired`) → 409 `numero_non_attivo` su tutti.
 35. Run chiusa `done` poi un secondo `chiudi_run` sulla STESSA run con un esito diverso (idempotenza) → la seconda chiamata NON deve sovrascrivere `finished_at` ne' i contatori della prima (gia' coperto a livello unit — riverificare che regga anche end-to-end via due chiamate del worker).
+    - **PASS (15/08)** — stesso script: due chiamate REALI di `wa_discover_worker.wa_discover_task()` (non due `chiudi_run` diretti) sulla stessa run, la seconda con un esito deliberatamente diverso → no-op, la run resta quella della prima chiamata (contatori e `finished_at` invariati).
 36. Kill-switch alzato A META' di uno scan gia' in corso (non solo prima di partire) → lo scan in corso si ferma, la run si chiude con un motivo che lo dice (`wa_halted`), non resta "running" per sempre.
+    - **PASS (15/08)** — gia' coperto per davvero da `test_kill_switch_a_meta_giro_si_ferma` in `backend/tests/test_wa_discover_run.py` (kill-switch diventa vero A META' lotto, non prima; `wa_halted` e' in `MOTIVI_NON_GUASTO` quindi la run chiude `done`, mai `running` appesa). Rieseguito ora.
 37. Riattivazione di un numero (`retired`→`pending_qr`) MENTRE una run e' (impossibilmente, ma verificarlo) ancora aperta su quel numero → nessuna corruzione, comportamento definito e documentato.
+    - **PASS (15/08)** — stesso script: stato incoerente forzato a mano (impossibile per la strada normale), `GET /discover` non esplode, riporta fedelmente `in_corso=True`/`stato=running` -- nessuna corruzione, nessuna eccezione.
 
 ## G. Rate-limit e idempotenza (38-40)
 
 38. `_job_id` di due scansioni sullo stesso numero in rapida successione → NON collidono (sono legati al `run_id`, non al `number_id`): verificare che ARQ accodi entrambi i job distintamente anche se il secondo viene rifiutato a monte dal gate prima di arrivare all'accodamento.
+    - **PASS (15/08)** — script nuovo `backend/scripts/qa_wa_discover/adv_g_rate_limit.py`: due `enqueue_wa_discover` REALI (Redis db 14, non mockato) sullo stesso `number_id`, due `run_id` diversi → entrambi accettati, `job_id` distinti. Nota di processo: il primo giro di verifica ha dato un FAIL, causato da un `run_id` fisso nello script stesso che collideva con lo stato ARQ lasciato da un'esecuzione precedente dello script (non dal prodotto) -- corretto usando un UUID fresco a ogni run come fa il codice vero, poi riverificato PASS tre volte di fila.
 39. Ripetere lo stesso `POST` con lo stesso `Idempotency-Key` (se il layer HTTP ne avesse uno — verificare se esiste, altrimenti documentare che non c'e' e che la difesa reale e' l'indice unico parziale).
+    - **Documentato (15/08)** — verificato (`grep -rn Idempotency app/`): NON esiste nessun layer di Idempotency-Key in questo backend. La difesa reale contro un doppio invio resta l'indice unico parziale su `wa_discover_runs` (Task 1), gia' verificata piu' volte (A.1, F.33).
 40. 20 `POST` in rapida sequenza su 20 numeri DIVERSI, tutti `active` → ognuno apre la propria run indipendentemente (il gate `browser_occupato` e' globale sul BROWSER, non sul conteggio delle run: verificare che dal secondo in poi vengano rifiutati con `browser_occupato`, visto che un solo browser puo' girare alla volta su questa macchina — non un bug, e' il comportamento voluto).
+    - **PASS (15/08)** — stesso script. Nota di metodo: il gate stesso NON impone alcun limite sul conteggio di run aperte (per costruzione: `browser_occupato` dipende solo dal lock Redis che un browser VERO prende, non dalla POST). Non e' stato spawnato un worker/browser reale (vietato ora): il lock e' stato preso direttamente con `wa_profile_lock.held()` (lo stesso meccanismo che userebbe un worker vero) su un numero esterno, poi il gate REALE (non mockato su `profilo_occupato_da`) interrogato per 20 numeri `active` diversi → tutti e 20 rifiutati con `browser_occupato`, nessuno passato, nessuno su un codice diverso.
 
 ## H. Volumi e rendering (41-44)
 
 41. Storico con 50+ run sullo stesso numero → `GET /discover` rispetta `wa_discover_storico_limit` (default 10), non restituisce tutto lo storico intero.
+    - **PASS (15/08)** — script nuovo `backend/scripts/qa_wa_discover/adv_h_volumi.py`: 55 run scritte a DB, `GET` ne torna 10 (== `wa_discover_storico_limit`).
 42. `/wa/numeri` con 50+ numeri, tutti con una run recente → la colonna "Ultimo scan" non genera 50 richieste di rete separate senza controllo (verificare che SWR deduplichi/non saturi il backend — le due `useSWR` con la stessa chiave condividono la cache per riga, ma 50 righe sono comunque 50 chiavi diverse: documentare il volume reale di richieste).
+    - **SKIP (15/08)** — richiede il frontend vero in esecuzione (comportamento di SWR nel browser). Non eseguibile ora.
 43. Pagina `/wa/scoperti` aperta durante uno scan che aggiunge centinaia di chat nuove → il refresh automatico a fine scan non deve bloccare l'interfaccia ne' far esplodere il rendering della tabella.
+    - **SKIP (15/08)** — richiede browser + frontend + uno scan reale. Non eseguibile ora (scan live in corso, vietato aprirne un secondo).
 44. Motivo/errore lunghissimo (oltre 2000 caratteri, il troncamento di `chiudi_run`) → la UI mostra il testo troncato senza rompere il layout della cella/toast.
+    - **PASS parziale (15/08)** — solo la meta' backend: stesso script, errore di 5023 caratteri passato a `chiudi_run` → 2000 caratteri a DB (troncato correttamente, nessun crash). La meta' UI (layout della cella/toast) resta da verificare col frontend in esecuzione.
 
 ## I. Verifica finale invarianti (45-48)
 
 45. Query diretta: `SELECT COUNT(*) FROM wa_discover_runs WHERE stato='running' AND started_at < now() - INTERVAL wa_discover_run_orfana_min` → deve tornare **zero** dopo che il gate e' stato chiamato almeno una volta su ogni numero toccato dal giro di test (l'auto-guarigione e' nel gate, non in un cron: una riga trovata qui senza che nessuno abbia mai richiamato il gate su quel numero non e' un fallimento del Task 10, ma va comunque verificato che il PRIMO tentativo successivo la sani).
+    - **PASS (15/08)** — script nuovo `backend/scripts/qa_wa_discover/adv_i_invarianti_sql.py`: seminati scenari realistici passando dai servizi VERI (`apri_run`, `chiudi_se_orfana`, `chiudi_run`, `salva_scoperta`), poi query SQL diretta (`text()`, non l'ORM) → 0 righe running oltre soglia.
 46. Query diretta: nessuna riga `wa_discover_runs.errore` contiene una sequenza di 6+ cifre non intervallata da `<num>` (la sanificazione P12).
+    - **PASS (15/08)** — stesso script, query diretta su tutte le righe con `errore IS NOT NULL` (incluso un errore seminato con un numero vero in chiaro) → nessuna sequenza di 6+ cifre in chiaro.
 47. Query diretta: nessuna riga in una tabella di invio (`wa_messages` o equivalente) scritta con `created_at`/`sent_at` durante la finestra `[started_at, finished_at]` di una run di discover sullo STESSO `number_id` (la Fase A e' sola lettura, non deve mai toccare l'invio).
+    - **PASS (15/08)** — stesso script. Nota: la colonna e' `queued_at` (non `created_at`, che non esiste su `wa_messages`) e la FK e' `wa_number_id` (non `number_id`). Seminata una riga `wa_messages` VERA per lo stesso numero, FUORI dalla finestra della run (cosi' la query non passa solo perche' la tabella e' vuota) → query diretta filtrata per `wa_number_id` e finestra `[started_at, finished_at]` → 0 righe dentro la finestra.
 48. Query diretta: `SELECT number_id, COUNT(*) FROM wa_discover_runs WHERE stato='running' GROUP BY number_id HAVING COUNT(*) > 1` → zero righe, sempre (l'indice unico parziale del Task 1 e' la garanzia strutturale, ma va riverificato che regga anche dopo tutto il giro adversarial, non solo in isolamento).
+    - **PASS (15/08)** — stesso script: 0 numeri con >1 run running, 0 duplicati su `(number_id, chat_title)`, 0 duplicati su `(number_id, phone_hmac)` nei dati del giro adversarial.
+
+**FINDING extra (non uno dei 45-48, emerso durante la semina degli scenari, riportato e non corretto)**: l'invariante "nessuna riga `wa_discovered_chats` senza identita' (ne' `chat_title` ne' `phone_hmac`)" e' garantita SOLO dal chiamante (`wa_discover_run.py`, il loop di scan scarta le righe con titolo vuoto PRIMA di costruire una `RigaScoperta`), non da `salva_scoperta`/`etichetta_visibile` stesse. Chiamando `salva_scoperta(titolo=None, numero=None)` direttamente (bypassando quel filtro, come farebbe un futuro secondo chiamante -- es. uno script di recupero mirato che non lo replica) si scrive DAVVERO una riga con `chat_title=None` E `phone_hmac=None`, senza identita' per nessuna delle due `UniqueConstraint` -- esattamente il caso che il docstring del modulo dice di voler escludere strutturalmente. Verificato con `backend/scripts/qa_wa_discover/adv_i_invarianti_sql.py` (funzione `_caso_extra_salva_scoperta_senza_filtro_a_monte`). Nessun percorso di codice raggiungibile oggi lo innesca (l'unico chiamante e' sicuro); segnalato per decidere se blindare `salva_scoperta` stessa (difesa in profondita') o lasciarlo cosi'.
 
 ## J. Regressione Task 12 — `lista_utilizzabile` (49)
+
+**SKIP (15/08)** — richiede la sidebar VERA di WhatsApp Web (DOM reale, scroll reale). Non eseguibile ora (scan live in corso, vietato aprire un secondo browser). La logica decisionale pura (`_almeno_una_cliccabile`) e' gia' testata a livello unit (Task 12, commit `ab87d5b`); il caso 49 riguarda specificamente il comportamento della sidebar VERA, che nessuno script Python puo' simulare in modo significativo.
 
 49. **Scan che riprende da meta' lista** (sidebar gia' scorsa dal giro precedente o da scroll manuale, non ripartita da zero): lanciarlo con la sidebar in QUELLA posizione → deve raccogliere normalmente, MAI fermarsi al primo giro con `motivo="sidebar_coperta"` solo perche' la prima riga renderizzata sta dietro l'intestazione. Caso opposto da riverificare nello stesso giro: un pannello VERO aperto sopra la lista (es. Impostazioni rimasta aperta) deve ancora far scattare `sidebar_coperta` — la protezione non va indebolita, solo la falsa positiva su lista scorsa.
