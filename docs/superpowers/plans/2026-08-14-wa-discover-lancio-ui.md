@@ -1899,10 +1899,32 @@ Aggiorna l'import in cima al modulo: `from app.services.wa_discover.sincronizzaz
 Run: `cd backend && ./venv/Scripts/python.exe -m pytest tests/test_wa_discover_sync_tristato.py tests/test_wa_discover_sincronizzazione.py tests/test_wa_discover_run.py -v`
 Expected: tutti verdi
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Alza la pazienza sul pannello informazioni**
+
+Difetto separato dal gate di sync, stesso file di famiglia, misurato dal vivo il 15/08 su `PRIMERO MAGAZZINO`.
+
+`_ATTESE_PANNELLO_S = (1.0, 1.5, 2.0, 2.5)` (`backend/app/services/wa_discover/pannello.py:52`) dà **7 secondi cumulativi** al pannello informazioni per comparire. Oltre quel tempo la riga si salva col titolo ma **senza numero**, quindi non promuovibile.
+
+Sul campo: **10 contatti su ~94 che hanno richiesto l'apertura del pannello sono falliti — l'11%**, contro il 5% dichiarato dal PoC-4. La differenza è il carico della macchina: il PoC girava su un PC scarico, la produzione no.
+
+Diagnosi fatta con una sonda dedicata su una delle chat fallite (`SIMONE`, fallita due volte su due): a macchina ferma, con la strada identica del motore, `[data-testid='drawer-right']` ha restituito **365 caratteri** e il numero è stato letto correttamente. Quindi **il selettore non è obsoleto** — a differenza di quello di Impostazioni dello Step 1, che non ha mai funzionato. È intermittenza sotto carico.
+
+```python
+# 7s cumulativi bastano a PC scarico e non bastano altrimenti: il tasso di
+# fallimento misurato passa dal 5% del PoC-4 (macchina dedicata) all'11%
+# reale. Chi apre il pannello e lo trova subito esce al primo giro, quindi
+# la coda lunga la paga solo chi ne ha bisogno.
+_ATTESE_PANNELLO_S = (1.0, 1.5, 2.0, 2.5, 4.0, 5.0, 5.0)
+```
+
+Le righe già salvate senza numero **si recuperano da sole**: il salto incrementale del Task 6 ignora solo quelle che il numero ce l'hanno, quindi queste vengono riprovate a ogni scansione successiva.
+
+Registra la misura in `docs/whatsapp/wa-dom-catalog.md` accanto a quella del PoC-4: il 5% lì scritto è vero solo su una macchina dedicata.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add backend/app/services/wa_discover/sincronizzazione.py backend/app/services/wa_discover_run.py backend/scripts/poc_wa/probe_wa_impostazioni.py docs/whatsapp/wa-dom-catalog.md backend/tests/test_wa_discover_sync_tristato.py
+git add backend/app/services/wa_discover/sincronizzazione.py backend/app/services/wa_discover/pannello.py backend/app/services/wa_discover_run.py backend/scripts/poc_wa/probe_wa_impostazioni.py docs/whatsapp/wa-dom-catalog.md backend/tests/test_wa_discover_sync_tristato.py
 git commit -m "fix(wa): il gate di sincronizzazione distingue 'sincronizzato' da 'non lo so'"
 ```
 
