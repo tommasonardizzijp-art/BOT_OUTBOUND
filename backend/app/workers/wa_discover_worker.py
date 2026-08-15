@@ -38,9 +38,19 @@ async def enqueue_wa_discover(number_id: str, run_id: str) -> bool:
 
 
 async def wa_discover_task(ctx: dict, number_id: str, run_id: str) -> None:
-    """Esegue un giro di scan e chiude la run. Non solleva mai: un'eccezione
-    che risalisse lascerebbe la run 'running' per sempre, e l'indice unico
-    parziale renderebbe il numero non piu' scansionabile.
+    """Esegue un giro di scan e chiude la run. Non solleva MAI: un'eccezione
+    che risalisse da questa funzione lascerebbe la run 'running' per sempre,
+    e l'indice unico parziale renderebbe il numero non piu' scansionabile.
+
+    Il secondo try copre la chiusura/commit, non solo il motore: un blip del
+    DB proprio li' (scenario reale, non teorico -- un TimeoutError di
+    asyncpg sul pooler Supabase e' gia' successo) non deve propagare. Se
+    anche quel tentativo fallisce, un secondo giro "a mani nude" (sessione
+    nuova, chiudi_run di nuovo, con l'errore del primo fallimento come testo)
+    prova a marcare la run failed comunque -- e quel tentativo e' avvolto a
+    sua volta, perche' non ha nessuno sopra di se' a cui appoggiarsi: se
+    fallisce anche lui, si logga e basta, la run puo' restare 'running' e
+    serve intervento manuale.
     """
     errore = None
     esito: dict = {}
@@ -50,9 +60,25 @@ async def wa_discover_task(ctx: dict, number_id: str, run_id: str) -> None:
         logger.exception(f"[WaDiscover] job {run_id} su {number_id}: {exc}")
         errore = f"{type(exc).__name__}: {exc}"
 
-    async with AsyncSessionLocal() as db:
-        await wa_discover_runs.chiudi_run(db, run_id, esito, errore=errore)
-        await db.commit()
+    try:
+        async with AsyncSessionLocal() as db:
+            await wa_discover_runs.chiudi_run(db, run_id, esito, errore=errore)
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001 -- vedi docstring
+        logger.error(f"[WaDiscover] job {run_id} su {number_id}: chiusura "
+                     f"fallita ({type(exc).__name__}: {exc}), riprovo a mani nude")
+        try:
+            async with AsyncSessionLocal() as db:
+                await wa_discover_runs.chiudi_run(
+                    db, run_id, {},
+                    errore=f"chiusura fallita: {type(exc).__name__}: {exc}")
+                await db.commit()
+        except Exception as exc2:  # noqa: BLE001 -- ultimo cancello, vedi docstring
+            logger.error(
+                f"[WaDiscover] job {run_id} su {number_id}: anche il tentativo "
+                f"a mani nude e' fallito ({type(exc2).__name__}: {exc2}) -- la "
+                "run puo' restare 'running', serve intervento manuale")
+        return
 
     logger.info(f"[WaDiscover] job {run_id} su {number_id} chiuso: "
                 f"{esito.get('motivo', 'errore_imprevisto')}")
