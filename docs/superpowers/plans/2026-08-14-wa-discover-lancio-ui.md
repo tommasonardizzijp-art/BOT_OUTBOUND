@@ -2811,6 +2811,27 @@ git commit -m "fix(wa): lista_utilizzabile non esce piu' alla prima riga candida
 
 ---
 
+## Debito noto (non da implementare in questo cantiere, solo da scrivere)
+
+> Aggiunto il 16/08 su richiesta del reviewer, che l'ha scoperto sbagliando su dati di produzione. Non tocca `wa_discover`: riguarda `wa_promote`, il package fratello (Fase B) che questo modulo NON modifica. Segnalato qui perche' e' la stessa forma di difetto appena tolta da `chiudi_se_orfana` (vedi Task 10/fix del 15-16/08): un effetto sulla transazione che dipende da una convenzione invece che dalla firma.
+
+**`promuovi()` e `arruola()` committano ENTRAMBI da soli — non e' l'asimmetria che sembrava a prima vista, ed e' per questo che e' insidiosa.**
+
+- `backend/app/services/wa_promote/promozione.py:187-188`: `await db.flush(); await db.commit()` dentro `promuovi()`.
+- `backend/app/services/wa_promote/arruolamento.py:146-147`: `await db.flush(); await db.commit()` dentro `arruola()`.
+
+**Correzione rispetto alla segnalazione originale**: il sospetto iniziale era che `promuovi()` NON committasse (solo `flush()`, deciderebbe il chiamante) mentre `arruola()` si', un'asimmetria fra due servizi fratelli. Verificato col codice di questo branch (`git log -p` su `promozione.py`: il `db.commit()` a fine `promuovi()` c'e' dal commit originale del Task 2, `f0d391f`, mai rimosso) che NON e' cosi': **committano entrambi**, sempre, incondizionatamente, a fine funzione.
+
+Cio' che resta vero, e che *ha causato il danno*: nessuna delle due firme lo dichiara. `promuovi(db, *, tenant_id, ids)` e `arruola(db, *, campaign_id, contact_ids)` sono indistinguibili da una funzione che si limita a un `flush()` e lascia decidere al chiamante — la sola differenza sta in un `await db.commit()` in fondo al corpo, leggibile solo aprendo il file.
+
+**La conseguenza pratica, dimostrata**: un chiamante che avvolge una chiamata a `arruola()` (o `promuovi()`) in un `try/finally` con `await db.rollback()`, convinto di fare una prova a vuoto, non lo e'. Il commit interno e' gia' passato prima che il `finally` giri: il rollback arriva dopo, e non annulla niente. Il 16/08 uno script diagnostico scritto per una prova a vuoto ha scritto per davvero 666 righe in produzione — l'esito era quello voluto, quindi nessun danno, ma per coincidenza, non per una garanzia della transazione. **Su questi due servizi un `rollback()` del chiamante non e' una rete di sicurezza.**
+
+**Direzione della correzione, per quando qualcuno ci mettera' mano** (non ora, non in questo cantiere): uniformare il contratto — o entrambi committano sempre (come oggi) e lo si dichiara nel NOME o nella firma (es. `promuovi_e_committa`, o un parametro `commit: bool = True` esplicito), o nessuno dei due committa e il commit e' sempre del chiamante (piu' coerente col resto del canale WA, dove il pattern dominante e' "il chiamante committa" — vedi `wa_discover_runs.chiudi_run`, CAS, mai un commit interno). La seconda strada e' quella che questo modulo ha appena scelto per `chiudi_se_orfana`/`chiudi_run` (fix 15/08): un contratto esplicito nella firma batte una convenzione nel docstring.
+
+**Perche' si paga in produzione e non nei test**: nella suite, `db_session` e' la STESSA sessione end-to-end e il `rollback()` di fine test la ripulisce comunque (vedi `tests/conftest.py::db_session`) — un test che chiamasse `arruola()` e poi `rollback()` non si accorgerebbe della differenza fra "il rollback ha annullato tutto" e "il commit interno aveva gia' scritto, il rollback e' arrivato dopo e non ha trovato nulla da annullare sulla STESSA connessione". Serve una sessione indipendente (come fa `test_due_post_concorrenti_uno_solo_vince` per la concorrenza) per vedere la differenza — ed e' esattamente lo scenario in cui e' stato scoperto: uno script a mano, sessione propria, fuori da pytest.
+
+---
+
 ## Chiusura del modulo
 
 Protocollo obbligatorio della skill `sviluppo-modulo`, nell'ordine:
