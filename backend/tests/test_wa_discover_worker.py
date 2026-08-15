@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app.services import wa_discover_runs
@@ -60,6 +62,36 @@ async def test_se_il_motore_solleva_la_run_finisce_in_failed(db_session, monkeyp
     chiusa = await wa_discover_runs.ultima_run(db_session, number.id)
     assert chiusa.stato == "failed"
     assert "browser sparito" in chiusa.errore
+
+
+@pytest.mark.asyncio
+async def test_se_il_motore_viene_cancellato_la_run_si_chiude_e_l_eccezione_risale(
+        db_session, monkeypatch):
+    # ARQ cancella il job al timeout (asyncio.wait_for): CancelledError
+    # eredita da BaseException, non da Exception -- il try/except Exception
+    # normale non la vede. Senza gestione dedicata la run resta 'running'
+    # per sempre (indice unico parziale, numero non piu' scansionabile).
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
+                                          number_id=number.id)
+    await db_session.commit()
+
+    async def motore_cancellato(number_id, **kw):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(wa_discover_worker, "esegui_discover_run", motore_cancellato)
+    monkeypatch.setattr(wa_discover_worker, "AsyncSessionLocal",
+                        _sessione_finta(db_session))
+
+    # ARQ deve poter vedere la cancellazione: se wa_discover_task la
+    # ingoiasse, ARQ non saprebbe che il job e' morto invece che completato.
+    with pytest.raises(asyncio.CancelledError):
+        await wa_discover_worker.wa_discover_task({}, number.id, run.id)
+
+    chiusa = await wa_discover_runs.ultima_run(db_session, number.id)
+    assert chiusa.stato == "failed"
+    assert chiusa.motivo == "cancellato"
 
 
 def test_il_task_e_registrato_nel_worker():

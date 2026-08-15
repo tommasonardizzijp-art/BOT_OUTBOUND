@@ -528,6 +528,13 @@ class Settings(BaseSettings):
     wa_discover_ram_min_mb: int = 1500
     # Quante run mostrare nello storico di /wa/scoperti.
     wa_discover_storico_limit: int = 10
+    # 900 chat x ~12,3s (misurato, PRIMERO MAGAZZINO) ~= 3 ore per il primo
+    # giro completo. Il margine sopra le 3 ore serve perche' quel 12,3s e'
+    # una media su una macchina scarica: sotto carico reale (Task 7 step 7 --
+    # l'11% contro il 5% del PoC-4) i tempi salgono. Il TTL del lucchetto
+    # profilo (90 min) NON e' un problema: si rinnova a ogni riga
+    # (wa_profile_lock.renew, gia' cablato in _esegui_scan).
+    wa_discover_job_timeout_s: int = 21600  # 6 ore
 
     # Lock Redis cross-processo sul profilo browser IG (C.2, passo 4): TTL
     # CORTO + rinnovo automatico dentro il chokepoint (context_manager),

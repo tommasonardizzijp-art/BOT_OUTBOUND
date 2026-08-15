@@ -2541,6 +2541,168 @@ git commit -m "feat(wa): il gate chiude da solo le run rimaste aperte"
 
 ---
 
+## Task 11: Il job ARQ sopravvive al proprio timeout
+
+**Files:**
+- Modify: `backend/app/config.py`
+- Modify: `backend/app/workers/task_queue.py`
+- Modify: `backend/app/workers/wa_discover_worker.py`
+- Test: `backend/tests/test_wa_discover_worker.py`
+
+**Interfaces:**
+- Consumes: `chiudi_run` (Task 2)
+- Produces: nessuna nuova, comportamento aggiuntivo su `wa_discover_task`
+
+**Perché questo task esiste — bloccante, trovato in review dopo il Task 7.**
+`task_queue.py:444` ha `job_timeout = 3600` **globale**, e `wa_discover_task`
+(riga 437) è registrato **nudo**, senza un timeout proprio. Un primo scan
+completo su una lista grande (misura vera: 78 chat in 16 minuti su PRIMERO
+MAGAZZINO) proiettato su 900 chat sono **~3 ore**. ARQ uccide il job a **1
+ora** con `asyncio.wait_for(task, 3600)`, che solleva
+`asyncio.CancelledError` **dentro** la coroutine del job.
+
+`CancelledError` eredita da `BaseException`, non da `Exception`: il
+`try/except Exception` di `wa_discover_task` (e il secondo tentativo "a mani
+nude" del Task 4, `8bb7a25`) non la vede. Nessun `chiudi_run` gira, la run
+resta `'running'` per sempre, e l'indice unico parziale (Task 1) rende quel
+numero **non più scansionabile**. Non è raro: è **garantito** su ogni primo
+scan di una lista grande, cioè la baseline che il Task 6 (incrementale)
+dichiara come prerequisito.
+
+Tre difese, non una: la prima evita il kill, la seconda sopravvive alla
+cancellazione se il kill arriva comunque, la terza (**Task 10**, non ancora
+implementato) è la rete finale per il caso imprevisto — worker ucciso dal
+sistema operativo, non da ARQ, dove nessuna delle prime due può intervenire.
+
+**Attenzione per chi implementa il Task 10**: il suo `wa_discover_run_orfana_min`
+di default è **240** (4 ore), scritto quando il job non aveva ancora un
+timeout esplicito. Con `wa_discover_job_timeout_s` di questo task a **21600**
+(6 ore), una run legittimamente ancora in corso alla quinta ora verrebbe
+dichiarata orfana e chiusa da `chiudi_se_orfana` mentre il job ARQ è ancora
+vivo — le due soglie vanno tenute coerenti (`orfana_min` deve restare sopra
+`job_timeout_s`, con un margine), non lasciate ai valori scritti quando
+l'altra non esisteva ancora.
+
+- [ ] **Step 1: Timeout proprio del job**
+
+In `backend/app/config.py`, accanto alle altre `wa_discover_*`:
+
+```python
+    # 900 chat x ~12,3s (misurato, PRIMERO MAGAZZINO) ~= 3 ore per il primo
+    # giro completo. Il margine sopra le 3 ore serve perche' quel 12,3s e'
+    # una media su una macchina scarica: sotto carico reale (vedi Task 7,
+    # step 7 — l'11% contro il 5% del PoC-4) i tempi salgono. Il TTL del
+    # lucchetto profilo (90 min) NON e' un problema: si rinnova a ogni riga
+    # (wa_profile_lock.renew, gia' cablato in _esegui_scan).
+    wa_discover_job_timeout_s: int = 21600  # 6 ore
+```
+
+In `backend/app/workers/task_queue.py`, registra `wa_discover_task` con
+`func` invece che nudo (import di `settings` da aggiungere se non c'è già):
+
+```python
+        # Timeout proprio, non i 3600s globali: un primo scan su una lista
+        # grande sta sotto le 6 ore (vedi config.py), e job_timeout globale
+        # lo ucciderebbe a 1 ora lasciando la run 'running' per sempre
+        # (indice unico parziale, numero non piu' scansionabile — trovato
+        # in review, Task 11).
+        func(wa_discover_task, timeout=settings.wa_discover_job_timeout_s),
+```
+
+- [ ] **Step 2: Scrivi il test che fallisce**
+
+In `backend/tests/test_wa_discover_worker.py`, aggiungi:
+
+```python
+@pytest.mark.asyncio
+async def test_se_il_motore_viene_cancellato_la_run_si_chiude_e_l_eccezione_risale(
+        db_session, monkeypatch):
+    # ARQ cancella il job al timeout (asyncio.wait_for): CancelledError
+    # eredita da BaseException, non da Exception -- il try/except Exception
+    # normale non la vede. Senza gestione dedicata la run resta 'running'
+    # per sempre (indice unico parziale, numero non piu' scansionabile).
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
+                                          number_id=number.id)
+    await db_session.commit()
+
+    async def motore_cancellato(number_id, **kw):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(wa_discover_worker, "esegui_discover_run", motore_cancellato)
+    monkeypatch.setattr(wa_discover_worker, "AsyncSessionLocal", _sessione_finta(db_session))
+
+    # ARQ deve poter vedere la cancellazione: se wa_discover_task la
+    # ingoiasse, ARQ non saprebbe che il job e' morto invece che completato.
+    with pytest.raises(asyncio.CancelledError):
+        await wa_discover_worker.wa_discover_task({}, number.id, run.id)
+
+    chiusa = await wa_discover_runs.ultima_run(db_session, number.id)
+    assert chiusa.stato == "failed"
+    assert chiusa.motivo == "cancellato"
+```
+
+Run: `cd backend && ./venv/Scripts/python.exe -m pytest tests/test_wa_discover_worker.py -v`
+Expected: FAIL — la `CancelledError` risale dal test stesso (nessun
+`except` la intercetta ancora) prima di raggiungere l'assert sulla run.
+
+- [ ] **Step 3: Sopravvivi alla cancellazione**
+
+In `backend/app/workers/wa_discover_worker.py`, `import asyncio` in cima, e
+un `except asyncio.CancelledError` **prima** dell'`except Exception`
+esistente (l'ordine conta: `CancelledError` non eredita da `Exception`, ma
+un except più specifico va comunque prima per chiarezza):
+
+```python
+    try:
+        esito = await esegui_discover_run(number_id)
+    except asyncio.CancelledError:
+        # ARQ cancella il job al proprio timeout (task_queue.py, Task 11):
+        # CancelledError eredita da BaseException, non da Exception, quindi
+        # il blanket except sotto non la vede mai. Motivo DEDICATO, non
+        # 'errore_imprevisto': un timeout non e' un guasto del motore, e'
+        # il job che ha superato il tempo che gli abbiamo dato. 'cancellato'
+        # non e' in MOTIVI_NON_GUASTO di proposito -- e' un guasto vero,
+        # l'unica traccia che uno scan e' morto a meta'.
+        logger.error(f"[WaDiscover] job {run_id} su {number_id}: cancellato "
+                     "da ARQ (timeout del job)")
+        try:
+            async with AsyncSessionLocal() as db:
+                await wa_discover_runs.chiudi_run(db, run_id, {"motivo": "cancellato"})
+                await db.commit()
+        except Exception as exc2:  # noqa: BLE001 -- ultimo cancello, vedi sotto
+            logger.error(
+                f"[WaDiscover] job {run_id} su {number_id}: chiusura dopo "
+                f"cancellazione fallita ({type(exc2).__name__}: {exc2}) -- la "
+                "run puo' restare 'running', serve intervento manuale")
+        # MAI ingoiare una CancelledError: ARQ deve poterla vedere per sapere
+        # che il job e' morto, non completato con successo.
+        raise
+    except Exception as exc:  # noqa: BLE001 -- vedi docstring
+        logger.exception(f"[WaDiscover] job {run_id} su {number_id}: {exc}")
+        errore = f"{type(exc).__name__}: {exc}"
+```
+
+- [ ] **Step 4: Esegui i test e verifica che passino**
+
+Run: `cd backend && ./venv/Scripts/python.exe -m pytest tests/test_wa_discover_worker.py -v`
+Expected: tutti verdi (8: i 7 esistenti + quello nuovo).
+
+**Prova del nove**: rimuovi temporaneamente l'`except asyncio.CancelledError`
+appena aggiunto, rilancia la suite, verifica che il test nuovo diventi rosso
+(la `CancelledError` risale ma la run resta `'running'`, non `'failed'`),
+ripristina.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/config.py backend/app/workers/task_queue.py backend/app/workers/wa_discover_worker.py backend/tests/test_wa_discover_worker.py
+git commit -m "fix(wa): il job sopravvive al proprio timeout invece di lasciare la run appesa"
+```
+
+---
+
 ## Chiusura del modulo
 
 Protocollo obbligatorio della skill `sviluppo-modulo`, nell'ordine:
