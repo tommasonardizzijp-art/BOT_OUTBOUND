@@ -202,7 +202,6 @@ export default function ScopertiPage() {
     try {
       const tuttiIds = new Set<string>()
       let offsetFetch = 0
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         const pagina = await waApi.scoperti.list(numberId, {
           status: filtroStatus,
