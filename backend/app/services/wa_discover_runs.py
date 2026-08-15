@@ -7,7 +7,7 @@ motore resta quello gia' collaudato contro il DOM vero.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 from sqlalchemy import desc, select, update
@@ -108,7 +108,7 @@ async def chiudi_run(db, run_id: str, esito: dict, *, errore: str | None = None,
     reali) nella finestra fra le due scritture, si vedeva il motivo
     sovrascritto a 'run_orfana' mentendo su una scansione riuscita.
     """
-    ora = datetime.utcnow()
+    ora = datetime.now(timezone.utc)
     if errore is not None:
         valori = {
             "stato": "failed",
@@ -184,8 +184,19 @@ async def chiudi_se_orfana(db, number_id: str) -> bool:
     run = await run_attiva(db, number_id)
     if run is None:
         return False
-    limite = datetime.utcnow() - timedelta(minutes=settings.wa_discover_run_orfana_min)
-    if run.started_at > limite:
+    # AWARE, non utcnow(). La colonna e' DateTime(timezone=True): su
+    # PostgreSQL torna un datetime con tzinfo, e confrontarlo con un naive
+    # solleva TypeError -- che risaliva fino all'endpoint e diventava un 500
+    # al posto del 409 "scan_gia_in_corso" (trovato dal vivo il 16/08). Su
+    # SQLite, dove gira la suite, torna naive: per questo i test erano verdi.
+    # Il naive letto si assume UTC, che e' cio' che il resto del modulo
+    # scrive.
+    limite = datetime.now(timezone.utc) - timedelta(
+        minutes=settings.wa_discover_run_orfana_min)
+    iniziata = run.started_at
+    if iniziata.tzinfo is None:
+        iniziata = iniziata.replace(tzinfo=timezone.utc)
+    if iniziata > limite:
         return False
 
     run_id = run.id

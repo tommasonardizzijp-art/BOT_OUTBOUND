@@ -1,9 +1,78 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.services import wa_discover_gate, wa_discover_runs
 from tests.factories_wa import make_discover_run, make_number, make_tenant
+
+
+# --------------------------------------------------------------------------
+# started_at TZ-AWARE: il caso che i test non vedevano e la produzione si'.
+#
+# La colonna e' DateTime(timezone=True) -> su PostgreSQL e' timestamptz e
+# SQLAlchemy restituisce un datetime AWARE; su SQLite (dove gira questa suite,
+# vedi conftest) torna NAIVE. Il confronto in chiudi_se_orfana avveniva contro
+# datetime.utcnow(), che e' naive: verde qui, TypeError in produzione. Il
+# TypeError risaliva fino all'endpoint, che rispondeva 500 al posto del 409
+# "scan_gia_in_corso" -- cioe' proprio il rifiuto leggibile che il gate esiste
+# per dare. Trovato dal vivo il 16/08, dopo il merge della PR #85.
+#
+# Questi due test fabbricano la run con un istante AWARE a prescindere dal
+# dialetto sotto: e' l'unico modo di pinnare il caso in una suite su SQLite.
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_started_at_di_default_e_aware(db_session):
+    """Il default della colonna deve produrre un istante AWARE.
+
+    apri_run non passa started_at: lo mette il default del modello. Un naive
+    scritto su timestamptz viene letto come ora locale e finisce a DB
+    spostato di tutto l'offset del fuso (2 h in ora legale su questa
+    macchina), il che erode il margine fra wa_discover_run_orfana_min e
+    wa_discover_job_timeout_s fino a farlo diventare negativo.
+    """
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
+                                          number_id=number.id)
+
+    assert run.started_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_run_recente_aware_non_esplode(db_session, monkeypatch):
+    """Run RECENTE con started_at aware: si rifiuta, non si solleva."""
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
+                                          number_id=number.id)
+    run.started_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    await db_session.commit()
+
+    async def _run_attiva_aware(db, number_id):
+        return run
+
+    monkeypatch.setattr(wa_discover_runs, "run_attiva", _run_attiva_aware)
+
+    assert await wa_discover_runs.chiudi_se_orfana(db_session, number.id) is False
+
+
+@pytest.mark.asyncio
+async def test_run_vecchia_aware_viene_chiusa(db_session, monkeypatch):
+    """Run VECCHIA con started_at aware: l'auto-guarigione deve scattare."""
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
+                                          number_id=number.id)
+    run.started_at = datetime.now(timezone.utc) - timedelta(hours=9)
+    await db_session.commit()
+
+    async def _run_attiva_aware(db, number_id):
+        return run
+
+    monkeypatch.setattr(wa_discover_runs, "run_attiva", _run_attiva_aware)
+
+    assert await wa_discover_runs.chiudi_se_orfana(db_session, number.id) is True
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ vedi nota sugli enum nella migrazione 025 per il motivo).
 """
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -470,8 +470,16 @@ class WaDiscoverRun(Base):
                                            nullable=False)
     number_id: Mapped[str] = mapped_column(String(36), ForeignKey("wa_numbers.id"),
                                            nullable=False)
+    # AWARE, non datetime.utcnow. La colonna e' timestamptz: un naive scritto
+    # qui viene interpretato come ora LOCALE e finisce a DB spostato di tutto
+    # l'offset del fuso (misurato il 16/08 su questa macchina: 2 ore indietro
+    # in ora legale). Conta perche' wa_discover_run_orfana_min (420 min) deve
+    # restare SOPRA wa_discover_job_timeout_s (6 h) -- config.py lo valida
+    # all'avvio, margine 60 minuti: uno scarto di 2 ore se lo mangia tutto e
+    # una scansione lunga ma viva verrebbe chiusa come orfana a ~5 ore.
     started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
     stato: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
