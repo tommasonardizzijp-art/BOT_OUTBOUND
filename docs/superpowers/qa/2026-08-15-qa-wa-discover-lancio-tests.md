@@ -1,6 +1,6 @@
 # Test manuali UI — Lancio dell'auto-discover WhatsApp (`/wa/numeri` + `/wa/scoperti`)
 
-**Lista scritta, non eseguita**: l'esecuzione richiede backend + worker ARQ + frontend avviati e un browser vero, e il frontend non e' nemmeno compilabile da questo worktree (niente `node_modules`, vedi Task 8/9). Da eseguire con un agente QA via browser quando il profilo WhatsApp e' libero (uno scan reale e' in corso al momento della stesura).
+**Lista scritta, non eseguita**: l'esecuzione richiede backend + worker ARQ + frontend avviati e un browser vero. Il frontend E' compilabile da questo worktree (`node_modules` installato con `npm ci`, `tsc --noEmit` ed `eslint` puliti sui tre file di Task 8/9). Da eseguire con un agente QA via browser quando il profilo WhatsApp e' libero (uno scan reale e' in corso al momento della stesura).
 
 Convenzioni: prefisso dati di test `QAWAD-<random>`; ogni test = PASS/FAIL/SKIP(motivo) da compilare in esecuzione; screenshot obbligatorio sui FAIL. Serve almeno un numero WhatsApp `active` con sessione vera per i casi che aprono davvero il browser (uno solo, per via del gate globale `browser_occupato` — Task 3). Dove serve simulare stati che il DOM reale non produce a comando (kill-switch, RAM, run orfana, worker spento), agire sul DB/servizi di test invece che sul DOM.
 
