@@ -48,6 +48,7 @@ WA_NEW_TABLES = {
     "wa_messages",
     "wa_inbound_events",
     "wa_discovered_chats",  # 032
+    "wa_discover_runs",  # 035
 }
 
 # Colonne che una migrazione SUCCESSIVA alla 025 aggiunge a una tabella GIA'

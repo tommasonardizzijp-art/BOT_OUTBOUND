@@ -29,6 +29,7 @@ deve tenerne conto -- p.es. soglia piu' alta quando session_checked_at e' vecchi
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from loguru import logger
 
@@ -199,6 +200,73 @@ async def _richiudi_pannello(page) -> bool:
         return False
 
 
+@dataclass(frozen=True)
+class LetturaSync:
+    """Cosa sappiamo davvero della sincronizzazione.
+
+    Tre stati, non due, perche' `None` da solo confonde "finita" con "non
+    lo so" -- ed e' il motivo per cui il 14/08 uno scan e' partito su un
+    profilo di cui non sapevamo nulla e ha raccolto 78 righe su 900.
+    """
+    stato: str          # "letta" | "assente" | "ignota"
+    percentuale: int | None
+
+
+async def leggi_sincronizzazione(page) -> LetturaSync:
+    try:
+        voce = page.locator(_SEL_IMPOSTAZIONI).first
+        if not await voce.count():
+            logger.warning(
+                "[WaDiscover] voce Impostazioni non trovata: stato di "
+                "sincronizzazione IGNOTO (non significa sincronizzato)")
+            return LetturaSync(stato="ignota", percentuale=None)
+        await voce.click(timeout=4000)
+        await page.wait_for_timeout(1500)
+        testi = await page.evaluate(_JS_TESTI_PAGINA)
+        percentuale = percentuale_da_testi(testi)
+        if percentuale is None:
+            # Pannello aperto e nessuna percentuale: WhatsApp la mostra solo
+            # MENTRE sincronizza. Assente = finita.
+            return LetturaSync(stato="assente", percentuale=None)
+        return LetturaSync(stato="letta", percentuale=percentuale)
+    except Exception as exc:
+        logger.warning(f"[WaDiscover] lettura sincronizzazione fallita: {exc}")
+        return LetturaSync(stato="ignota", percentuale=None)
+    finally:
+        await _richiudi_pannello(page)
+
+
+def puo_scansionare_lettura(lettura: LetturaSync, *, soglia: int) -> tuple[bool, str]:
+    if lettura.stato == "assente":
+        return True, "sincronizzazione conclusa (nessuna percentuale in Impostazioni)"
+    if lettura.stato == "ignota":
+        # SI PROCEDE, e non e' un indebolimento della guardia: e' il
+        # riconoscimento che questa guardia oggi non sa leggere il proprio
+        # segnale. Il 15/08 e' stato verificato dal vivo che
+        # _SEL_IMPOSTAZIONI non matcha su questo WhatsApp Web, quindi
+        # rifiutare su "ignota" significherebbe rifiutare SEMPRE: da guardia
+        # finta a discover spento, che e' peggio del difetto che correggeva.
+        #
+        # Fail-closed su un segnale che non sappiamo leggere non e' prudenza,
+        # e' spegnere il sistema. La rete di sicurezza vera resta la misura
+        # di COPERTURA (G7, fallisce sotto l'80%), che ha gia' dimostrato di
+        # funzionare dicendo 78/900 = 9% quando lo scan si era arreso.
+        #
+        # Lo stato resta registrato in wa_discover_runs.sync_stato e la UI lo
+        # mostra come "primo indiziato se la raccolta e' corta": diciamo che
+        # non sappiamo, invece di fingere di sapere o di fermarci.
+        #
+        # Quando il selettore sara' ricatturato e verificato funzionante,
+        # QUESTA riga torna a essere un rifiuto -- non prima.
+        return True, ("stato di sincronizzazione ignoto (Impostazioni non "
+                      "raggiungibile): si procede, ed e' il primo indiziato "
+                      "se la raccolta risulta corta")
+    if lettura.percentuale < soglia:
+        return False, (f"sincronizzazione al {lettura.percentuale}%, sotto la "
+                       f"soglia del {soglia}%")
+    return True, f"sincronizzazione al {lettura.percentuale}%"
+
+
 def puo_scansionare(percentuale: int | None, soglia: int = SOGLIA_DEFAULT) -> tuple[bool, str]:
     """(si_parte, motivo). Il motivo finisce nei log e negli eventi: e' il primo
     posto dove si guarda quando una raccolta risulta piu' corta del previsto."""
@@ -210,6 +278,49 @@ def puo_scansionare(percentuale: int | None, soglia: int = SOGLIA_DEFAULT) -> tu
     return False, (f"sincronizzazione al {percentuale}%, sotto la soglia del {soglia}%: "
                    "scansionare ora raccoglierebbe una parte delle chat e la "
                    "dichiarerebbe completa")
+
+
+# Raccoglie i dati grezzi (un booleano per riga candidata: il suo centro
+# risolve dentro #pane-side, o no), la DECISIONE su cosa farne vive in Python
+# (_almeno_una_cliccabile) -- stesso schema di sidebar._JS_SCAN_SIDEBAR /
+# righe_dalla_sidebar: quello che nel DOM va misurato resta in JS, quello che
+# va deciso resta testabile senza un browser.
+_JS_RIGHE_CANDIDATE = """() => {
+    const pane = document.querySelector('#pane-side');
+    if (!pane) return null;
+    const righe = pane.querySelectorAll("[role='row']");
+    if (!righe.length) return [];
+    const risultati = [];
+    for (const r of righe) {
+        const box = r.getBoundingClientRect();
+        if (box.width < 10 || box.height < 10) continue;
+        if (box.top < 0 || box.top > window.innerHeight - 20) continue;
+        const sopra = document.elementFromPoint(
+            box.left + box.width / 2, box.top + box.height / 2);
+        risultati.push(!!(sopra && pane.contains(sopra)));
+    }
+    return risultati;
+}"""
+
+
+def _almeno_una_cliccabile(candidati: list[bool] | None) -> bool:
+    """Vero se ALMENO UNA riga candidata e' davvero raggiungibile da un click
+    (il suo centro risolve dentro #pane-side, non su un pannello sovrapposto).
+
+    NON esce alla prima candidata (era il difetto, 15/08): quando la sidebar
+    e' scorsa, la prima riga renderizzata puo' stare dietro l'intestazione --
+    il suo `top` e' positivo, passa il filtro geometrico, ma il suo centro
+    cade sulla barra di ricerca. Concludere "coperta" sulla prima candidata
+    scartava una lista perfettamente utilizzabile, solo scorsa: zero chat
+    raccolte su ogni scan che non riparte dall'inizio. A scroll zero la prima
+    riga e' gia' sotto l'intestazione, per questo il difetto non era mai
+    emerso prima. `None`/lista vuota (nessuna candidata, o #pane-side
+    assente): niente da giudicare, non si dichiara utilizzabile cio' che non
+    si e' potuto guardare.
+    """
+    if not candidati:
+        return False
+    return any(candidati)
 
 
 async def lista_utilizzabile(page) -> bool:
@@ -227,24 +338,8 @@ async def lista_utilizzabile(page) -> bool:
     impedisce allo scan di partire per sempre.
     """
     try:
-        return bool(await page.evaluate("""() => {
-            const pane = document.querySelector('#pane-side');
-            if (!pane) return false;
-            const righe = pane.querySelectorAll("[role='row']");
-            if (!righe.length) return false;
-            // La prima riga con area visibile deve essere davvero in cima allo
-            // stack: se sopra c'e' un pannello, elementFromPoint restituisce
-            // quello e il click finirebbe li'.
-            for (const r of righe) {
-                const box = r.getBoundingClientRect();
-                if (box.width < 10 || box.height < 10) continue;
-                if (box.top < 0 || box.top > window.innerHeight - 20) continue;
-                const sopra = document.elementFromPoint(
-                    box.left + box.width / 2, box.top + box.height / 2);
-                return !!(sopra && pane.contains(sopra));
-            }
-            return false;
-        }"""))
+        candidati = await page.evaluate(_JS_RIGHE_CANDIDATE)
+        return _almeno_una_cliccabile(candidati)
     except Exception:
         # Non si riesce nemmeno a interrogare il DOM: non si dichiara
         # utilizzabile cio' che non si e' potuto guardare.

@@ -13,7 +13,7 @@
 // il click non e' il punto (lo e' impedire l'esito, e quello lo fa gia' il
 // backend). Chi la seleziona comunque la vede tornare nei "scarti" del
 // report con il motivo, mai in silenzio.
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import Link from 'next/link'
 import useSWR from 'swr'
 import { toast } from 'sonner'
@@ -202,7 +202,6 @@ export default function ScopertiPage() {
     try {
       const tuttiIds = new Set<string>()
       let offsetFetch = 0
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         const pagina = await waApi.scoperti.list(numberId, {
           status: filtroStatus,
@@ -357,6 +356,8 @@ export default function ScopertiPage() {
           </div>
         </div>
       </Riquadro>
+
+      {numberId && <TestataScan numberId={numberId} onRiscansionato={refreshScoperti} />}
 
       {!numberId && (
         <p className="text-sm" style={{ color: 'var(--wa-muted)' }}>
@@ -654,6 +655,145 @@ function ReportPromozioneView({
         </div>
       )}
     </div>
+  )
+}
+
+const MOTIVO_LABEL_SCAN: Record<string, string> = {
+  in_corso: 'in corso',
+  completato: 'completo',
+  raccolta_parziale: 'raccolta parziale',
+  fermato_dopo_stallo: 'fermato dopo stallo',
+  sync_ignota: 'sincronizzazione ignota',
+  sync_sotto_soglia: 'sincronizzazione incompleta',
+  sidebar_coperta: 'lista coperta da un pannello',
+  wa_halted: 'canale fermato',
+  numero_non_attivo: 'numero non attivo',
+  profilo_occupato: 'profilo occupato',
+  sessione_non_loggata: 'sessione scaduta',
+  errore_imprevisto: 'errore',
+}
+
+function TestataScan({ numberId, onRiscansionato }:
+    { numberId: string; onRiscansionato: () => void }) {
+  const [avvio, setAvvio] = useState(false)
+  const [storicoAperto, setStoricoAperto] = useState(false)
+  const { data, mutate } = useSWR(
+    `wa-discover-${numberId}`,
+    () => waApi.numeri.discoverStato(numberId),
+    { refreshInterval: (ultimo) => (ultimo?.in_corso ?? true) ? 10_000 : 0 },
+  )
+
+  const ultima = data?.ultima
+  const inCorso = data?.in_corso ?? false
+
+  // Le chat nuove devono comparire senza che l'operatore ricarichi la
+  // pagina: stesso useRef del Task 8, sulla transizione in-corso -> finita.
+  const eraInCorso = useRef(false)
+  useEffect(() => {
+    if (eraInCorso.current && !inCorso) onRiscansionato()
+    eraInCorso.current = inCorso
+  }, [inCorso, onRiscansionato])
+
+  async function riscansiona() {
+    setAvvio(true)
+    try {
+      await waApi.numeri.discover(numberId)
+      toast.info('Scansione avviata. Puo\' durare parecchi minuti.')
+      await mutate()
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Errore')
+    } finally {
+      setAvvio(false)
+    }
+  }
+
+  return (
+    <Riquadro>
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          {!ultima && (
+            <p className="text-sm" style={{ color: 'var(--wa-muted)' }}>
+              Questo numero non e&apos; mai stato scansionato.
+            </p>
+          )}
+          {ultima && (
+            <>
+              <p className="text-sm text-white">
+                Ultimo scan {formatData(ultima.finished_at ?? ultima.started_at)}
+                {ultima.dichiarato !== null && (
+                  <> — {ultima.salvate + ultima.aggiornate + ultima.saltate_gia_note} su{' '}
+                    {ultima.dichiarato}
+                    {ultima.copertura !== null && ` (${ultima.copertura}%)`}</>
+                )}
+                {' · '}{MOTIVO_LABEL_SCAN[ultima.motivo] ?? ultima.motivo}
+              </p>
+              {/* Il sospetto va detto accanto al risultato, non solo nei log:
+                  una raccolta corta con la sincronizzazione ignota ha un
+                  primo indiziato, e chi guarda la pagina deve saperlo. */}
+              {ultima.sync_stato === 'ignota' && ultima.motivo !== 'completato' && (
+                <p className="text-xs" style={{ color: '#e07a3c' }}>
+                  Sincronizzazione ignota durante lo scan: e&apos; il primo indiziato
+                  se la raccolta e&apos; corta.
+                </p>
+              )}
+              {ultima.saltate_gia_note > 0 && (
+                <p className="text-xs" style={{ color: 'var(--wa-muted)' }}>
+                  {ultima.saltate_gia_note} chat gia&apos; note non sono state riaperte.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {(data?.storico?.length ?? 0) > 0 && (
+            <Button type="button" variant="ghost" onClick={() => setStoricoAperto((v) => !v)}
+              style={{ color: 'var(--wa-muted)' }}>
+              {storicoAperto ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              Storico
+            </Button>
+          )}
+          <Button type="button" disabled={avvio || inCorso} onClick={riscansiona}
+            style={{ backgroundColor: 'var(--wa-accent)', color: '#04120e' }}>
+            {avvio || inCorso ? 'Scansione in corso...' : 'Riscansiona'}
+          </Button>
+        </div>
+      </div>
+
+      {storicoAperto && (
+        <table className="mt-4 w-full text-xs">
+          <thead>
+            <tr style={{ color: 'var(--wa-muted)' }}>
+              <th className="py-1 text-left font-medium">Quando</th>
+              <th className="py-1 text-left font-medium">Avviato da</th>
+              <th className="py-1 text-right font-medium">Coperte</th>
+              <th className="py-1 text-right font-medium">Nuove</th>
+              <th className="py-1 text-right font-medium">Copertura</th>
+              <th className="py-1 text-left font-medium">Esito</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(data?.storico ?? []).map((r) => (
+              <tr key={r.id} style={{ borderTop: '1px solid var(--wa-border)' }}>
+                <td className="py-1" style={{ color: 'var(--wa-muted)' }}>
+                  {formatData(r.finished_at ?? r.started_at)}
+                </td>
+                <td className="py-1" style={{ color: 'var(--wa-muted)' }}>{r.avviato_da}</td>
+                <td className="py-1 text-right" style={{ color: 'var(--wa-muted)' }}>
+                  {r.salvate + r.aggiornate + r.saltate_gia_note}
+                </td>
+                <td className="py-1 text-right" style={{ color: 'var(--wa-muted)' }}>{r.salvate}</td>
+                <td className="py-1 text-right" style={{ color: 'var(--wa-muted)' }}>
+                  {r.copertura !== null ? `${r.copertura}%` : '-'}
+                </td>
+                <td className="py-1" style={{ color: r.motivo === 'completato' ? 'var(--wa-muted)' : '#e07a3c' }}>
+                  {MOTIVO_LABEL_SCAN[r.motivo] ?? r.motivo}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Riquadro>
   )
 }
 

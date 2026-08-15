@@ -7,8 +7,8 @@ from datetime import datetime
 from app.models.tenant import Tenant
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                            WaCampaignType, WaContact, WaContactStatus,
-                           WaDiscoveredChat, WaNumber, WaNumberStatus,
-                           WaSendCondition, WaSequenceStep)
+                           WaDiscoveredChat, WaDiscoverRun, WaNumber,
+                           WaNumberStatus, WaSendCondition, WaSequenceStep)
 from app.utils.crypto import encrypt
 from app.utils.phone_pseudonym import hmac_phone
 
@@ -102,6 +102,24 @@ async def make_discovered_chat(db, tenant, number, *,
     db.add(riga)
     await db.flush()
     return riga
+
+
+async def make_discover_run(db, tenant, number, *, stato: str = "running",
+                            avviato_da: str = "manuale", salvate: int = 0,
+                            aggiornate: int = 0, saltate_gia_note: int = 0,
+                            non_verificate: int = 0, dichiarato: int | None = None,
+                            copertura: int | None = None, motivo: str = "in_corso",
+                            sync_stato: str = "ignota") -> WaDiscoverRun:
+    run = WaDiscoverRun(
+        id=str(uuid.uuid4()), tenant_id=tenant.id, number_id=number.id,
+        stato=stato, avviato_da=avviato_da, salvate=salvate, aggiornate=aggiornate,
+        saltate_gia_note=saltate_gia_note, non_verificate=non_verificate,
+        dichiarato=dichiarato, copertura=copertura, motivo=motivo,
+        sync_stato=sync_stato,
+    )
+    db.add(run)
+    await db.flush()
+    return run
 
 
 async def make_campaign_contact(db, campaign, contact, *,
