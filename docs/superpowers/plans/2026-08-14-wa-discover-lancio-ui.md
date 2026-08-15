@@ -1396,7 +1396,7 @@ async def test_chat_col_numero_nel_titolo_si_salta_per_hmac(conta_aperture):
 
     decisione = await wa_discover_run._decidi_riga(
         _PaginaFinta(), {"titolo": "+39 334 802 8109", "titolo_e_numero": True},
-        titoli_noti=set(), hmac_noti={hmac_phone("+393348028109")})
+        titoli_noti=set(), hmac_noti={hmac_phone("393348028109")})  # senza +: normalize_e164 lo toglie
 
     assert decisione.saltata is True
     assert decisione.riga is None
