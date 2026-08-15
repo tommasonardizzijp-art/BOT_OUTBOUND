@@ -19,10 +19,11 @@ from sqlalchemy import select
 from app.config import settings
 from app.database import get_db
 from app.models.wa import WaNumber, WaNumberStatus
-from app.services import wa_profile_lock, wa_session
+from app.services import wa_discover_gate, wa_discover_runs, wa_profile_lock, wa_session
 from app.utils.crypto import decrypt, encrypt
 from app.utils.phone_pseudonym import (PhoneNormalizationError, hmac_phone,
                                        mask_phone, normalize_e164)
+from app.workers.wa_discover_worker import enqueue_wa_discover
 
 router = APIRouter(prefix="/wa/numbers", tags=["wa-numbers"])
 
@@ -311,3 +312,71 @@ async def riattiva(number_id: str, motivo: str = Body(..., embed=True),
     logger.warning(f"[WA] numero {number_id[:8]} riattivato -> pending_qr: {motivo.strip()}")
     return {"status": numero.status.value,
             "prossimo_passo": "avvia il login QR, poi verifica la sessione"}
+
+
+def _serializza_run(run) -> dict:
+    return {
+        "id": run.id,
+        "stato": run.stato,
+        "avviato_da": run.avviato_da,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "salvate": run.salvate,
+        "aggiornate": run.aggiornate,
+        "saltate_gia_note": run.saltate_gia_note,
+        "non_verificate": run.non_verificate,
+        "dichiarato": run.dichiarato,
+        "copertura": run.copertura,
+        "motivo": run.motivo,
+        "sync_stato": run.sync_stato,
+        "errore": run.errore,
+    }
+
+
+@router.post("/{number_id}/discover")
+async def avvia_discover(number_id: str, db=Depends(get_db)) -> dict:
+    """Lancia una scansione auto-discover sul numero.
+
+    Rifiuta invece di accodare: nessuno stato differito, nessun browser che si
+    apre da solo mezz'ora dopo quando nessuno guarda. Il codice del rifiuto va
+    in `detail` insieme alla frase da mostrare -- "Errore 409" non dice a
+    nessuno cosa fare dopo.
+    """
+    numero = await _numero_o_404(db, number_id)
+
+    rifiuto = await wa_discover_gate.puo_lanciare(db, numero)
+    if rifiuto is not None:
+        raise HTTPException(409, {"codice": rifiuto,
+                                  "messaggio": wa_discover_gate.MESSAGGI[rifiuto]})
+
+    run = await wa_discover_runs.apri_run(db, tenant_id=numero.tenant_id,
+                                          number_id=number_id)
+    await db.commit()
+
+    if not await enqueue_wa_discover(number_id, run.id):
+        # ARQ ha scartato l'accodamento: la run non verra' mai chiusa da
+        # nessuno, e l'indice unico parziale renderebbe il numero non piu'
+        # scansionabile. Si chiude subito.
+        await wa_discover_runs.chiudi_run(db, run.id, {},
+                                          errore="accodamento ARQ rifiutato")
+        await db.commit()
+        raise HTTPException(409, {
+            "codice": "accodamento_fallito",
+            "messaggio": ("La coda dei job ha rifiutato la scansione. "
+                          "Verifica che il worker ARQ sia in esecuzione."),
+        })
+
+    return {"run_id": run.id, "queued": True}
+
+
+@router.get("/{number_id}/discover")
+async def stato_discover(number_id: str, db=Depends(get_db)) -> dict:
+    await _numero_o_404(db, number_id)
+    ultima = await wa_discover_runs.ultima_run(db, number_id)
+    righe = await wa_discover_runs.storico(
+        db, number_id, limit=settings.wa_discover_storico_limit)
+    return {
+        "ultima": _serializza_run(ultima) if ultima else None,
+        "storico": [_serializza_run(r) for r in righe],
+        "in_corso": ultima is not None and ultima.stato == "running",
+    }
