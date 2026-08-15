@@ -196,17 +196,12 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
     # nessuna percentuale, comparve solo dopo il click). Leggere
     # document.body.innerText senza aprire nulla non trova mai niente.
     #
-    # Su "ignota" si aspetta e si riprova invece di procedere: il 14/08 la
-    # voce Impostazioni non era nel DOM a 11 secondi dall'apertura, e il gate
-    # a due stati (None trattato come "procedi") ha lasciato passare uno scan
-    # su un profilo di cui non sapeva nulla.
-    lettura = None
-    for attesa_s in (0, 5, 15):
-        if attesa_s:
-            await asyncio.sleep(attesa_s)
-        lettura = await leggi_sincronizzazione(page)
-        if lettura.stato != "ignota":
-            break
+    # Una lettura sola, nessun ritentativo: il 15/08 e' stato verificato dal
+    # vivo che _SEL_IMPOSTAZIONI non matcha affatto su questo WhatsApp Web
+    # (due sessioni distinte, "voce Impostazioni non trovata"). Con un
+    # selettore sbagliato riprovare a 5s e 15s non cambia l'esito -- costa
+    # venti secondi a ogni scansione per riottenere lo stesso "ignota".
+    lettura = await leggi_sincronizzazione(page)
 
     esito["sync_stato"] = lettura.stato
     esito["sync_letta"] = lettura.percentuale
@@ -214,8 +209,7 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
     if not ok_sync:
         logger.info(f"[WaDiscover] {number_id}: scan non avviato -- {motivo_sync}")
         emit_event(number_id, "wa_discover_skipped", motivo_sync, level="warn")
-        esito["motivo"] = ("sync_ignota" if lettura.stato == "ignota"
-                           else "sync_sotto_soglia")
+        esito["motivo"] = "sync_sotto_soglia"
         return esito
     logger.info(f"[WaDiscover] {number_id}: gate sync ok -- {motivo_sync}")
 

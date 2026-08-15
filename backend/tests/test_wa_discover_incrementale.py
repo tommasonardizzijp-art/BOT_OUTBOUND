@@ -157,3 +157,44 @@ async def _monta_scan_finto(monkeypatch, righe):
     monkeypatch.setattr(wa_discover_run, "leggi_sincronizzazione", _sync)
     monkeypatch.setattr(wa_discover_run, "lista_utilizzabile", _lista_ok)
     monkeypatch.setattr(wa_discover_run.asyncio, "sleep", _niente)
+
+
+@pytest.mark.asyncio
+async def test_selettore_impostazioni_rotto_NON_ferma_lo_scan(db_session, monkeypatch):
+    """La regressione che questo test esiste per impedire.
+
+    Il tri-stato del gate di sincronizzazione (Task 7) inizialmente rifiutava
+    di scansionare quando lo stato era 'ignota'. Sembrava prudenza. Ma
+    _SEL_IMPOSTAZIONI non matcha su questo WhatsApp Web -- verificato dal
+    vivo il 15/08 su due sessioni distinte -- quindi la lettura e' SEMPRE
+    'ignota', e quel rifiuto avrebbe spento il discover per intero: zero chat
+    raccolte, su ogni numero, per sempre. Da guardia finta a sistema fermo.
+
+    Nessuno dei test del tri-stato lo vedeva: giravano su una pagina finta
+    dove il selettore funziona. Questo invece monta il caso reale -- gate che
+    torna 'ignota' -- e pretende che lo scan faccia comunque il suo lavoro.
+    """
+    from tests.factories_wa import make_number, make_tenant
+
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await db_session.commit()
+
+    righe = [{"titolo": "+39 333 111 2223", "titolo_e_numero": True},
+             {"titolo": "+39 333 111 2224", "titolo_e_numero": True}]
+    await _monta_scan_finto(monkeypatch, righe)
+
+    async def _sync_ignota(page):
+        from app.services.wa_discover.sincronizzazione import LetturaSync
+        return LetturaSync(stato="ignota", percentuale=None)
+
+    monkeypatch.setattr(wa_discover_run, "leggi_sincronizzazione", _sync_ignota)
+
+    esito = await wa_discover_run._esegui_scan(
+        _PaginaFinta(), db=db_session, tenant_id=tenant.id, number_id=number.id)
+
+    # Lo scan e' PARTITO e ha raccolto: e' l'invariante che conta.
+    assert esito["salvate"] == 2, esito
+    assert esito["motivo"] != "sync_ignota", esito
+    # E lo stato ignoto resta scritto: si procede, ma non in silenzio.
+    assert esito["sync_stato"] == "ignota", esito

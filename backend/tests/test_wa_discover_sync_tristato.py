@@ -76,11 +76,28 @@ def test_puo_scansionare_procede_su_assente():
     assert ok is True
 
 
-def test_puo_scansionare_si_ferma_su_ignota():
+def test_puo_scansionare_PROCEDE_su_ignota_e_lo_dichiara():
+    """Su 'ignota' si procede, e non e' una guardia indebolita per far
+    passare la suite.
+
+    Verificato dal vivo il 15/08 su due sessioni distinte: _SEL_IMPOSTAZIONI
+    non matcha affatto su questo WhatsApp Web, quindi la lettura e' SEMPRE
+    'ignota'. Rifiutare qui significherebbe rifiutare ogni scansione: da
+    guardia finta a discover spento, peggio del difetto che correggeva.
+
+    La rete di sicurezza vera e' la misura di copertura (G7, fallisce sotto
+    l'80%), non questo gate. Lo stato resta registrato in
+    wa_discover_runs.sync_stato e la UI lo mostra come primo indiziato.
+
+    Quando il selettore sara' ricatturato e verificato funzionante, questo
+    test torna ad asserire False -- non prima.
+    """
     ok, motivo = sincronizzazione.puo_scansionare_lettura(
         sincronizzazione.LetturaSync(stato="ignota", percentuale=None), soglia=60)
-    assert ok is False
-    assert "ignota" in motivo or "non" in motivo
+    assert ok is True
+    # Il motivo deve DIRE che non si sa: procedere in silenzio sarebbe la
+    # stessa cecita' del gate a due stati che questo tri-stato ha sostituito.
+    assert "ignot" in motivo
 
 
 def test_puo_scansionare_si_ferma_sotto_soglia():

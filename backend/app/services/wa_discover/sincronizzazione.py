@@ -240,8 +240,27 @@ def puo_scansionare_lettura(lettura: LetturaSync, *, soglia: int) -> tuple[bool,
     if lettura.stato == "assente":
         return True, "sincronizzazione conclusa (nessuna percentuale in Impostazioni)"
     if lettura.stato == "ignota":
-        return False, ("stato di sincronizzazione ignota: Impostazioni non "
-                       "raggiungibile, non si scansiona alla cieca")
+        # SI PROCEDE, e non e' un indebolimento della guardia: e' il
+        # riconoscimento che questa guardia oggi non sa leggere il proprio
+        # segnale. Il 15/08 e' stato verificato dal vivo che
+        # _SEL_IMPOSTAZIONI non matcha su questo WhatsApp Web, quindi
+        # rifiutare su "ignota" significherebbe rifiutare SEMPRE: da guardia
+        # finta a discover spento, che e' peggio del difetto che correggeva.
+        #
+        # Fail-closed su un segnale che non sappiamo leggere non e' prudenza,
+        # e' spegnere il sistema. La rete di sicurezza vera resta la misura
+        # di COPERTURA (G7, fallisce sotto l'80%), che ha gia' dimostrato di
+        # funzionare dicendo 78/900 = 9% quando lo scan si era arreso.
+        #
+        # Lo stato resta registrato in wa_discover_runs.sync_stato e la UI lo
+        # mostra come "primo indiziato se la raccolta e' corta": diciamo che
+        # non sappiamo, invece di fingere di sapere o di fermarci.
+        #
+        # Quando il selettore sara' ricatturato e verificato funzionante,
+        # QUESTA riga torna a essere un rifiuto -- non prima.
+        return True, ("stato di sincronizzazione ignoto (Impostazioni non "
+                      "raggiungibile): si procede, ed e' il primo indiziato "
+                      "se la raccolta risulta corta")
     if lettura.percentuale < soglia:
         return False, (f"sincronizzazione al {lettura.percentuale}%, sotto la "
                        f"soglia del {soglia}%")
