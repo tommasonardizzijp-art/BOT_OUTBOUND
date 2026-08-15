@@ -76,7 +76,8 @@ async def apri_run(db, *, tenant_id: str, number_id: str,
     return run
 
 
-async def chiudi_run(db, run_id: str, esito: dict, *, errore: str | None = None) -> None:
+async def chiudi_run(db, run_id: str, esito: dict, *, errore: str | None = None,
+                     motivo: str | None = None) -> None:
     """Scrive l'esito e chiude la run. Compare-and-swap SQL, non
     SELECT-poi-scrivi: un solo UPDATE ... WHERE id=:id AND stato='running'.
 
@@ -94,12 +95,24 @@ async def chiudi_run(db, run_id: str, esito: dict, *, errore: str | None = None)
     UPDATE non tocca nessuna riga e non si scrive nulla -- stessa idempotenza
     di prima, garantita dal DB e non da un controllo Python fra due query
     separate.
+
+    `motivo`, sul ramo `errore=`, sovrascrive l'etichetta di default
+    'errore_imprevisto' (chiudi_se_orfana la vuole 'run_orfana'). Va PIEGATO
+    qui dentro, nella stessa UPDATE atomica, non scritto separatamente dopo:
+    due scritture che devono restare coerenti fra loro e non lo sono per
+    costruzione sono il difetto. Riprodotto in review: chiudi_se_orfana
+    faceva chiudi_run(errore=...) POI una seconda scrittura incondizionata
+    (SELECT + `motivo = 'run_orfana'` + commit) senza controllare se la
+    prima avesse davvero trovato la riga 'running' -- un worker che non era
+    morto, e chiudeva la run con successo vero (done/completato/salvate
+    reali) nella finestra fra le due scritture, si vedeva il motivo
+    sovrascritto a 'run_orfana' mentendo su una scansione riuscita.
     """
     ora = datetime.utcnow()
     if errore is not None:
         valori = {
             "stato": "failed",
-            "motivo": "errore_imprevisto",
+            "motivo": motivo or "errore_imprevisto",
             "errore": _sanifica_errore(errore)[:2000],
             "finished_at": ora,
         }
@@ -183,18 +196,18 @@ async def chiudi_se_orfana(db, number_id: str) -> bool:
     from app.database import AsyncSessionLocal
 
     async with AsyncSessionLocal() as db_propria:
+        # Una sola scrittura CAS: stato, errore e motivo nella STESSA UPDATE
+        # atomica (WHERE stato='running'), non una seconda scrittura
+        # incondizionata dopo. Con due scritture separate un worker che non
+        # era morto -- e chiudeva la run con successo vero fra le due -- si
+        # vedeva il motivo sovrascritto a 'run_orfana' pur restando
+        # done/completato con i contatori veri: trovato in review, il caso
+        # era gia' nella lista adversarial (#3) ma nessuno l'aveva eseguito.
         await chiudi_run(db_propria, run_id, {},
                          errore=f"run rimasta aperta oltre "
                                 f"{settings.wa_discover_run_orfana_min} minuti senza "
-                                "che nessuno la chiudesse")
-        # chiudi_run scrive motivo='errore_imprevisto' per la via dell'errore:
-        # qui il motivo vero e' un altro, e distinguerlo serve a chi legge lo
-        # storico. Ri-letta nella sessione propria: 'run' sopra vive nella
-        # sessione del chiamante, un'altra connessione.
-        chiusa = await db_propria.scalar(
-            select(WaDiscoverRun).where(WaDiscoverRun.id == run_id))
-        if chiusa is not None:
-            chiusa.motivo = "run_orfana"
+                                "che nessuno la chiudesse",
+                         motivo="run_orfana")
         await db_propria.commit()
 
     # La sessione del chiamante ha ancora 'run' nella sua identity map: dopo

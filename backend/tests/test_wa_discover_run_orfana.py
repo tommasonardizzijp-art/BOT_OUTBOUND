@@ -138,3 +138,66 @@ async def test_orfana_chiusa_sopravvive_anche_se_il_gate_rifiuta_dopo(db_session
             assert chiusa.motivo == "run_orfana"
     finally:
         await eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_orfana_non_sovrascrive_una_chiusura_legittima_nel_mezzo(db_session, monkeypatch):
+    """Riprodotto dal reviewer: un worker che NON era morto -- stava solo
+    per finire -- chiude la run con successo vero (done/completato/
+    salvate=500) nella finestra fra la lettura di chiudi_se_orfana e la sua
+    scrittura. Il difetto vecchio: due scritture separate (chiudi_run(errore)
+    poi un SELECT + `motivo = 'run_orfana'` incondizionato) che non
+    controllava se la prima avesse davvero trovato la riga 'running'. La
+    riga finale mescolava stato='done'/salvate=500 col motivo 'run_orfana'
+    -- falso, ed esattamente nel campo che diciamo essere "il primo posto
+    dove si guarda per capire cosa e' successo senza aprire i log". Era gia'
+    nella lista adversarial (#3), nessuno l'aveva eseguito.
+
+    L'invariante, non il ramo: 'done' deve implicare motivo=='completato' e
+    i contatori veri, mai un ibrido.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.config import settings
+    from app.utils.db_dialect import to_async_database_url
+
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
+                                          number_id=number.id)
+    run.started_at = datetime.utcnow() - timedelta(hours=9)
+    await db_session.commit()
+
+    chiudi_run_vero = wa_discover_runs.chiudi_run
+    eng = create_async_engine(to_async_database_url(settings.database_url))
+    maker = async_sessionmaker(eng, expire_on_commit=False)
+
+    async def chiudi_run_con_interferenza(*a, **kw):
+        # "Nel mezzo": chiudi_se_orfana ha gia' deciso (run letta 'running',
+        # oltre soglia) e sta per chiamare chiudi_run -- PRIMA che lo faccia,
+        # un'altra sessione chiude la run per davvero, con successo vero.
+        async with maker() as s_legittima:
+            await chiudi_run_vero(s_legittima, run.id, {
+                "salvate": 500, "aggiornate": 0, "saltate_gia_note": 0,
+                "non_verificate": 0, "dichiarato": 500, "motivo": "completato",
+            })
+            await s_legittima.commit()
+        return await chiudi_run_vero(*a, **kw)
+
+    monkeypatch.setattr(wa_discover_runs, "chiudi_run", chiudi_run_con_interferenza)
+
+    try:
+        await wa_discover_runs.chiudi_se_orfana(db_session, number.id)
+    finally:
+        await eng.dispose()
+
+    riga = await wa_discover_runs.ultima_run(db_session, number.id)
+    if riga.stato == "done":
+        assert riga.motivo == "completato"
+        assert riga.salvate == 500
+    else:
+        # Non dovrebbe capitare (l'interferenza chiude PRIMA della scrittura
+        # di chiudi_se_orfana), ma se capitasse comunque MAI un ibrido:
+        # 'run_orfana' coi contatori di una raccolta vera.
+        assert riga.stato == "failed"
+        assert riga.salvate == 0
