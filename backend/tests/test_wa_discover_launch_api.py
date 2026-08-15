@@ -126,6 +126,89 @@ async def test_se_l_accodamento_fallisce_la_run_non_resta_appesa(db_session, cli
 
 
 @pytest.mark.asyncio
+async def test_se_enqueue_wa_discover_solleva_la_run_non_resta_appesa(
+        db_session, client, monkeypatch):
+    # enqueue_job di ARQ torna None (quindi enqueue_wa_discover torna False)
+    # SOLO se il _job_id collide -- il nostro ha un UUID fresco a ogni
+    # chiamata, non puo' mai succedere: quel ramo e' quasi morto. Lo
+    # scenario vero (Redis giu') fa SOLLEVARE arq.create_pool, non tornare
+    # un sentinella -- riprodotto in review con un ConnectionError. Va
+    # gestito come il ramo False, non lasciato scoperto (era un 500 con la
+    # run appesa 'running' per sempre).
+    async def _verde(db, number):
+        return None
+
+    async def _enqueue_esplode(number_id, run_id):
+        raise ConnectionError("Redis giu'")
+
+    monkeypatch.setattr(wa_numbers.wa_discover_gate, "puo_lanciare", _verde)
+    monkeypatch.setattr(wa_numbers, "enqueue_wa_discover", _enqueue_esplode)
+
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await db_session.commit()
+
+    r = await client.post(f"/api/wa/numbers/{number.id}/discover")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["codice"] == "accodamento_fallito"
+    assert await wa_discover_runs.run_attiva(db_session, number.id) is None
+
+
+@pytest.mark.asyncio
+async def test_due_post_concorrenti_uno_solo_vince(db_session, monkeypatch):
+    # L'indice unico parziale (Task 1) fa vincere una sola apri_run -- ma
+    # senza gestione esplicita la SECONDA solleva IntegrityError DENTRO
+    # l'endpoint e diventa un 500 generico invece del 409 scan_gia_in_corso
+    # che il codice gia' prevede. asyncio.gather vero, non due chiamate
+    # sequenziali: due sessioni DB indipendenti, stesso schema della
+    # concorrenza di chiudi_run (Task 2).
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.config import settings
+    from app.utils.db_dialect import to_async_database_url
+
+    async def _verde(db, number):
+        return None
+
+    async def _enqueue(number_id, run_id):
+        return True
+
+    monkeypatch.setattr(wa_numbers.wa_discover_gate, "puo_lanciare", _verde)
+    monkeypatch.setattr(wa_numbers, "enqueue_wa_discover", _enqueue)
+
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await db_session.commit()
+
+    eng = create_async_engine(to_async_database_url(settings.database_url))
+    maker = async_sessionmaker(eng, expire_on_commit=False)
+
+    async def _override_get_db():
+        async with maker() as s:
+            yield s
+
+    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_current_user] = _admin_utente
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c1, \
+                   AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c2:
+            r1, r2 = await asyncio.gather(
+                c1.post(f"/api/wa/numbers/{number.id}/discover"),
+                c2.post(f"/api/wa/numbers/{number.id}/discover"),
+            )
+    finally:
+        app.dependency_overrides.clear()
+        await eng.dispose()
+
+    codici = sorted([r1.status_code, r2.status_code])
+    assert codici == [200, 409], (r1.status_code, r1.text, r2.status_code, r2.text)
+    perdente = r1 if r1.status_code == 409 else r2
+    assert perdente.json()["detail"]["codice"] == "scan_gia_in_corso"
+
+
+@pytest.mark.asyncio
 async def test_get_senza_nessuna_run(db_session, client):
     tenant = await make_tenant(db_session)
     number = await make_number(db_session, tenant)

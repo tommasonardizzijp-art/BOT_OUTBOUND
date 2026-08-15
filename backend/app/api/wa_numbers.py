@@ -15,6 +15,7 @@ from datetime import datetime
 from fastapi import APIRouter, Body, Depends, HTTPException
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.database import get_db
@@ -349,16 +350,46 @@ async def avvia_discover(number_id: str, db=Depends(get_db)) -> dict:
         raise HTTPException(409, {"codice": rifiuto,
                                   "messaggio": wa_discover_gate.MESSAGGI[rifiuto]})
 
-    run = await wa_discover_runs.apri_run(db, tenant_id=numero.tenant_id,
-                                          number_id=number_id)
-    await db.commit()
+    try:
+        run = await wa_discover_runs.apri_run(db, tenant_id=numero.tenant_id,
+                                              number_id=number_id)
+        await db.commit()
+    except IntegrityError:
+        # Due POST quasi simultanei sullo stesso numero: il gate ha visto
+        # 'nessuna run attiva' per entrambi (finestra fra la lettura del
+        # gate e l'INSERT), e l'indice unico parziale del Task 1 fa vincere
+        # UNA sola apri_run -- corretto, nessuna riga doppia. Ma senza
+        # questo except la seconda solleva IntegrityError DENTRO
+        # l'endpoint e risulterebbe un 500 generico invece del 409
+        # scan_gia_in_corso che il gate stesso avrebbe dato con un
+        # millisecondo di ritardo. Il rollback e' necessario: senza,
+        # la sessione resta sporca e un PendingRollbackError risalirebbe
+        # al posto nostro alla prossima query.
+        await db.rollback()
+        raise HTTPException(409, {"codice": "scan_gia_in_corso",
+                                  "messaggio": wa_discover_gate.MESSAGGI["scan_gia_in_corso"]})
 
-    if not await enqueue_wa_discover(number_id, run.id):
-        # ARQ ha scartato l'accodamento: la run non verra' mai chiusa da
-        # nessuno, e l'indice unico parziale renderebbe il numero non piu'
-        # scansionabile. Si chiude subito.
-        await wa_discover_runs.chiudi_run(db, run.id, {},
-                                          errore="accodamento ARQ rifiutato")
+    try:
+        accodato = await enqueue_wa_discover(number_id, run.id)
+        errore_accodamento = "accodamento ARQ rifiutato"
+    except Exception as exc:  # noqa: BLE001 -- vedi sotto
+        # enqueue_job di ARQ torna None (quindi enqueue_wa_discover torna
+        # False) SOLO se il _job_id collide -- il nostro ha un UUID fresco
+        # a ogni chiamata, non puo' mai succedere: quel ramo e' quasi morto.
+        # Lo scenario vero (Redis giu') fa SOLLEVARE arq.create_pool, non
+        # tornare un sentinella: senza questo except prendeva la strada non
+        # gestita (500, run appesa 'running' per sempre).
+        logger.error(f"[WaDiscover] {number_id}: enqueue_wa_discover ha "
+                     f"sollevato invece di tornare False ({type(exc).__name__}: {exc})")
+        accodato = False
+        errore_accodamento = f"{type(exc).__name__}: {exc}"
+
+    if not accodato:
+        # ARQ ha scartato l'accodamento (torna False) o ha sollevato
+        # (gestito sopra): in entrambi i casi la run non verra' mai chiusa
+        # da nessuno, e l'indice unico parziale renderebbe il numero non
+        # piu' scansionabile. Si chiude subito.
+        await wa_discover_runs.chiudi_run(db, run.id, {}, errore=errore_accodamento)
         await db.commit()
         raise HTTPException(409, {
             "codice": "accodamento_fallito",
