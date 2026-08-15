@@ -7,10 +7,12 @@ motore resta quello gia' collaudato contro il DOM vero.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from loguru import logger
 from sqlalchemy import desc, select, update
 
+from app.config import settings
 from app.models.wa import WaDiscoverRun
 
 # I motivi che il motore restituisce e che NON sono un guasto nostro: la run
@@ -139,3 +141,33 @@ async def storico(db, number_id: str, *, limit: int = 10) -> list[WaDiscoverRun]
         select(WaDiscoverRun).where(WaDiscoverRun.number_id == number_id)
         .order_by(desc(WaDiscoverRun.started_at)).limit(limit))
     return list(righe.scalars().all())
+
+
+async def chiudi_se_orfana(db, number_id: str) -> bool:
+    """Chiude una run rimasta 'running' oltre ogni tempo credibile.
+
+    True se ne ha chiusa una. Serve perche' l'indice unico parziale rende un
+    numero non piu' scansionabile finche' esiste una run aperta: un worker
+    ucciso a meta' scan, senza questa, lo blocca per sempre.
+
+    Si chiama dal gate e non da un cron di proposito: chi tenta di
+    scansionare e' esattamente chi ha bisogno che la vecchia sia chiusa, e un
+    cron in piu' e' un pezzo in piu' che puo' rompersi in silenzio.
+    """
+    run = await run_attiva(db, number_id)
+    if run is None:
+        return False
+    limite = datetime.utcnow() - timedelta(minutes=settings.wa_discover_run_orfana_min)
+    if run.started_at > limite:
+        return False
+    logger.warning(f"[WaDiscover] run {run.id} su {number_id} aperta da oltre "
+                   f"{settings.wa_discover_run_orfana_min} minuti: chiusa come orfana "
+                   "(il worker che doveva chiuderla non c'e' piu')")
+    await chiudi_run(db, run.id, {},
+                     errore=f"run rimasta aperta oltre {settings.wa_discover_run_orfana_min} "
+                            "minuti senza che nessuno la chiudesse")
+    # chiudi_run scrive motivo='errore_imprevisto' per la via dell'errore: qui
+    # il motivo vero e' un altro, e distinguerlo serve a chi legge lo storico.
+    run.motivo = "run_orfana"
+    await db.flush()
+    return True

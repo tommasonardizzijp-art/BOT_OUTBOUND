@@ -62,6 +62,11 @@ async def puo_lanciare(db, number) -> str | None:
     if occupato:
         return "browser_occupato"
 
+    # Auto-guarigione: una run che nessuno ha chiuso non deve bloccare il
+    # numero per sempre. Va prima del controllo qui sotto, altrimenti la
+    # guardia rifiuterebbe basandosi su una run morta.
+    await wa_discover_runs.chiudi_se_orfana(db, number.id)
+
     if await wa_discover_runs.run_attiva(db, number.id) is not None:
         return "scan_gia_in_corso"
 

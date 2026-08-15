@@ -1,4 +1,4 @@
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -535,6 +535,32 @@ class Settings(BaseSettings):
     # profilo (90 min) NON e' un problema: si rinnova a ogni riga
     # (wa_profile_lock.renew, gia' cablato in _esegui_scan).
     wa_discover_job_timeout_s: int = 21600  # 6 ore
+    # Oltre questo tempo una run 'running' non e' piu' credibile: se il
+    # lucchetto di profilo (TTL 90 min) e' scaduto e la run e' ancora aperta,
+    # il worker che doveva chiuderla non c'e' piu'. DEVE stare sopra
+    # wa_discover_job_timeout_s (360 min), non e' un numero indipendente:
+    # sotto quella soglia una run legittimamente ancora in corso verrebbe
+    # dichiarata orfana e chiusa mentre il job ARQ sta ancora lavorando --
+    # esattamente il difetto che questa guardia dovrebbe prevenire, non
+    # causare (trovato in review, Task 11). 420 = 360 (job_timeout_s/60) +
+    # 60 min di margine. Il legame e' verificato a runtime sotto
+    # (_verifica_orfana_sopra_job_timeout), non lasciato a due costanti
+    # scollegate: chi cambia l'una senza pensare all'altra si accorge subito,
+    # non fra sei mesi durante un primo scan grande.
+    wa_discover_run_orfana_min: int = 420
+
+    @model_validator(mode="after")
+    def _verifica_orfana_sopra_job_timeout(self) -> "Settings":
+        margine_min = self.wa_discover_run_orfana_min - self.wa_discover_job_timeout_s / 60
+        if margine_min <= 0:
+            raise ValueError(
+                "wa_discover_run_orfana_min deve stare SOPRA wa_discover_job_timeout_s: "
+                f"oggi {self.wa_discover_run_orfana_min} min contro "
+                f"{self.wa_discover_job_timeout_s / 60:.0f} min. Con questi valori una "
+                "run legittimamente ancora in corso verrebbe chiusa come orfana mentre "
+                "il job ARQ sta ancora lavorando (Task 11 + Task 10 del piano wa-discover)."
+            )
+        return self
 
     # Lock Redis cross-processo sul profilo browser IG (C.2, passo 4): TTL
     # CORTO + rinnovo automatico dentro il chokepoint (context_manager),
