@@ -81,6 +81,29 @@ async def test_ram_insufficiente(db_session, gate_pulito, monkeypatch):
     assert await wa_discover_gate.puo_lanciare(db_session, number) == "ram_insufficiente"
 
 
+@pytest.mark.asyncio
+async def test_redis_irraggiungibile_e_fail_closed_non_500(db_session, gate_pulito, monkeypatch):
+    # "Tutte fail-closed" (docstring del modulo). Redis giu' e' gia' successo
+    # su questa macchina (Memurai ucciso da un taskkill /T, 12/08): senza
+    # questo except l'eccezione risale fino all'endpoint e diventa un 500
+    # invece di un 409 leggibile.
+    async def _esplode(*a, **kw):
+        raise ConnectionError("Redis irraggiungibile")
+
+    monkeypatch.setattr(wa_discover_gate.wa_profile_lock, "profilo_occupato_da", _esplode)
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    assert await wa_discover_gate.puo_lanciare(db_session, number) == "browser_occupato"
+
+
+def test_messaggio_browser_occupato_non_afferma_un_altro_numero():
+    # test_browser_occupato_dal_numero_stesso dimostra che lo stesso codice
+    # scatta anche quando il lucchetto e' del numero su cui si sta
+    # lanciando: il messaggio non puo' affermare che e' "un altro numero",
+    # sarebbe falso in quel caso.
+    assert "un altro" not in wa_discover_gate.MESSAGGI["browser_occupato"].lower()
+
+
 def test_ogni_codice_di_rifiuto_ha_un_messaggio_per_un_umano():
     # Un 409 senza frase diventa "Errore 409" a schermo, che non dice a
     # nessuno cosa fare dopo.
