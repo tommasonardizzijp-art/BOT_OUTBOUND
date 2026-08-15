@@ -280,6 +280,49 @@ def puo_scansionare(percentuale: int | None, soglia: int = SOGLIA_DEFAULT) -> tu
                    "dichiarerebbe completa")
 
 
+# Raccoglie i dati grezzi (un booleano per riga candidata: il suo centro
+# risolve dentro #pane-side, o no), la DECISIONE su cosa farne vive in Python
+# (_almeno_una_cliccabile) -- stesso schema di sidebar._JS_SCAN_SIDEBAR /
+# righe_dalla_sidebar: quello che nel DOM va misurato resta in JS, quello che
+# va deciso resta testabile senza un browser.
+_JS_RIGHE_CANDIDATE = """() => {
+    const pane = document.querySelector('#pane-side');
+    if (!pane) return null;
+    const righe = pane.querySelectorAll("[role='row']");
+    if (!righe.length) return [];
+    const risultati = [];
+    for (const r of righe) {
+        const box = r.getBoundingClientRect();
+        if (box.width < 10 || box.height < 10) continue;
+        if (box.top < 0 || box.top > window.innerHeight - 20) continue;
+        const sopra = document.elementFromPoint(
+            box.left + box.width / 2, box.top + box.height / 2);
+        risultati.push(!!(sopra && pane.contains(sopra)));
+    }
+    return risultati;
+}"""
+
+
+def _almeno_una_cliccabile(candidati: list[bool] | None) -> bool:
+    """Vero se ALMENO UNA riga candidata e' davvero raggiungibile da un click
+    (il suo centro risolve dentro #pane-side, non su un pannello sovrapposto).
+
+    NON esce alla prima candidata (era il difetto, 15/08): quando la sidebar
+    e' scorsa, la prima riga renderizzata puo' stare dietro l'intestazione --
+    il suo `top` e' positivo, passa il filtro geometrico, ma il suo centro
+    cade sulla barra di ricerca. Concludere "coperta" sulla prima candidata
+    scartava una lista perfettamente utilizzabile, solo scorsa: zero chat
+    raccolte su ogni scan che non riparte dall'inizio. A scroll zero la prima
+    riga e' gia' sotto l'intestazione, per questo il difetto non era mai
+    emerso prima. `None`/lista vuota (nessuna candidata, o #pane-side
+    assente): niente da giudicare, non si dichiara utilizzabile cio' che non
+    si e' potuto guardare.
+    """
+    if not candidati:
+        return False
+    return any(candidati)
+
+
 async def lista_utilizzabile(page) -> bool:
     """True se la lista chat e' presente e non coperta da un pannello.
 
@@ -295,24 +338,8 @@ async def lista_utilizzabile(page) -> bool:
     impedisce allo scan di partire per sempre.
     """
     try:
-        return bool(await page.evaluate("""() => {
-            const pane = document.querySelector('#pane-side');
-            if (!pane) return false;
-            const righe = pane.querySelectorAll("[role='row']");
-            if (!righe.length) return false;
-            // La prima riga con area visibile deve essere davvero in cima allo
-            // stack: se sopra c'e' un pannello, elementFromPoint restituisce
-            // quello e il click finirebbe li'.
-            for (const r of righe) {
-                const box = r.getBoundingClientRect();
-                if (box.width < 10 || box.height < 10) continue;
-                if (box.top < 0 || box.top > window.innerHeight - 20) continue;
-                const sopra = document.elementFromPoint(
-                    box.left + box.width / 2, box.top + box.height / 2);
-                return !!(sopra && pane.contains(sopra));
-            }
-            return false;
-        }"""))
+        candidati = await page.evaluate(_JS_RIGHE_CANDIDATE)
+        return _almeno_una_cliccabile(candidati)
     except Exception:
         # Non si riesce nemmeno a interrogare il DOM: non si dichiara
         # utilizzabile cio' che non si e' potuto guardare.

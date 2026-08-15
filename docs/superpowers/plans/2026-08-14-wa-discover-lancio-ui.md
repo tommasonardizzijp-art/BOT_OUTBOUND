@@ -2703,6 +2703,114 @@ git commit -m "fix(wa): il job sopravvive al proprio timeout invece di lasciare 
 
 ---
 
+## Task 12: `lista_utilizzabile` non esce alla prima riga candidata
+
+**Files:**
+- Modify: `backend/app/services/wa_discover/sincronizzazione.py`
+- Test: `backend/tests/test_wa_discover_sincronizzazione.py`
+- Modify: `backend/tests/test_wa_discover_run.py` (il fake condiviso `_FakePage.evaluate` simula lo stesso segnale, il contratto cambia)
+
+**Perché questo task esiste.** Trovato dal vivo il 15/08, provando a riprendere uno scan da meta' lista (due volte di fila). Dentro il JS di `lista_utilizzabile`:
+
+```js
+for (const r of righe) {
+    const box = r.getBoundingClientRect();
+    if (box.width < 10 || box.height < 10) continue;
+    if (box.top < 0 || box.top > window.innerHeight - 20) continue;
+    const sopra = document.elementFromPoint(...);
+    return !!(sopra && pane.contains(sopra));   // esce alla PRIMA candidata
+}
+```
+
+il `return` sta dentro il ciclo: la guardia decide sulla **prima** riga che passa i filtri geometrici, invece di continuare a cercarne una davvero cliccabile. Quando la sidebar e' scorsa, la prima riga renderizzata sta spesso **dietro l'intestazione** (la barra di ricerca): il suo `top` e' positivo (passa il filtro), ma il suo centro cade sull'intestazione. `elementFromPoint` ritorna un nodo dentro `#side` ma fuori da `#pane-side`, e la guardia conclude "pannello aperto sopra la lista" — `motivo="sidebar_coperta"`, zero chat raccolte. A scroll zero non succede mai (la prima riga e' gia' sotto l'intestazione): per questo il difetto non era mai emerso, nessuno aveva mai provato a riprendere uno scan da meta' lista.
+
+- [ ] **Step 1: Scrivi il test che fallisce**
+
+In `backend/tests/test_wa_discover_sincronizzazione.py`, aggiungi test su una funzione Python pura `_almeno_una_cliccabile(candidati: list[bool] | None) -> bool` (non sul JS, che non e' eseguibile in un test Python — la decisione va estratta dal DOM-gathering, stesso schema di `sidebar._JS_SCAN_SIDEBAR`/`righe_dalla_sidebar`):
+
+```python
+def test_almeno_una_cliccabile_vero_se_la_seconda_lo_e():
+    assert sincronizzazione._almeno_una_cliccabile([False, True]) is True
+
+
+def test_almeno_una_cliccabile_falso_se_tutte_coperte():
+    assert sincronizzazione._almeno_una_cliccabile([False, False]) is False
+
+
+def test_almeno_una_cliccabile_falso_senza_candidati():
+    assert sincronizzazione._almeno_una_cliccabile([]) is False
+    assert sincronizzazione._almeno_una_cliccabile(None) is False
+```
+
+Piu' due test di integrazione su `lista_utilizzabile` con una pagina finta che ritorna direttamente la lista di booleani (la parte `getBoundingClientRect`/`elementFromPoint` non e' testabile senza un browser vero, quella parte resta JS non testata qui — ha la sua copertura nel collaudo manuale).
+
+Run: `cd backend && ./venv/Scripts/python.exe -m pytest tests/test_wa_discover_sincronizzazione.py -v`
+Expected: FAIL con `AttributeError: module ... has no attribute '_almeno_una_cliccabile'`
+
+- [ ] **Step 2: Separa raccolta (JS) e decisione (Python)**
+
+In `backend/app/services/wa_discover/sincronizzazione.py`, la JS raccoglie un booleano PER RIGA candidata invece di decidere lei stessa:
+
+```python
+_JS_RIGHE_CANDIDATE = """() => {
+    const pane = document.querySelector('#pane-side');
+    if (!pane) return null;
+    const righe = pane.querySelectorAll("[role='row']");
+    if (!righe.length) return [];
+    const risultati = [];
+    for (const r of righe) {
+        const box = r.getBoundingClientRect();
+        if (box.width < 10 || box.height < 10) continue;
+        if (box.top < 0 || box.top > window.innerHeight - 20) continue;
+        const sopra = document.elementFromPoint(
+            box.left + box.width / 2, box.top + box.height / 2);
+        risultati.push(!!(sopra && pane.contains(sopra)));
+    }
+    return risultati;
+}"""
+
+
+def _almeno_una_cliccabile(candidati: list[bool] | None) -> bool:
+    if not candidati:
+        return False
+    return any(candidati)
+
+
+async def lista_utilizzabile(page) -> bool:
+    try:
+        candidati = await page.evaluate(_JS_RIGHE_CANDIDATE)
+        return _almeno_una_cliccabile(candidati)
+    except Exception:
+        return False
+```
+
+- [ ] **Step 3: Aggiorna il fake condiviso**
+
+`backend/tests/test_wa_discover_run.py`, `_FakePage.evaluate`, il ramo `"elementFromPoint" in script`: il contratto e' cambiato da un booleano singolo a una lista di booleani.
+
+```python
+        if "elementFromPoint" in script:
+            return [not self.drawer_aperti]
+```
+
+Senza questo, 11 test di `test_wa_discover_run.py` restano rossi (o peggio, verdi per il motivo sbagliato: `any(bool)` solleva `TypeError`, catturato dal blanket `except Exception` di `lista_utilizzabile`, che ritorna silenziosamente `False` — "pannello coperto" anche quando non lo e', trovato SOLO grazie allo sweep completo del namespace, non dalla sola suite toccata).
+
+- [ ] **Step 4: Esegui i test e verifica che passino**
+
+Run: `cd backend && ./venv/Scripts/python.exe -m pytest tests/test_wa_discover_sincronizzazione.py tests/test_wa_discover_run.py -v`
+Expected: tutti verdi.
+
+**Prova del nove**: cambia temporaneamente `return any(candidati)` in `return candidati[0]` (il difetto originale, tradotto in Python), rilancia `test_wa_discover_sincronizzazione.py` — solo i due test che coprono lo scenario (seconda riga cliccabile, prima no) devono diventare rossi. Ripristina.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/services/wa_discover/sincronizzazione.py backend/tests/test_wa_discover_sincronizzazione.py backend/tests/test_wa_discover_run.py
+git commit -m "fix(wa): lista_utilizzabile non esce piu' alla prima riga candidata"
+```
+
+---
+
 ## Chiusura del modulo
 
 Protocollo obbligatorio della skill `sviluppo-modulo`, nell'ordine:
