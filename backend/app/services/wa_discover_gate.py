@@ -3,6 +3,14 @@
 Tutte fail-closed e in ordine dalla piu' economica alla piu' costosa. Il
 chiamante riceve un CODICE, non un booleano: la UI deve poter dire perche' no,
 e "Errore 409" non dice a nessuno cosa fare dopo.
+
+`puo_lanciare` stessa non committa mai (lo fa il chiamante, dopo `apri_run`):
+ma NON e' piu' una funzione di sola lettura, perche' chiama
+`wa_discover_runs.chiudi_se_orfana`, che ha un effetto collaterale reale --
+chiude una run rimasta 'running' oltre ogni tempo credibile -- e lo fa con
+una sessione PROPRIA che committa lei stessa (Task 10). E' una scelta
+deliberata: far dipendere quella guarigione dal commit del chiamante
+l'avrebbe persa ogni volta che una guardia successiva rifiuta comunque.
 """
 from __future__ import annotations
 

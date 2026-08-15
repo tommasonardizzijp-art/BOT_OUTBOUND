@@ -153,6 +153,20 @@ async def chiudi_se_orfana(db, number_id: str) -> bool:
     Si chiama dal gate e non da un cron di proposito: chi tenta di
     scansionare e' esattamente chi ha bisogno che la vecchia sia chiusa, e un
     cron in piu' e' un pezzo in piu' che puo' rompersi in silenzio.
+
+    NON e' piu' sola lettura: se trova un'orfana, la chiude con una sessione
+    PROPRIA che committa lei stessa (invece di scrivere sulla sessione del
+    chiamante e sperare che qualcuno committi dopo). puo_lanciare non
+    committa mai di suo -- se dopo aver chiuso l'orfana un'altra guardia
+    rifiuta comunque (es. RAM), l'endpoint solleva un 409 senza commit e
+    get_db() chiude la sessione con un rollback implicito: la guarigione
+    scritta li' sparirebbe, lasciando la run 'running' a DB per un altro
+    giro (trovato in review, Task 10). Con una sessione propria la
+    guarigione e' durevole a prescindere da cosa decide il chiamante dopo.
+
+    La lettura iniziale resta sulla sessione del chiamante: aprirne una
+    propria costerebbe una connessione in piu' a OGNI chiamata, mentre il
+    caso normale -- nessuna orfana -- e' quasi sempre.
     """
     run = await run_attiva(db, number_id)
     if run is None:
@@ -160,14 +174,41 @@ async def chiudi_se_orfana(db, number_id: str) -> bool:
     limite = datetime.utcnow() - timedelta(minutes=settings.wa_discover_run_orfana_min)
     if run.started_at > limite:
         return False
-    logger.warning(f"[WaDiscover] run {run.id} su {number_id} aperta da oltre "
+
+    run_id = run.id
+    logger.warning(f"[WaDiscover] run {run_id} su {number_id} aperta da oltre "
                    f"{settings.wa_discover_run_orfana_min} minuti: chiusa come orfana "
                    "(il worker che doveva chiuderla non c'e' piu')")
-    await chiudi_run(db, run.id, {},
-                     errore=f"run rimasta aperta oltre {settings.wa_discover_run_orfana_min} "
-                            "minuti senza che nessuno la chiudesse")
-    # chiudi_run scrive motivo='errore_imprevisto' per la via dell'errore: qui
-    # il motivo vero e' un altro, e distinguerlo serve a chi legge lo storico.
-    run.motivo = "run_orfana"
-    await db.flush()
+
+    from app.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db_propria:
+        await chiudi_run(db_propria, run_id, {},
+                         errore=f"run rimasta aperta oltre "
+                                f"{settings.wa_discover_run_orfana_min} minuti senza "
+                                "che nessuno la chiudesse")
+        # chiudi_run scrive motivo='errore_imprevisto' per la via dell'errore:
+        # qui il motivo vero e' un altro, e distinguerlo serve a chi legge lo
+        # storico. Ri-letta nella sessione propria: 'run' sopra vive nella
+        # sessione del chiamante, un'altra connessione.
+        chiusa = await db_propria.scalar(
+            select(WaDiscoverRun).where(WaDiscoverRun.id == run_id))
+        if chiusa is not None:
+            chiusa.motivo = "run_orfana"
+        await db_propria.commit()
+
+    # La sessione del chiamante ha ancora 'run' nella sua identity map: dopo
+    # una chiusura scritta e committata da un'ALTRA sessione, un expire
+    # esplicito e' la difesa corretta contro il rischio di identity map gia'
+    # trovato nel Task 2 (li' era un vero problema, stessa sessione con un
+    # CAS Core). VERIFICATO qui con un test dedicato che togliendo questa
+    # riga la suite resta comunque verde (5/5): su SQLite/aiosqlite, in
+    # QUESTO schema a due sessioni, la SELECT fresca di run_attiva vede gia'
+    # il commit dell'altra sessione senza bisogno dell'expire, perche' il
+    # filtro stato='running' e' valutato dal motore SQL sui dati attuali,
+    # non dall'identity map. La teniamo comunque: e' a costo zero (nessun
+    # I/O), e non e' garantito che regga allo stesso modo su un motore o una
+    # configurazione di isolamento diversi (es. Postgres con isolamento piu'
+    # stretto di READ COMMITTED).
+    db.expire(run)
     return True
