@@ -29,6 +29,7 @@ deve tenerne conto -- p.es. soglia piu' alta quando session_checked_at e' vecchi
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from loguru import logger
 
@@ -197,6 +198,54 @@ async def _richiudi_pannello(page) -> bool:
     except Exception as exc:
         logger.error(f"[WaDiscover] reload dopo il gate fallito: {exc}")
         return False
+
+
+@dataclass(frozen=True)
+class LetturaSync:
+    """Cosa sappiamo davvero della sincronizzazione.
+
+    Tre stati, non due, perche' `None` da solo confonde "finita" con "non
+    lo so" -- ed e' il motivo per cui il 14/08 uno scan e' partito su un
+    profilo di cui non sapevamo nulla e ha raccolto 78 righe su 900.
+    """
+    stato: str          # "letta" | "assente" | "ignota"
+    percentuale: int | None
+
+
+async def leggi_sincronizzazione(page) -> LetturaSync:
+    try:
+        voce = page.locator(_SEL_IMPOSTAZIONI).first
+        if not await voce.count():
+            logger.warning(
+                "[WaDiscover] voce Impostazioni non trovata: stato di "
+                "sincronizzazione IGNOTO (non significa sincronizzato)")
+            return LetturaSync(stato="ignota", percentuale=None)
+        await voce.click(timeout=4000)
+        await page.wait_for_timeout(1500)
+        testi = await page.evaluate(_JS_TESTI_PAGINA)
+        percentuale = percentuale_da_testi(testi)
+        if percentuale is None:
+            # Pannello aperto e nessuna percentuale: WhatsApp la mostra solo
+            # MENTRE sincronizza. Assente = finita.
+            return LetturaSync(stato="assente", percentuale=None)
+        return LetturaSync(stato="letta", percentuale=percentuale)
+    except Exception as exc:
+        logger.warning(f"[WaDiscover] lettura sincronizzazione fallita: {exc}")
+        return LetturaSync(stato="ignota", percentuale=None)
+    finally:
+        await _richiudi_pannello(page)
+
+
+def puo_scansionare_lettura(lettura: LetturaSync, *, soglia: int) -> tuple[bool, str]:
+    if lettura.stato == "assente":
+        return True, "sincronizzazione conclusa (nessuna percentuale in Impostazioni)"
+    if lettura.stato == "ignota":
+        return False, ("stato di sincronizzazione ignota: Impostazioni non "
+                       "raggiungibile, non si scansiona alla cieca")
+    if lettura.percentuale < soglia:
+        return False, (f"sincronizzazione al {lettura.percentuale}%, sotto la "
+                       f"soglia del {soglia}%")
+    return True, f"sincronizzazione al {lettura.percentuale}%"
 
 
 def puo_scansionare(percentuale: int | None, soglia: int = SOGLIA_DEFAULT) -> tuple[bool, str]:

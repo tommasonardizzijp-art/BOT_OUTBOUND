@@ -49,7 +49,8 @@ from app.services import bot_state_service, wa_profile_lock
 from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
 from app.services.wa_discover import classifica, pannello, salvataggio, sidebar
 from app.services.wa_discover.sincronizzazione import (
-    SOGLIA_DEFAULT, leggi_percentuale, lista_utilizzabile, puo_scansionare,
+    SOGLIA_DEFAULT, leggi_percentuale, leggi_sincronizzazione,
+    lista_utilizzabile, puo_scansionare, puo_scansionare_lettura,
 )
 from app.utils.events import emit as emit_event
 from app.utils.phone_pseudonym import hmac_phone
@@ -186,20 +187,35 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
     esito = {
         "salvate": 0, "aggiornate": 0, "saltate_gia_note": 0,
         "non_verificate": 0, "dichiarato": None, "motivo": "completato",
+        "sync_stato": "ignota", "sync_letta": None,
     }
 
-    # Gate di sincronizzazione (Task 3). La percentuale NON sta nel body della
-    # pagina: vive dentro Impostazioni, e va aperto per leggerla (verificato nel
-    # PoC-5 -- il censimento della sola sidebar non trovo' nessuna percentuale,
-    # comparve solo dopo il click). Leggere document.body.innerText senza aprire
-    # nulla non trova mai niente: il gate direbbe sempre "non lo so" e
-    # lascerebbe passare sempre, cioe' non sarebbe un gate.
-    percentuale = await leggi_percentuale(page)
-    ok_sync, motivo_sync = puo_scansionare(percentuale, soglia=soglia_sync)
+    # Gate di sincronizzazione, tri-stato (Task 7). La percentuale NON sta nel
+    # body della pagina: vive dentro Impostazioni, e va aperto per leggerla
+    # (verificato nel PoC-5 -- il censimento della sola sidebar non trovo'
+    # nessuna percentuale, comparve solo dopo il click). Leggere
+    # document.body.innerText senza aprire nulla non trova mai niente.
+    #
+    # Su "ignota" si aspetta e si riprova invece di procedere: il 14/08 la
+    # voce Impostazioni non era nel DOM a 11 secondi dall'apertura, e il gate
+    # a due stati (None trattato come "procedi") ha lasciato passare uno scan
+    # su un profilo di cui non sapeva nulla.
+    lettura = None
+    for attesa_s in (0, 5, 15):
+        if attesa_s:
+            await asyncio.sleep(attesa_s)
+        lettura = await leggi_sincronizzazione(page)
+        if lettura.stato != "ignota":
+            break
+
+    esito["sync_stato"] = lettura.stato
+    esito["sync_letta"] = lettura.percentuale
+    ok_sync, motivo_sync = puo_scansionare_lettura(lettura, soglia=soglia_sync)
     if not ok_sync:
         logger.info(f"[WaDiscover] {number_id}: scan non avviato -- {motivo_sync}")
         emit_event(number_id, "wa_discover_skipped", motivo_sync, level="warn")
-        esito["motivo"] = "sync_sotto_soglia"
+        esito["motivo"] = ("sync_ignota" if lettura.stato == "ignota"
+                           else "sync_sotto_soglia")
         return esito
     logger.info(f"[WaDiscover] {number_id}: gate sync ok -- {motivo_sync}")
 

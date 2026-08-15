@@ -138,8 +138,12 @@ async def _monta_scan_finto(monkeypatch, righe):
             al_fondo = True
         return _Stato()
 
-    async def _percentuale(page):
-        return 100
+    async def _sync(page):
+        # Task 7: il gate e' tri-stato (LetturaSync), _esegui_scan non
+        # chiama piu' leggi_percentuale. "letta" sopra soglia lascia
+        # passare, stesso comportamento del vecchio _percentuale=100.
+        from app.services.wa_discover.sincronizzazione import LetturaSync
+        return LetturaSync(stato="letta", percentuale=100)
 
     async def _lista_ok(page):
         return True
@@ -150,6 +154,6 @@ async def _monta_scan_finto(monkeypatch, righe):
     monkeypatch.setattr(wa_discover_run.sidebar, "scan_sidebar", _scan)
     monkeypatch.setattr(wa_discover_run.sidebar, "totale_dichiarato", _totale)
     monkeypatch.setattr(wa_discover_run.sidebar, "scorri_sidebar", _scorri)
-    monkeypatch.setattr(wa_discover_run, "leggi_percentuale", _percentuale)
+    monkeypatch.setattr(wa_discover_run, "leggi_sincronizzazione", _sync)
     monkeypatch.setattr(wa_discover_run, "lista_utilizzabile", _lista_ok)
     monkeypatch.setattr(wa_discover_run.asyncio, "sleep", _niente)
