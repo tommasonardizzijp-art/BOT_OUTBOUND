@@ -1,41 +1,80 @@
 # Test manuali UI — Lancio dell'auto-discover WhatsApp (`/wa/numeri` + `/wa/scoperti`)
 
-**Lista scritta, non eseguita**: l'esecuzione richiede backend + worker ARQ + frontend avviati e un browser vero. Il frontend E' compilabile da questo worktree (`node_modules` installato con `npm ci`, `tsc --noEmit` ed `eslint` puliti sui tre file di Task 8/9). Da eseguire con un agente QA via browser quando il profilo WhatsApp e' libero (uno scan reale e' in corso al momento della stesura).
+**ESEGUITI il 16/08**, dopo il merge della PR #85 e l'applicazione della migrazione `035` in produzione. Backend + worker ARQ + cron + frontend avviati, browser vero (Patchright, profilo temporaneo — mai i profili WhatsApp).
 
-Convenzioni: prefisso dati di test `QAWAD-<random>`; ogni test = PASS/FAIL/SKIP(motivo) da compilare in esecuzione; screenshot obbligatorio sui FAIL. Serve almeno un numero WhatsApp `active` con sessione vera per i casi che aprono davvero il browser (uno solo, per via del gate globale `browser_occupato` — Task 3). Dove serve simulare stati che il DOM reale non produce a comando (kill-switch, RAM, run orfana, worker spento), agire sul DB/servizi di test invece che sul DOM.
+**Esito complessivo: 17 PASS · 0 FAIL aperti · 5 SKIP · 2 rilievi da decidere.**
+
+Due difetti trovati qui sono stati corretti e riverificati nello stesso giro (PR #86 e #87), ciascuno con prova del nove. Restano aperti solo i casi che richiedono **il telefono collegato**, che il 16/08 non lo era.
+
+Vincolo di sicurezza rispettato in tutto il giro: **nessuna scansione vera e' mai partita**. Ogni `POST /discover` e' stato fatto con una condizione di rifiuto gia' in piedi (lucchetto profilo su Redis, kill-switch, soglia RAM alzata), cosi' il gate rifiuta a monte di `apri_run` e nessun browser WhatsApp si apre. Verificato a DB dopo ogni blocco: zero run `running` residue.
+
+Convenzioni: dati di test prefissati `QAWAD-`, cancellati in chiusura di ogni giro (`try/finally`). Lucchetto Redis e kill-switch rimessi come erano e **riletti** per confermarlo.
 
 ## `/wa/numeri` — colonna e bottone (1-10)
 
 1. Numero `active` mai scansionato → colonna "Ultimo scan" mostra "Mai", bottone "Scansiona contatti" abilitato.
-2. Numero `active` GIA' scansionato in precedenza (una run `done` chiusa, nessuna `running`) → bottone "Scansiona contatti" ANCORA abilitato, un secondo giro parte normalmente (riscansione non bloccata dalla presenza di uno storico).
+   - **PASS (16/08)** — su `PRIMERO TEST`, tabella vergine (`wa_discover_runs` appena creata dalla `035`).
+2. Numero `active` GIA' scansionato in precedenza (una run `done` chiusa, nessuna `running`) → bottone ANCORA abilitato, un secondo giro parte normalmente.
+   - **PASS (16/08)** — con due run chiuse a storico il bottone resta abilitato.
 3. Click su "Scansiona contatti" → dialog di conferma con la frase "blocca gli invii su TUTTI i numeri finche' non finisce" visibile prima di confermare.
-4. Conferma il dialog → bottone passa a "Scansione in corso..." disabilitato, toast "Scansione avviata per **label**. Puo' durare parecchi minuti.".
-5. A scan finito (aspettare o forzare un giro corto in test) → colonna "Ultimo scan" mostra data, contatori `salvate+aggiornate+saltate_gia_note`/`dichiarato`, percentuale copertura, motivo leggibile (non un codice grezzo tipo `completato` senza traduzione); toast di esito UNA sola volta (non uno per ogni giro di polling — aspettare almeno 2-3 cicli di `refreshInterval` da 10s per verificarlo).
-6. Doppio click ravvicinato su "Scansiona contatti" sullo stesso numero → solo UNA richiesta di rete parte (il bottone si disabilita al primo click, prima che il secondo possa partire).
-7. Ricarica la pagina mentre una scansione e' in corso → colonna "Ultimo scan" torna a mostrare "In corso..." e il bottone resta disabilitato (lo stato si rilegge dal backend, non dipende dal componente React sopravvissuto al reload).
-8. Bottone "Scansiona contatti" ASSENTE su un numero `pending_qr`/`qr_required`/`disconnected`/`retired`/`suspended` (visibile solo su `active`, stesso gating di riga degli altri bottoni).
-9. Su un numero `active` ma non ancora sincronizzato/con sessione appena riattivata, avviare uno scan e verificare che il motivo finale, se `sync_ignota`/`sync_sotto_soglia`, sia scritto in chiaro e non un codice.
-10. Con un motivo del motore NON presente in `MOTIVO_LABEL` (es. forzare a DB un valore inventato su una run gia' chiusa, poi ricaricare) → la cella mostra il codice grezzo, mai una cella vuota o "undefined".
+   - **PASS (16/08)** — frase presente nel testo del dialog.
+4. Conferma il dialog → bottone passa a "Scansione in corso..." disabilitato, toast "Scansione avviata per **label**".
+   - **PARZIALE (16/08)** — la meta' verificabile senza telefono e' PASS: con una run `running` a DB il bottone e' "Scansione in corso..." **e disabilitato** (caso 7). Il toast "Scansione avviata" NON e' stato visto, perche' ogni conferma di questo giro e' stata deliberatamente fatta sotto una condizione di rifiuto per non far partire scansioni vere. Da chiudere col telefono collegato.
+5. A scan finito → "Ultimo scan" mostra data, contatori, percentuale, motivo leggibile; toast di esito **UNA** sola volta.
+   - **PASS (16/08)** — cella: `15/15 (100%) · completo`, motivo tradotto e non grezzo. Toast: la transizione `running`→`done` e' stata provocata a DB mentre la pagina pollava, e i toast sono stati **campionati ogni 400 ms per 45 s** (oltre quattro giri di `refreshInterval`). Risultato: **una sola comparsa**, `"PRIMERO TEST: 10 chat coperte, 7 nuove."`. Nota di metodo: guardare i toast una volta sola dopo 15 s non prova nulla — durano ~4 s, e infatti al primo tentativo ne risultavano zero.
+6. Doppio click ravvicinato su "Scansiona contatti" → solo UNA richiesta di rete parte.
+   - **FAIL → PASS (16/08, PR #87)** — trovato ROSSO: **2** `POST /discover`. `ConfirmDialog` faceva `onOpenChange(false); onConfirm()`, e due click nello stesso tick girano entrambi prima che React ri-renderizzi. Corretto con una guardia in `useRef` (non in uno state: deve reggere dentro lo stesso tick). Riverificato: 1 richiesta. Prova del nove eseguita.
+7. Ricarica la pagina mentre una scansione e' in corso → "In corso..." e bottone disabilitato.
+   - **PASS (16/08)** — lo stato si rilegge dal backend, non dipende dal componente sopravvissuto al reload.
+8. Bottone assente su un numero `pending_qr`/`qr_required`/`disconnected`/`retired`/`suspended`.
+   - **SKIP (16/08)** — in produzione tutti e tre i numeri sono `active`. Non e' stato forzato uno stato diverso su un numero vero. Il gating a livello di API e' comunque gia' coperto per tutti e sei gli stati non-`active` dall'adversarial F.34.
+9. Numero `active` non ancora sincronizzato → il motivo finale `sync_ignota`/`sync_sotto_soglia` scritto in chiaro.
+   - **SKIP (16/08)** — richiede una scansione vera, quindi il telefono. La traduzione dei due motivi e' presente in `MOTIVO_LABEL` ed e' stata esercitata dal caso 11 (`sincronizzazione ignota` mostrata in testata).
+10. Motivo NON presente in `MOTIVO_LABEL` → la cella mostra il codice grezzo, mai vuota o "undefined".
+    - **PASS (16/08)** — forzato `motivo_inventato_qa` a DB su una run chiusa: la cella mostra il codice grezzo. Chiude anche l'adversarial C.24, che era SKIP verificato solo staticamente.
 
 ## `/wa/scoperti` — testata e storico (11-16)
 
-11. Seleziona un numero con almeno una run pregressa → testata mostra "Ultimo scan **data**", contatori, motivo, e se `sync_stato=='ignota'` la frase "Sincronizzazione ignota durante lo scan: e' il primo indiziato se la raccolta e' corta." (solo quando il motivo non e' `completato`).
-12. Click su "Storico" (visibile solo se ci sono almeno 2 run) → si apre la tabella con Quando/Avviato da/Coperte/Nuove/Copertura/Esito, righe in ordine dalla piu' recente.
-13. Click su "Riscansiona" da questa pagina → stesso comportamento del bottone di `/wa/numeri` (dialog NO — qui parte diretta, verificare che sia coerente col codice: se manca il dialog di conferma qui e c'e' in `/wa/numeri`, segnalarlo come incoerenza, non necessariamente un bug).
-14. Scansione avviata da `/wa/scoperti` che finisce → la lista delle chat scoperte (tabella sotto) si aggiorna DA SOLA (le chat nuove compaiono) senza che l'operatore prema reload — verificare che il `useEffect` sulla transizione in-corso→finita richiami `refreshScoperti`.
-15. Numero MAI scansionato selezionato in `/wa/scoperti` → testata dice "Questo numero non e' mai stato scansionato.", nessun bottone Storico.
-16. `saltate_gia_note > 0` su una run chiusa → riga informativa "N chat gia' note non sono state riaperte." visibile.
+11. Testata con "Ultimo scan **data**", contatori, motivo, e la frase sulla sincronizzazione ignota.
+    - **PASS (16/08)** — `Ultimo scan 15/08, 23:57 — 57 su 100 (57%) · raccolta parziale` piu' la frase "Sincronizzazione ignota durante lo scan: e' il primo indiziato se la raccolta e' corta.", mostrata solo perche' il motivo non e' `completato`.
+12. "Storico" visibile solo se ci sono almeno 2 run.
+    - **RILIEVO (16/08)** — il bottone compare gia' con **UNA** run: `wa_discover_runs.storico()` include anche l'ultima, e la UI mostra il bottone su `storico.length > 0`. Non e' un difetto di correttezza (lo storico con una riga e' veritiero), ma non e' cio' che la lista si aspettava. **Decisione di Tommaso**: o si allinea la UI (`> 1`), o si allinea questa lista. Non toccato.
+13. "Riscansiona" da `/wa/scoperti`: verificare la coerenza col bottone di `/wa/numeri`.
+    - **INCOERENZA CONFERMATA (16/08)** — `/wa/numeri` chiede conferma con un dialog, `/wa/scoperti` fa partire la scansione **diretta** (`TestataScan.riscansiona`). La lista chiedeva di segnalarlo, non necessariamente un bug. **Decisione di Tommaso.** Non toccato — ma va notato che e' proprio la frase del dialog ("blocca gli invii su TUTTI i numeri") a essere l'informazione che qui non viene data.
+14. Scansione avviata da `/wa/scoperti` che finisce → la lista delle chat si aggiorna DA SOLA.
+    - **SKIP (16/08)** — richiede una scansione vera con raccolta di chat nuove, quindi il telefono.
+15. Numero MAI scansionato → "Questo numero non e' mai stato scansionato.", nessun bottone Storico.
+    - **PASS (16/08)** — entrambe le meta' verificate.
+16. `saltate_gia_note > 0` → riga "N chat gia' note non sono state riaperte."
+    - **FAIL → PASS (16/08, PR #87)** — trovato ROSSO: rendeva `"12chat gia' note..."`, **senza lo spazio**. Verificato nel DOM e non dedotto: due nodi di testo, `"12"` e `"chat gia'..."`, con lo spazio iniziale del secondo sparito nonostante il sorgente lo avesse. Corretto con `{' '}` esplicito. Riverificato: `"12 chat gia' note non sono state riaperte."`. Prova del nove eseguita.
 
 ## Guardie e messaggi (17-21)
 
-17. Avvia uno scan durante una campagna che sta INVIANDO sullo stesso numero (mini-sessione d'invio in corso, lucchetto profilo preso da `wa_worker`) → rifiutato `browser_occupato` (il lucchetto e' condiviso fra invio e discover, guardia 4 del Task 3), frase leggibile, non "Errore 409" ne' `[object Object]`.
-18. Avvia uno scan mentre un ALTRO scan e' gia' in corso sullo stesso numero → rifiutato "scan_gia_in_corso", frase leggibile, bottone gia' disabilitato lato UI (dovrebbe impedire il click prima ancora della richiesta).
-19. Col kill-switch WhatsApp alzato (striscia rossa in alto) → bottone "Scansiona contatti" o il click produce il rifiuto "canale_fermo" con la frase che rimanda alla striscia in alto.
-20. RAM sotto soglia (simulare abbassando `wa_discover_ram_min_mb` a runtime o occupando RAM) → rifiuto "ram_insufficiente" con frase leggibile, non un errore generico.
-21. Con Redis del backend fermo (solo in un ambiente di test dedicato, MAI su Redis di produzione) → il click produce comunque un 409 leggibile ("browser_occupato"), mai un 500/schermata bianca.
+17. Scan durante un invio sullo stesso numero → rifiutato `browser_occupato`, frase leggibile.
+    - **PASS con riserva (16/08)** — il lucchetto e' stato preso su Redis **per davvero** (`wa:profile-lock:{number_id}`, stessa chiave e stesso formato `token:epoch` che usa `wa_profile_lock`), non mockato. Risposta: `409` con `{"codice":"browser_occupato","messaggio":"Il browser sulla macchina del backend e' gia' in uso..."}`, e la frase compare a schermo. **Riserva**: il lucchetto e' stato preso a mano e non da una mini-sessione d'invio vera, quindi resta provato dal codice (stesso namespace di chiave) e non dal campo che sia proprio il sender a prenderlo.
+18. Scan mentre un ALTRO scan e' in corso → rifiutato `scan_gia_in_corso`, frase leggibile.
+    - **FAIL → PASS (16/08, PR #86)** — trovato ROSSO, ed e' il difetto piu' grave del giro: rispondeva **500** ("Errore interno temporaneo del server") invece del 409. Causa: `chiudi_se_orfana` confrontava `started_at` (aware su PostgreSQL, colonna `timestamptz`) con `datetime.utcnow()` (naive) → `TypeError` risalito fino all'endpoint. La suite gira su SQLite, che restituisce naive: verde nei test, rotto in produzione. Riverificato: `409` con `"Una scansione su questo numero e' gia' in corso: aspetta che finisca."`.
+19. Kill-switch alzato → rifiuto `canale_fermo` con la frase che rimanda alla striscia.
+    - **PASS (16/08)** — `409` con `"Il canale WhatsApp e' fermo (kill-switch alzato): riprendilo dalla striscia in alto prima di scansionare."`, e la striscia rossa e' visibile in alto. Il kill-switch e' stato alzato e **rimesso a `false`**, con rilettura di conferma.
+20. RAM sotto soglia → rifiuto `ram_insufficiente` con frase leggibile.
+    - **PASS (16/08)** — backend riavviato con `WA_DISCOVER_RAM_MIN_MB=999999`: `409` con `"Memoria insufficiente per aprire un browser: chiudi qualche finestra e riprova."`. Backend poi rimesso senza override.
+21. Redis del backend fermo → 409 leggibile, mai 500.
+    - **SKIP (16/08)** — su questa macchina Memurai e' il Redis di **produzione** e la lista lo vieta esplicitamente. Il caso equivalente e' comunque gia' coperto per davvero dall'adversarial A.11, che punta `arq_redis_settings` su una porta mai in ascolto (connessione TCP reale rifiutata) invece di fermare un servizio vero.
 
 ## Auto-guarigione e caso limite (22-24)
 
-22. Con una run lasciata `running` a mano oltre la soglia (`wa_discover_run_orfana_min`, via UPDATE diretto a DB su `started_at`), premere di nuovo "Scansiona contatti" sullo stesso numero → invece del rifiuto "scan_gia_in_corso" atteso su una run "attiva", il gate la chiude da solo e la nuova scansione parte (o rifiuta per un motivo DIVERSO, mai per "scan_gia_in_corso" sulla stessa run orfana).
-23. `GET /wa/numbers/{id}/discover` su un numero senza nessuna run (via network tab o direttamente) → `{"ultima": null, "storico": [], "in_corso": false}`, la UI mostra "Mai" senza errori in console.
-24. **Scorri la lista chat a meta' (dal vivo, scroll manuale nel browser aperto sul profilo), poi lancia lo scan dalla UI** → deve PARTIRE e raccogliere, non rifiutare subito con `motivo="sidebar_coperta"` (Task 12, difetto trovato dal vivo il 15/08: la guardia usciva alla prima riga candidata, che da meta' lista in giu' sta spesso dietro l'intestazione).
+22. Run lasciata `running` oltre la soglia orfana → il gate la chiude da solo, mai `scan_gia_in_corso` su quella run.
+    - **PASS (16/08)** — run seminata con `started_at` di 9 ore fa (soglia: 420 min). Risposta: `409 ram_insufficiente` — cioe' un motivo **diverso**, che e' l'esito atteso — e a DB la run orfana risulta `stato='failed'`, `motivo='run_orfana'`. Zero run `running` residue: nessuna scansione vera e' partita. Nota: questa e' la stessa strada che prima della PR #86 rispondeva 500, quindi il caso 22 era bloccato tanto quanto il 18.
+23. `GET /wa/numbers/{id}/discover` su un numero senza run → `{"ultima": null, "storico": [], "in_corso": false}`.
+    - **PASS (16/08)** — verificato su due numeri, `200` con esattamente quel corpo. E' anche la prova che la migrazione `035` e' viva: prima, questa rotta rispondeva 500.
+24. Scan lanciato con la lista chat gia' scorsa a meta' → deve PARTIRE, non rifiutare con `sidebar_coperta`.
+    - **SKIP (16/08)** — richiede la sidebar VERA di WhatsApp Web, quindi il telefono. Il difetto e' pero' **corretto a monte e verificato nel codice mergiato**: `lista_utilizzabile` ora valuta tutti i candidati con `_almeno_una_cliccabile`, non esce piu' sulla PRIMA riga (che da meta' lista in giu' sta dietro l'intestazione). Lo script `backend/scripts/scan_da_dove_sei.py` non ha piu' bisogno di patcharla.
+
+## Cosa resta, e cosa serve per chiuderlo
+
+| Caso | Cosa manca |
+|---|---|
+| 4 (meta' toast), 9, 14, 24 | **il telefono collegato**: sono gli unici che richiedono una scansione vera |
+| 8 | un numero in uno stato non-`active` che nessuno usa in produzione |
+| 21 | un Redis di test separato da quello di produzione |
+| 12, 13 | **decisione di Tommaso**, non lavoro tecnico |

@@ -1,6 +1,10 @@
 # Adversarial test suite — Lancio dell'auto-discover WhatsApp (obiettivo: ROMPERE il sistema)
 
-**Lista scritta, non eseguita**: stessa nota del file dei test manuali. Da eseguire quando backend/worker/frontend sono avviati e il profilo WhatsApp e' libero.
+**Stato al 16/08**: la lista era stata eseguita quasi tutta il 15/08 con backend e worker, ma senza frontend ne' browser. Il 16/08, dopo il merge della PR #85 e la migrazione `035`, sono stati chiusi i casi che aspettavano un browser vero: **A.5, C.24, D.26 (parziale), H.16, H.44**.
+
+Il piu' importante era **A.5** (doppio click), che il 15/08 si era deliberatamente rifiutato di sostituire con l'equivalente piu' debole del caso 1: era **rosso**, ed e' stato corretto (PR #87). Nello stesso giro H.16 ha prodotto una **correzione al verbale del 15/08** — vedi li'.
+
+Restano SKIP solo i casi che richiedono **il telefono collegato** (H.43, J.49), un proxy che alteri le risposte (D.27, D.28), o 50+ numeri che in produzione non esistono (H.42).
 
 Criterio di PASS **INVERTITO**: passa se il sistema **si difende** (errore chiaro, nessuna scrittura sporca, invariante intatta). Un 500, un errore DB grezzo all'utente, una scrittura parziale o un'invariante violata = FAIL anche se "sembrava funzionare".
 
@@ -19,7 +23,8 @@ Livello misto: browser per cio' che la UI esprime, chiamata diretta all'API (scr
 4. **Orfana chiusa dal gate MA una guardia successiva rifiuta comunque** (es. RAM sotto soglia mockata) → verificare A DB (sessione fresca, non quella della richiesta) che la run orfana risulti comunque chiusa, non "running" per un altro giro (il difetto reale trovato in review sulla dipendenza dal commit del chiamante).
    - **PASS (15/08)** — coperto da `test_orfana_chiusa_sopravvive_anche_se_il_gate_rifiuta_dopo` in `backend/tests/test_wa_discover_run_orfana.py` (Task 10), verifica gia' con sessione fresca indipendente.
 5. **Doppio click ravvicinato dal browser vero** (non solo dal codice) su "Scansiona contatti" → al massimo una riga `running` a DB, il secondo tentativo di rete (se parte) riceve `409`.
-   - **SKIP (15/08)** — richiede un browser vero e il frontend avviato. Non eseguibile ora: scan WhatsApp reale in corso sul profilo, vietato aprire un secondo browser. Non sostituito con un equivalente piu' debole (il caso 1 copre gia' la race a livello di codice, ma NON e' lo stesso caso: qui il punto e' il comportamento del CLICK/UI, non solo l'endpoint). Da eseguire quando il profilo e' libero.
+   - ~~SKIP (15/08)~~ → **FAIL, poi PASS (16/08, PR #87)** — eseguito col browser vero. Ed era ROSSO, come temeva la nota del 15/08 che rifiutava di sostituirlo con l'equivalente piu' debole del caso 1: **due** `POST /discover` partivano davvero. `ConfirmDialog` faceva `onOpenChange(false); onConfirm()`, e due click nello STESSO tick girano entrambi prima che React ri-renderizzi — ne' `open=false` ne' un `disabled` guidato da state fanno in tempo. A DB l'invariante ha retto (l'indice unico parziale rifiuta la seconda run, l'endpoint la traduce in 409), ma l'operatore si vedeva un errore rosso subito dopo aver avviato una scansione riuscita. Fix: guardia in `useRef`, non in uno state, proprio perche' deve reggere dentro lo stesso tick; si riarma alla riapertura del dialog. Riverificato: 1 richiesta. Prova del nove eseguita (difetto rimesso → solo T6 e T16 rossi → ripristinato → 10 PASS).
+   - **Nota**: il caso 1 (race a livello di endpoint) era gia' PASS dal 15/08. Conferma che coprire la race lato codice non copre il comportamento del click, che e' esattamente perche' questo caso non era stato "sostituito".
 6. **`GET` e `POST` concorrenti** sullo stesso numero (uno legge lo stato mentre l'altro avvia) → il `GET` non deve mai vedere uno stato a meta' scrittura (nessuna riga con `stato` NULL o campi parzialmente popolati).
    - **PASS (15/08)** — nessun test esistente lo copriva. Script nuovo `backend/scripts/qa_wa_discover/adv_a06_get_post_concorrenti.py`: 20 trial di `asyncio.gather(GET, POST)` reali (due `AsyncClient`, sessioni DB indipendenti) su numeri vergini, ogni risposta GET verificata contro il contratto (`ultima.stato` sempre in `{running,done,failed}`, `in_corso` sempre coerente con lo stato). 20/20 coerenti.
 7. **`enqueue_wa_discover` che solleva un'eccezione** (Redis giu' proprio nell'istante dell'accodamento, non prima) → la run aperta viene chiusa subito con `accodamento_fallito`, mai lasciata `running`.
@@ -44,7 +49,18 @@ Livello misto: browser per cio' che la UI esprime, chiamata diretta all'API (scr
 15. `dichiarato = 0` o `dichiarato = null` → `copertura` resta `None`/non calcolata, mai una divisione per zero che fa esplodere l'endpoint.
     - **PASS (15/08)** — gia' coperto da `test_copertura_none_se_il_dichiarato_manca` e `test_copertura_none_se_il_dichiarato_e_zero` nello stesso file, rieseguiti ora.
 16. Contatori (`salvate`, `aggiornate`, `saltate_gia_note`, `non_verificate`) a valori enormi (simulare scrivendo direttamente a DB un intero grande) → la UI li mostra senza overflow di formattazione ne' crash del rendering.
-    - **PASS parziale (15/08)** — verificata solo la meta' backend (nessun frontend in esecuzione): script nuovo, contatori a 10^15 scritti a DB, `GET /discover` risponde 200 col valore intatto nel JSON (nessun overflow/troncamento silenzioso lato server). La parte UI (formattazione, non-crash del rendering) resta da fare quando il frontend e' in esecuzione.
+    - ~~PASS parziale (15/08)~~ → **PASS completo, con una CORREZIONE al verbale del 15/08 (16/08)**.
+
+      La correzione prima dell'esito, perche' cambia il caso: **su PostgreSQL 10^15 non e' scrivibile affatto**. Le colonne dei contatori sono `Integer` (int4) e asyncpg rifiuta il valore in produzione:
+
+      ```
+      asyncpg.exceptions.DataError: invalid input for query argument $7:
+        1000000000000000 (value out of int32 range)
+      ```
+
+      Quel numero era scrivibile solo su **SQLite**, cioe' nella suite — non nel DB vero. Il "PASS parziale" del 15/08 era quindi misurato contro il dialetto sbagliato, ed e' un promemoria che vale oltre questo caso: un adversarial sui limiti numerici eseguito su SQLite non dice niente su PostgreSQL. (Stessa famiglia del difetto trovato lo stesso giorno sui datetime aware/naive, PR #86.)
+
+      Il caso peggiore VERO in produzione e' `2^31-1` su ciascuno dei tre contatori. Eseguito con quello, sul browser vero: la cella mostra i valori senza crash, nessun errore JS in console, e `document.scrollWidth == window.innerWidth` (1460 = 1460) — **nessuno sfondamento orizzontale**.
 17. `wa_discover_ram_min_mb` mockato a un valore negativo o a zero → il gate non deve rifiutare tutto ne' lasciare passare sempre per errore di confronto: verificare il comportamento reale e documentarlo.
     - **PASS/documentato (15/08)** — nessun crash con soglia 0 o -500. Comportamento reale osservato: con soglia <= 0 la guardia RAM non rifiuta MAI (`ram_libera_mb()` e' sempre >= 0), quindi diventa un no-op permanente -- conseguenza diretta e prevedibile del confronto `<`, non un comportamento indefinito.
 18. `soglia_sync` passata a `esegui_discover_run` fuori range (negativa, o 1000) → nessun crash del gate di sincronizzazione, comportamento definito (o rifiuta sempre, o non rifiuta mai, ma senza eccezione non gestita).
@@ -63,13 +79,17 @@ Livello misto: browser per cio' che la UI esprime, chiamata diretta all'API (scr
 23. `number_id` con un null byte (`\x00`) incorporato → rifiutato o sanificato, nessun errore DB grezzo esposto all'utente.
     - **PASS (15/08)** — stesso script, `%00` nel path → gestito, mai riflesso nel corpo della risposta.
 24. Un motivo del motore NON presente in `MOTIVO_LABEL`/`MOTIVO_LABEL_SCAN` (scrivere a DB un valore inventato tipo `"motivo_mai_visto"` su una run gia' chiusa) → la UI mostra il codice grezzo, non una cella vuota, "undefined" o un crash di rendering.
-    - **SKIP, verificato solo staticamente (15/08)** — richiede rendering frontend vero; nessun runner di test JS in questo repo (`frontend/package.json` non ha script `"test"`). Letto il sorgente: `frontend/app/wa/numeri/page.tsx` e `.../scoperti/page.tsx` usano `MOTIVO_LABEL[motivo] ?? motivo` (fallback esplicito al codice grezzo) -- struttura corretta, ma non e' un'esecuzione vera. Da eseguire per davvero quando il frontend e' in esecuzione.
+    - ~~SKIP, verificato solo staticamente (15/08)~~ → **PASS eseguito (16/08)** — scritto `motivo_inventato_qa` a DB su una run gia' chiusa e ricaricata la pagina col browser vero: la cella mostra il **codice grezzo**, non vuota, non "undefined", nessun errore in console. Il fallback `MOTIVO_LABEL[motivo] ?? motivo` letto il 15/08 fa davvero quello che sembrava fare.
 25. `errore` di una run chiusa contenente un numero di telefono in chiaro nel testo dell'eccezione originale (es. un motore che un giorno solleva con un numero nel messaggio) → verificato che la sanificazione lo maschera prima di finire a DB (test gia' coperto a livello unit, qui riverificare end-to-end passando dal worker vero).
     - **PASS (15/08)** — script nuovo `backend/scripts/qa_wa_discover/adv_c25_masking_worker_reale.py`: `wa_discover_worker.wa_discover_task()` VERO (non `chiudi_run` isolato, non una sessione condivisa col test) con un motore che solleva un'eccezione reale contenente `+39 342 146 0077` -- colonna `errore` a DB mascherata, nessuna sequenza di cifre in chiaro.
 
 ## D. Il `detail` oggetto e il client (26-28)
 
-**SKIP in blocco (15/08)** — i tre casi 26-28 richiedono un browser vero col frontend in esecuzione (toast, rendering del client `waApi.ts`, comportamento del polling dopo una disconnessione simulata). Non eseguibile ora, nessun equivalente piu' debole tentato.
+~~SKIP in blocco (15/08)~~ → **26 PARZIALE, 27-28 ancora SKIP (16/08)**.
+
+Il **26** e' stato eseguito per i quattro codici forzabili senza far partire una scansione vera: `scan_gia_in_corso` (run seminata), `browser_occupato` (lucchetto Redis vero), `canale_fermo` (kill-switch alzato e rimesso), `ram_insufficiente` (backend riavviato con `WA_DISCOVER_RAM_MIN_MB=999999`). Tutti e quattro rispondono `409` con `detail` oggetto e **frase leggibile**, mai `[object Object]` ne' un `Errore 409` generico; per `browser_occupato` la frase e' stata vista anche a schermo. Restano fuori `numero_non_attivo` (nessun numero non-`active` in produzione) e `accodamento_fallito` (richiede di far fallire l'accodamento con una run gia' aperta).
+
+I **27** e **28** restano SKIP: richiedono un proxy/mock che alteri la risposta e una disconnessione simulata a meta' POST. Nessun equivalente piu' debole tentato.
 
 26. **`detail` oggetto `{codice, messaggio}` nel 409**: forzare OGNI codice di rifiuto (`numero_non_attivo`, `canale_fermo`, `browser_occupato`, `scan_gia_in_corso`, `ram_insufficiente`, `accodamento_fallito`) e verificare in UI che il toast mostri SEMPRE la frase leggibile, MAI la stringa letterale `[object Object]` ne' `Errore 409` generico.
 27. Risposta col `Content-Type` sbagliato o corpo non-JSON dal backend (simulabile con un proxy/mock) → il client (`req<T>` in `waApi.ts`) non deve sollevare un'eccezione non gestita che rompe la pagina — verificare il fallback `Errore {status}`.
@@ -118,7 +138,7 @@ Livello misto: browser per cio' che la UI esprime, chiamata diretta all'API (scr
 43. Pagina `/wa/scoperti` aperta durante uno scan che aggiunge centinaia di chat nuove → il refresh automatico a fine scan non deve bloccare l'interfaccia ne' far esplodere il rendering della tabella.
     - **SKIP (15/08)** — richiede browser + frontend + uno scan reale. Non eseguibile ora (scan live in corso, vietato aprirne un secondo).
 44. Motivo/errore lunghissimo (oltre 2000 caratteri, il troncamento di `chiudi_run`) → la UI mostra il testo troncato senza rompere il layout della cella/toast.
-    - **PASS parziale (15/08)** — solo la meta' backend: stesso script, errore di 5023 caratteri passato a `chiudi_run` → 2000 caratteri a DB (troncato correttamente, nessun crash). La meta' UI (layout della cella/toast) resta da verificare col frontend in esecuzione.
+    - ~~PASS parziale (15/08)~~ → **PASS completo (16/08)** — la meta' UI eseguita col browser vero: run portata a `failed` con un errore di 2000 caratteri mentre la pagina pollava, toast catturato campionando ogni 400 ms. Il toast compare con 2035 caratteri a schermo, nessun errore JS, e **zero px di eccesso orizzontale** sulla pagina. Rilievo di comodita' d'uso, non di correttezza: un toast da 2000 caratteri e' illeggibile in pratica — se un giorno si volesse troncarlo anche in UI, il posto e' `ScansionaContattiButton` (`toast.error(...u.errore...)`), non il backend, che il troncamento a 2000 lo fa gia'.
 
 ## I. Verifica finale invarianti (45-48)
 
