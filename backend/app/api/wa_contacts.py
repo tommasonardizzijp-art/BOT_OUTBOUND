@@ -3,12 +3,12 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 
 from app.config import settings
 from app.database import get_db
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
-                           WaContact, WaContactStatus)
+                           WaContact, WaContactStatus, WaDiscoveredChat)
 from app.services.wa_csv import CsvParseError
 from app.services.wa_ingest import ingerisci_csv
 from app.services.wa_promote import arruolamento
@@ -90,6 +90,90 @@ async def lista_contatti(campaign_id: str, limit: int = 200, offset: int = 0,
         }
         for cc, c in righe
     ]}
+
+
+AMBITI_DISPONIBILI = ("numero", "tutti")
+
+
+@router.get("/disponibili")
+async def disponibili(campaign_id: str, ambito: str = "numero",
+                      limit: int = 200, offset: int = 0,
+                      db=Depends(get_db)) -> dict:
+    """I contatti gia' in rubrica che si possono ancora arruolare qui.
+
+    `GET ""` elenca i contatti DI UNA CAMPAGNA; questa elenca quelli che si
+    potrebbero aggiungere. Senza, il passo 2 del wizard sapeva fare una cosa
+    sola -- caricare un CSV -- anche quando i contatti erano gia' a DB.
+
+    **Perche' `ambito` e' un parametro e non un'assunzione**: `WaContact` non
+    ha un `wa_number_id`. I contatti stanno sul tenant (UNIQUE su
+    tenant_id+phone_hmac), non sul numero. "I contatti di questo numero"
+    esiste solo indirettamente, via `wa_discovered_chats.number_id` con lo
+    stesso `phone_hmac` -- e vale solo per chi e' arrivato dall'auto-discover:
+    un contatto caricato da CSV non e' legato ad alcun numero. Due ambiti,
+    quindi, e l'operatore sceglie quale intende.
+
+    Il `tenant_id` si risolve SEMPRE dalla campagna, mai da un campo del
+    client: stessa barriera IDOR dichiarata in `wa_discover.py`.
+
+    Le due esclusioni non si sovrappongono, con precedenza dichiarata:
+    prima "gia' in campagna", poi opt-out/DNC su cio' che resta. Sommate al
+    numero dei disponibili danno il totale dell'ambito, che e' l'unica forma
+    in cui i tre numeri a schermo tornano.
+    """
+    if ambito not in AMBITI_DISPONIBILI:
+        raise HTTPException(422, f"ambito deve essere uno di {AMBITI_DISPONIBILI}")
+    campagna = await db.scalar(select(WaCampaign).where(WaCampaign.id == campaign_id))
+    if campagna is None:
+        raise HTTPException(404, "campagna inesistente")
+
+    ambito_where = [WaContact.tenant_id == campagna.tenant_id]
+    if ambito == "numero":
+        # `is_not(None)` esplicito e non decorativo: un IN su una sottoquery
+        # che contiene NULL non e' mai vero, ma soprattutto le righe senza
+        # numero (gruppi, chat non apribili) non sono contatti e non devono
+        # nemmeno entrare nel confronto.
+        scoperti_qui = select(WaDiscoveredChat.phone_hmac).where(
+            WaDiscoveredChat.tenant_id == campagna.tenant_id,
+            WaDiscoveredChat.number_id == campagna.wa_number_id,
+            WaDiscoveredChat.phone_hmac.is_not(None),
+        )
+        ambito_where.append(WaContact.phone_hmac.in_(scoperti_qui))
+
+    gia_in_campagna = select(WaCampaignContact.contact_id).where(
+        WaCampaignContact.campaign_id == campaign_id)
+    cond_gia = WaContact.id.in_(gia_in_campagna)
+    cond_dnc = or_(WaContact.opted_out.is_(True), WaContact.do_not_contact.is_(True))
+
+    async def _quanti(*condizioni) -> int:
+        return await db.scalar(
+            select(func.count()).select_from(WaContact)
+            .where(*ambito_where, *condizioni)) or 0
+
+    n_gia = await _quanti(cond_gia)
+    n_dnc = await _quanti(~cond_gia, cond_dnc)
+    totale = await _quanti(~cond_gia, ~cond_dnc)
+
+    righe = (await db.execute(
+        select(WaContact).where(*ambito_where, ~cond_gia, ~cond_dnc)
+        .order_by(WaContact.display_name, WaContact.id)
+        .limit(min(limit, 500)).offset(offset)
+    )).scalars().all()
+
+    return {
+        "contatti": [
+            {
+                "id": c.id,
+                # mascherato SEMPRE (P12), stesso vincolo di lista_contatti
+                "numero": mask_phone(decrypt(c.encrypted_phone)),
+                "nome": c.display_name,
+                "chat_title": c.chat_title,
+            }
+            for c in righe
+        ],
+        "totale_disponibili": totale,
+        "esclusi": {"gia_in_campagna": n_gia, "opt_out_o_dnc": n_dnc},
+    }
 
 
 class EnrollRequest(BaseModel):

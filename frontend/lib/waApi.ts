@@ -233,6 +233,26 @@ export type ReportPromozione = {
   contatti_promossi_ids: string[]
 }
 
+// wa_contacts.disponibili(): i contatti gia' in rubrica ancora arruolabili.
+// `ambito` non e' un dettaglio: WaContact non ha un wa_number_id -- i contatti
+// stanno sul tenant, e il legame col numero esiste solo per chi e' arrivato
+// dall'auto-discover (via wa_discovered_chats). Chi e' entrato da CSV non e'
+// legato ad alcun numero, e con ambito='numero' non compare.
+export type AmbitoContatti = 'numero' | 'tutti'
+
+export type WaContattoDisponibile = {
+  id: string
+  numero: string
+  nome: string | null
+  chat_title: string | null
+}
+
+export type ContattiDisponibili = {
+  contatti: WaContattoDisponibile[]
+  totale_disponibili: number
+  esclusi: { gia_in_campagna: number; opt_out_o_dnc: number }
+}
+
 // wa_contacts.enroll(): risposta di POST /wa/contacts/enroll.
 export type ReportArruolamento = {
   arruolati: number
@@ -351,6 +371,15 @@ export const waApi = {
     },
     rimuovi: (campaignContactId: string) =>
       req<{ rimosso: boolean }>(`/wa/contacts/${campaignContactId}`, { method: 'DELETE' }),
+    // wa_contacts.disponibili(): chi si puo' ancora arruolare in questa
+    // campagna, senza passare da un file.
+    disponibili: (campaignId: string, ambito: AmbitoContatti,
+                  params?: { limit?: number; offset?: number }) => {
+      const q = new URLSearchParams({ campaign_id: campaignId, ambito })
+      if (params?.limit) q.set('limit', String(params.limit))
+      if (params?.offset) q.set('offset', String(params.offset))
+      return req<ContattiDisponibili>(`/wa/contacts/disponibili?${q}`)
+    },
     // wa_contacts.enroll(): arruola WaContact gia' esistenti (usciti da
     // waApi.scoperti.promote) in una campagna in bozza.
     enroll: (campaignId: string, contactIds: string[]) =>
