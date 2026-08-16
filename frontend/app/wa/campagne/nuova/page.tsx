@@ -21,12 +21,30 @@ import { useRouter } from 'next/navigation'
 import useSWR from 'swr'
 import { toast } from 'sonner'
 import { Download, ChevronDown, ChevronRight } from 'lucide-react'
-import { waApi, type WaCampaignType, type ReportIngest, type ScartoIngest } from '@/lib/waApi'
+import {
+  waApi,
+  type WaCampaignType,
+  type ReportIngest,
+  type ScartoIngest,
+  type AmbitoContatti,
+  type ContattiDisponibili,
+  type ReportArruolamento,
+} from '@/lib/waApi'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 
 type Passo = 1 | 2 | 3
+
+// Le due sorgenti del passo 2. "rubrica" e' il default: se i contatti sono
+// gia' a DB (auto-discover), chiedere un file sarebbe chiedere di rifare a
+// mano un lavoro gia' fatto.
+type SorgenteLista = 'rubrica' | 'file'
+
+// Contatti per richiesta di arruolamento. `arruola` costa ~750 ms per riga
+// verso il pooler: 25 righe sono ~19 s, ben dentro qualunque timeout, e
+// danno un avanzamento che si muove abbastanza spesso da non sembrare fermo.
+const LOTTO_ARRUOLAMENTO = 25
 
 // Testo segnaposto usato SOLO per soddisfare il vincolo "template_a
 // obbligatorio" del POST di creazione (wa_campaigns.crea): non contiene
@@ -156,13 +174,76 @@ export default function NuovaCampagnaPage() {
     }
   }
 
-  // ---- Passo 2: upload lista ----
+  // ---- Passo 2: la lista ----
+  const [sorgente, setSorgente] = useState<SorgenteLista>('rubrica')
   const [fileSelezionato, setFileSelezionato] = useState<File | null>(null)
   const [caricando, setCaricando] = useState(false)
   const [erroreIngest, setErroreIngest] = useState<string | null>(null)
   const [report, setReport] = useState<ReportIngest | null>(null)
   const [placeholder, setPlaceholder] = useState<string[]>([])
   const [dettagliScarti, setDettagliScarti] = useState(false)
+
+  // ---- Passo 2, sorgente "rubrica": contatti gia' a DB ----
+  const [ambito, setAmbito] = useState<AmbitoContatti>('numero')
+  const [arruolando, setArruolando] = useState(false)
+  const [progresso, setProgresso] = useState<{ fatti: number; totale: number } | null>(null)
+  const [reportArruolamento, setReportArruolamento] = useState<ReportArruolamento | null>(null)
+  const [erroreArruolamento, setErroreArruolamento] = useState<string | null>(null)
+
+  const { data: disponibili, mutate: refreshDisponibili } = useSWR(
+    campaignId && sorgente === 'rubrica'
+      ? ['wa-contatti-disponibili', campaignId, ambito] : null,
+    () => waApi.contatti.disponibili(campaignId as string, ambito, { limit: 20 }),
+  )
+
+  async function handleArruola() {
+    if (!campaignId || !disponibili) return
+    setErroreArruolamento(null)
+    setReportArruolamento(null)
+    setArruolando(true)
+    const totale = disponibili.totale_disponibili
+    setProgresso({ fatti: 0, totale })
+    const somma: ReportArruolamento = {
+      arruolati: 0, gia_presenti: 0, gia_dnc: 0, scarti: [],
+    }
+    try {
+      // Gli id si raccolgono a pagine da 500 (il tetto che l'API accetta):
+      // con 666 contatti una pagina sola ne lascerebbe fuori un terzo.
+      const ids: string[] = []
+      for (let off = 0; off < totale; off += 500) {
+        const p = await waApi.contatti.disponibili(campaignId, ambito, { limit: 500, offset: off })
+        ids.push(...p.contatti.map((c) => c.id))
+        if (p.contatti.length === 0) break
+      }
+
+      // A LOTTI, e non e' un vezzo: arruola impiega ~750 ms per riga verso il
+      // pooler, quindi 666 contatti in una sola richiesta sono ~500 secondi e
+      // il browser molla prima -- restituendo un 500 che NON e' un errore (il
+      // lavoro a DB riesce comunque). Con i lotti si vede l'avanzamento, e
+      // ogni lotto e' idempotente: se qualcosa si interrompe, rilanciare
+      // ricomincia da dove era, perche' i gia' arruolati tornano
+      // "gia_presenti" invece di duplicarsi.
+      for (let i = 0; i < ids.length; i += LOTTO_ARRUOLAMENTO) {
+        const lotto = ids.slice(i, i + LOTTO_ARRUOLAMENTO)
+        const r = await waApi.contatti.enroll(campaignId, lotto)
+        somma.arruolati += r.arruolati
+        somma.gia_presenti += r.gia_presenti
+        somma.gia_dnc += r.gia_dnc
+        somma.scarti.push(...r.scarti)
+        setProgresso({ fatti: Math.min(i + lotto.length, totale), totale })
+        setReportArruolamento({ ...somma })
+      }
+      await Promise.all([refreshCampagna(), refreshDisponibili()])
+      toast.success(`${somma.arruolati} contatti aggiunti alla campagna.`)
+    } catch (err: unknown) {
+      // Il parziale resta a schermo di proposito: dice quanti sono passati
+      // prima dell'inciampo, e rilanciare riprende da li'.
+      setErroreArruolamento(err instanceof Error ? err.message : "Errore nell'arruolamento.")
+      await Promise.all([refreshCampagna(), refreshDisponibili()])
+    } finally {
+      setArruolando(false)
+    }
+  }
 
   async function handleUpload() {
     if (!campaignId || !fileSelezionato) return
@@ -303,6 +384,20 @@ export default function NuovaCampagnaPage() {
 
       {passo === 2 && campaignId && (
         <PassoLista
+          sorgente={sorgente}
+          setSorgente={setSorgente}
+          etichettaNumero={
+            numeriAttivi.find((n) => n.id === numberId)?.label ?? 'questo numero'
+          }
+          ambito={ambito}
+          setAmbito={setAmbito}
+          disponibili={disponibili}
+          arruolando={arruolando}
+          progresso={progresso}
+          reportArruolamento={reportArruolamento}
+          erroreArruolamento={erroreArruolamento}
+          onArruola={handleArruola}
+          contattiInCampagna={campagna?.total_contacts ?? 0}
           fileSelezionato={fileSelezionato}
           setFileSelezionato={setFileSelezionato}
           caricando={caricando}
@@ -339,7 +434,7 @@ export default function NuovaCampagnaPage() {
 }
 
 function Stepper({ passo }: { passo: Passo }) {
-  const etichette: Record<Passo, string> = { 1: 'Campagna', 2: 'Lista', 3: 'Messaggio' }
+  const etichette: Record<Passo, string> = { 1: 'Campagna', 2: 'Contatti', 3: 'Messaggio' }
   return (
     <div className="flex items-center gap-2 text-sm">
       {([1, 2, 3] as Passo[]).map((n, i) => (
@@ -514,7 +609,9 @@ function PassoCampagna(props: {
 
         <div className="flex justify-end">
           <Button type="submit" disabled={creandoCampagna} style={{ backgroundColor: 'var(--wa-accent)', color: '#04120e' }}>
-            {creandoCampagna ? 'Creazione...' : 'Avanti: carica la lista'}
+            {/* non piu' "carica la lista": dal passo 2 il file e' una delle
+                due strade, e l'altra non carica niente. */}
+            {creandoCampagna ? 'Creazione...' : 'Avanti: scegli i contatti'}
           </Button>
         </div>
       </form>
@@ -526,6 +623,18 @@ function PassoCampagna(props: {
 // Passo 2: upload lista
 // ---------------------------------------------------------------------------
 function PassoLista(props: {
+  sorgente: SorgenteLista
+  setSorgente: (v: SorgenteLista) => void
+  etichettaNumero: string
+  ambito: AmbitoContatti
+  setAmbito: (v: AmbitoContatti) => void
+  disponibili: ContattiDisponibili | undefined
+  arruolando: boolean
+  progresso: { fatti: number; totale: number } | null
+  reportArruolamento: ReportArruolamento | null
+  erroreArruolamento: string | null
+  onArruola: () => void
+  contattiInCampagna: number
   fileSelezionato: File | null
   setFileSelezionato: (f: File | null) => void
   caricando: boolean
@@ -537,12 +646,50 @@ function PassoLista(props: {
   onAvanti: () => void
 }) {
   const {
+    sorgente, setSorgente, etichettaNumero, ambito, setAmbito, disponibili,
+    arruolando, progresso, reportArruolamento, erroreArruolamento, onArruola,
+    contattiInCampagna,
     fileSelezionato, setFileSelezionato, caricando, erroreIngest, report,
     dettagliScarti, setDettagliScarti, onUpload, onAvanti,
   } = props
 
   return (
     <div className="space-y-4">
+      <Riquadro>
+        <div className="space-y-3">
+          <p className="text-sm font-medium text-white">Da dove prendo i contatti</p>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <SceltaSorgente
+              attiva={sorgente === 'rubrica'}
+              onClick={() => setSorgente('rubrica')}
+              titolo="Contatti gia' in rubrica"
+              sotto="Quelli trovati dall'auto-discover o gia' caricati in passato. Nessun file."
+            />
+            <SceltaSorgente
+              attiva={sorgente === 'file'}
+              onClick={() => setSorgente('file')}
+              titolo="Carica un file CSV"
+              sotto="Una lista esterna, con eventuali colonne extra da usare come segnaposto."
+            />
+          </div>
+        </div>
+      </Riquadro>
+
+      {sorgente === 'rubrica' && (
+        <PassoListaRubrica
+          etichettaNumero={etichettaNumero}
+          ambito={ambito}
+          setAmbito={setAmbito}
+          disponibili={disponibili}
+          arruolando={arruolando}
+          progresso={progresso}
+          report={reportArruolamento}
+          errore={erroreArruolamento}
+          onArruola={onArruola}
+        />
+      )}
+
+      {sorgente === 'file' && (
       <Riquadro>
         <div className="space-y-4">
           <div>
@@ -583,17 +730,28 @@ function PassoLista(props: {
           </div>
         </div>
       </Riquadro>
+      )}
 
-      {report && (
+      {sorgente === 'file' && report && (
         <Riquadro>
           <ReportIngestView report={report} dettagli={dettagliScarti} setDettagli={setDettagliScarti} />
         </Riquadro>
       )}
 
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between gap-4">
+        {/* La condizione di "Avanti" e' il conteggio VERO a DB, non l'esito
+            dell'ultima azione: con due sorgenti, sbloccare su "esiste un
+            report di upload" lascerebbe bloccato chi ha arruolato dalla
+            rubrica -- e sbloccherebbe chi ha caricato un file da cui non e'
+            entrato nemmeno un contatto. */}
+        <p className="text-sm" style={{ color: 'var(--wa-muted)' }}>
+          {contattiInCampagna > 0
+            ? `${contattiInCampagna} contatti in campagna`
+            : 'Nessun contatto in campagna: aggiungine prima di proseguire.'}
+        </p>
         <Button
           type="button"
-          disabled={!report}
+          disabled={contattiInCampagna === 0 || arruolando}
           onClick={onAvanti}
           style={{ backgroundColor: 'var(--wa-accent)', color: '#04120e' }}
         >
@@ -601,6 +759,146 @@ function PassoLista(props: {
         </Button>
       </div>
     </div>
+  )
+}
+
+function SceltaSorgente({ attiva, onClick, titolo, sotto }: {
+  attiva: boolean; onClick: () => void; titolo: string; sotto: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex-1 rounded-lg border px-4 py-3 text-left transition-colors"
+      style={{
+        borderColor: attiva ? 'var(--wa-accent)' : 'var(--wa-border)',
+        backgroundColor: attiva ? 'rgba(38, 224, 196, 0.08)' : 'transparent',
+      }}
+    >
+      <span className="block text-sm font-medium"
+        style={{ color: attiva ? 'var(--wa-accent)' : '#e7f3ef' }}>{titolo}</span>
+      <span className="mt-1 block text-xs" style={{ color: 'var(--wa-muted)' }}>{sotto}</span>
+    </button>
+  )
+}
+
+function PassoListaRubrica(props: {
+  etichettaNumero: string
+  ambito: AmbitoContatti
+  setAmbito: (v: AmbitoContatti) => void
+  disponibili: ContattiDisponibili | undefined
+  arruolando: boolean
+  progresso: { fatti: number; totale: number } | null
+  report: ReportArruolamento | null
+  errore: string | null
+  onArruola: () => void
+}) {
+  const {
+    etichettaNumero, ambito, setAmbito, disponibili, arruolando, progresso,
+    report, errore, onArruola,
+  } = props
+
+  const totale = disponibili?.totale_disponibili ?? 0
+  const esclusi = disponibili?.esclusi
+
+  return (
+    <Riquadro>
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-white">Quali contatti</label>
+          <select
+            value={ambito}
+            onChange={(e) => setAmbito(e.target.value as AmbitoContatti)}
+            disabled={arruolando}
+            className="w-full rounded-lg border px-3 py-2 text-sm"
+            style={{ backgroundColor: 'transparent', borderColor: 'var(--wa-border)', color: '#e7f3ef' }}
+          >
+            <option value="numero">Solo quelli scoperti su {etichettaNumero}</option>
+            <option value="tutti">Tutti i contatti in rubrica</option>
+          </select>
+          {/* Detto qui e non in un tooltip: e' il motivo per cui i due numeri
+              possono essere molto diversi, e senza saperlo si sceglie a caso. */}
+          <p className="text-xs" style={{ color: 'var(--wa-muted)' }}>
+            Un contatto e&apos; legato a un numero solo se e&apos; arrivato dall&apos;auto-discover
+            di quel numero. Chi e&apos; entrato da un CSV non e&apos; legato a nessun numero:
+            compare solo in &quot;tutti&quot;.
+          </p>
+        </div>
+
+        {errore && <Errore messaggio={errore} />}
+
+        <div className="rounded-lg border px-4 py-3" style={{ borderColor: 'var(--wa-border)' }}>
+          {disponibili === undefined ? (
+            <p className="text-sm" style={{ color: 'var(--wa-muted)' }}>Conteggio in corso...</p>
+          ) : (
+            <>
+              <p className="text-sm text-white">
+                <strong>{totale}</strong> contatti da aggiungere
+              </p>
+              {esclusi && (esclusi.gia_in_campagna > 0 || esclusi.opt_out_o_dnc > 0) && (
+                <p className="mt-1 text-xs" style={{ color: 'var(--wa-muted)' }}>
+                  Esclusi:{' '}
+                  {esclusi.gia_in_campagna > 0 && <>{esclusi.gia_in_campagna} gia&apos; in campagna</>}
+                  {esclusi.gia_in_campagna > 0 && esclusi.opt_out_o_dnc > 0 && <> · </>}
+                  {esclusi.opt_out_o_dnc > 0 && <>{esclusi.opt_out_o_dnc} in opt-out o do-not-contact</>}
+                </p>
+              )}
+              {totale > 0 && (
+                <ul className="mt-3 space-y-1 text-xs" style={{ color: 'var(--wa-muted)' }}>
+                  {disponibili.contatti.slice(0, 8).map((c) => (
+                    <li key={c.id} className="flex gap-2">
+                      <span className="font-mono">{c.numero}</span>
+                      <span>{c.nome ?? c.chat_title ?? '-'}</span>
+                    </li>
+                  ))}
+                  {totale > disponibili.contatti.length && (
+                    <li>...e altri {totale - disponibili.contatti.length}</li>
+                  )}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+
+        {progresso && (
+          <div className="space-y-1">
+            <div className="h-2 w-full overflow-hidden rounded-full"
+              style={{ backgroundColor: 'var(--wa-border)' }}>
+              <div className="h-full transition-all"
+                style={{
+                  width: `${progresso.totale ? Math.round((progresso.fatti / progresso.totale) * 100) : 0}%`,
+                  backgroundColor: 'var(--wa-accent)',
+                }} />
+            </div>
+            <p className="text-xs" style={{ color: 'var(--wa-muted)' }}>
+              {progresso.fatti} di {progresso.totale}
+              {arruolando && <> — puo&apos; durare qualche minuto, non chiudere la pagina.</>}
+            </p>
+          </div>
+        )}
+
+        {report && (
+          <div className="text-sm">
+            <p className="font-medium text-white">{report.arruolati} contatti aggiunti</p>
+            {(report.gia_presenti > 0 || report.gia_dnc > 0) && (
+              <p className="text-xs" style={{ color: 'var(--wa-muted)' }}>
+                {report.gia_presenti > 0 && <>{report.gia_presenti} erano gia&apos; in campagna. </>}
+                {report.gia_dnc > 0 && <>{report.gia_dnc} esclusi per opt-out o do-not-contact.</>}
+              </p>
+            )}
+          </div>
+        )}
+
+        <Button
+          type="button"
+          disabled={arruolando || totale === 0}
+          onClick={onArruola}
+          style={{ backgroundColor: 'var(--wa-accent)', color: '#04120e' }}
+        >
+          {arruolando ? 'Aggiunta in corso...' : `Aggiungi ${totale} contatti alla campagna`}
+        </Button>
+      </div>
+    </Riquadro>
   )
 }
 
