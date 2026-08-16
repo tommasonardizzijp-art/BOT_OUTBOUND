@@ -37,14 +37,23 @@ ROMA_ESTATE = timezone(timedelta(hours=2))
 
 @pytest.fixture
 def istanti_legati():
-    """Ogni datetime che finisce come parametro di una query, su qualunque
-    engine.
+    """I datetime legati alle SOGLIE di una query Core, su qualunque engine.
 
     Si aggancia a `before_execute`, dove la clausola e' ancora un albero
     SQLAlchemy: compilarla restituisce i letterali immersi nel `where`, cioe'
     esattamente il valore che il driver spedirebbe a PostgreSQL. E' un oracolo
     che guarda la QUERY e non il codice che l'ha costruita: continua a
     funzionare anche se domani quel codice cambia strada.
+
+    PORTATA, per non credere che copra piu' di quanto copre: `before_execute`
+    scatta solo per i costrutti Core (`select()`, `update()`), quindi vede le
+    soglie dei confronti -- che e' cio' che questi test verificano. NON vede le
+    scritture ORM: `msg.sent_at = ...` passa dal flush dell'unit-of-work, che
+    non attraversa questo evento. Le scritture sono difese altrove, dalla
+    guardia AST di `test_wa_tempo_guardia.py`, che pero' e' un divieto
+    sintattico sul nome `utcnow`: non intercetterebbe un naive costruito a mano
+    con `datetime(...)`. Chi aggiunge una scrittura nuova non deve aspettarsi
+    che questa fixture la copra.
     """
     registrati: list[tuple[str, datetime]] = []
 
@@ -267,3 +276,37 @@ async def test_finestra_invii_recenti_lega_un_istante_aware(db_session, istanti_
 
     assert isinstance(numeri, list)
     _verifica_binding_aware(istanti_legati)
+
+
+@pytest.mark.asyncio
+async def test_il_claim_regge_un_locked_at_naive_letto_dal_db(db_session):
+    """Il claim non deve dipendere dal backend del DB.
+
+    `claim_next_wa_contact` fa un UPDATE ORM: col `synchronize_session` di
+    default SQLAlchemy rivaluta la WHERE **in Python** contro gli oggetti in
+    sessione, quindi `locked_at < stale_cutoff` diventa anche un confronto
+    Python -- invisibile a un grep, che li' vede solo SQL. Su PostgreSQL la
+    colonna e' timestamptz e rilegge sempre aware; su SQLite (il default di
+    config.py, e il backend di questa suite) torna NAIVE, e contro il cutoff
+    aware alza TypeError: il worker di invio morirebbe alla prima riga
+    lockata.
+
+    Questo test tiene il caso scomodo -- `locked_at` naive, come lo
+    restituisce SQLite e come lo scrivevano le righe storiche -- e pretende
+    che il claim lavori lo stesso. Le altre fixture del claim usano istanti
+    aware perche' simulano cio' che la produzione scrive DA ORA; questa
+    simula cio' che si rilegge, ed e' il lato che era rimasto scoperto.
+    """
+    from app.workers import wa_worker
+    from tests.test_wa_worker import _scenario_claim
+
+    ctx = await _scenario_claim(db_session)
+    ctx["cc"].locked_by = "worker-morto"
+    ctx["cc"].locked_at = datetime.utcnow() - timedelta(minutes=45)  # NAIVE
+    await db_session.commit()
+
+    preso = await wa_worker.claim_next_wa_contact(
+        db_session, number_id=ctx["number"].id, worker_id="w1")
+
+    assert preso is not None, "un lock stale naive deve essere recuperabile"
+    assert preso[0].locked_by == "w1"

@@ -59,7 +59,7 @@ async def _scenario_claim(db_session, e164: str = "+393331112223", contatti: int
         cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id,
                                contact_id=c.id, status=WaContactStatus.queued,
                                current_step=-1,
-                               next_action_at=datetime.utcnow() - timedelta(minutes=1))
+                               next_action_at=adesso_utc() - timedelta(minutes=1))
         db_session.add(cc)
         contacts.append(c)
         ccs.append(cc)
@@ -630,7 +630,7 @@ async def test_20_recovery_avvio_chiude_i_sending_appesi(db_session):
     await db_session.flush()
     cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
                            status=WaContactStatus.queued, current_step=0,
-                           locked_by="worker-crashato", locked_at=datetime.utcnow())
+                           locked_by="worker-crashato", locked_at=adesso_utc())
     msg = WaMessage(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
                     wa_number_id=number.id, step_index=0, template_variant="a",
                     rendered_text="ciao", status=WaMessageStatus.sending)
@@ -678,7 +678,7 @@ async def test_20b_recovery_non_tocca_contatti_senza_messaggio_appeso(db_session
                           status=WaCampaignStatus.running)
     db_session.add(campaign)
     await db_session.flush()
-    locked_at = datetime.utcnow()
+    locked_at = adesso_utc()
     cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id, contact_id=contact.id,
                            status=WaContactStatus.queued, current_step=-1,
                            locked_by="worker-vivo-ma-lento", locked_at=locked_at)

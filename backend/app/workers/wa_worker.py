@@ -121,6 +121,17 @@ async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
     # Claim atomico: la WHERE ripete la condizione di lock. Se un altro
     # worker ha vinto la corsa fra SELECT e UPDATE, rowcount e' 0 e qui si
     # esce senza errore -- stesso pattern di browser_bio.claim_next_pending.
+    #
+    # synchronize_session=False non e' un dettaglio di performance: col
+    # default ("evaluate") SQLAlchemy RIVALUTA questa WHERE in Python contro
+    # gli oggetti gia' in sessione. Il confronto `locked_at < stale_cutoff`
+    # diventa quindi anche un confronto Python -- invisibile a un grep, che
+    # qui vede solo SQL. Su PostgreSQL la colonna e' timestamptz e rilegge
+    # sempre aware, ma su SQLite (il default di config.py, e il backend della
+    # suite) torna naive: contro il `stale_cutoff` aware alza
+    # TypeError e il worker di invio muore alla prima riga lockata. La riga
+    # viene comunque rinfrescata subito dopo, quindi non sincronizzarla qui
+    # non toglie nulla.
     claim = await db.execute(
         update(WaCampaignContact)
         .where(
@@ -129,6 +140,7 @@ async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
                 WaCampaignContact.locked_at < stale_cutoff),
         )
         .values(locked_by=worker_id, locked_at=now)
+        .execution_options(synchronize_session=False)
     )
     await db.commit()
     if (claim.rowcount or 0) == 0:

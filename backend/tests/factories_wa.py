@@ -4,6 +4,8 @@ di toccare backend/tests/conftest.py, che dopo PR-0 e' congelato."""
 import uuid
 from datetime import datetime
 
+from app.utils.tempo import adesso_utc
+
 from app.models.tenant import Tenant
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                            WaCampaignType, WaContact, WaContactStatus,
@@ -55,7 +57,7 @@ async def make_campaign(db, tenant, number, *, name="Campagna Test",
         optout_enabled=(tipo == WaCampaignType.marketing),
         optout_cta=("Scrivi STOP per non ricevere piu' messaggi."
                     if tipo == WaCampaignType.marketing else None),
-        started_at=datetime.utcnow() if status == WaCampaignStatus.running else None,
+        started_at=adesso_utc() if status == WaCampaignStatus.running else None,
     )
     db.add(camp)
     await db.flush()
@@ -129,7 +131,7 @@ async def make_campaign_contact(db, campaign, contact, *,
     NULL su una riga non terminale, e i campi di lock restano vuoti (I1)."""
     cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id,
                            contact_id=contact.id, status=status, current_step=current_step,
-                           next_action_at=datetime.utcnow(), failure_count=0)
+                           next_action_at=adesso_utc(), failure_count=0)
     db.add(cc)
     await db.flush()
     return cc

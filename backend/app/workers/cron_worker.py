@@ -106,11 +106,17 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
         # sbloccano righe che un worker vivo sta lavorando, due ore indietro e
         # i lock di un worker morto restano su per altre due ore.
         cutoff = adesso_utc() - timedelta(minutes=int(settings.wa_lock_timeout_min))
+        # synchronize_session=False: come nel claim di wa_worker, il default
+        # rivaluterebbe la WHERE in Python contro la sessione, trasformando
+        # questo confronto SQL anche in un confronto Python. Oggi qui la
+        # identity map e' vuota e non capita, ma dipendere da quello e' una
+        # trappola per il prossimo che aggiunge una lettura sopra.
         res = await db.execute(
             update(WaCampaignContact)
             .where(WaCampaignContact.locked_by.is_not(None),
                    WaCampaignContact.locked_at < cutoff)
             .values(locked_by=None, locked_at=None)
+            .execution_options(synchronize_session=False)
         )
         await db.commit()
         esito["lock_rilasciati"] = res.rowcount or 0
