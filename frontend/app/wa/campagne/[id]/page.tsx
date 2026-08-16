@@ -311,14 +311,13 @@ export default function DettaglioCampagnaPage({ params }: { params: Promise<{ id
         </div>
       </Riquadro>
 
-      {/* ---- Modifica, solo in bozza ---------------------------------------
-          Il backend accetta PATCH /{id} e PUT /{id}/steps/0 SOLO in draft
-          (una campagna partita si mette in pausa prima di toccarla). Finche'
-          questo riquadro non esisteva, una bozza lasciata a meta' -- messaggio
-          non scritto perche' non era ancora pronto -- non era piu'
-          modificabile da nessuna parte: il wizard non si riapre su una
-          campagna esistente. */}
-      {campagna.status === 'draft' && (
+      {/* ---- Modifica: bozza e pausa ----------------------------------------
+          Il backend accetta PATCH /{id} e PUT /{id}/steps/0 in draft E in
+          paused. Su una campagna IN CORSO il riquadro resta visibile e dice
+          cosa fare, invece di sparire: sparendo lasciava credere che una
+          campagna avviata non fosse piu' correggibile -- che era anche vero,
+          prima, ed e' il difetto che questa riga accompagna. */}
+      {campagna.status !== 'completed' && campagna.status !== 'stopped' && (
         <ModificaBozza campagna={campagna} onSalvato={refreshTutto} />
       )}
 
@@ -603,28 +602,41 @@ function ModificaBozza({ campagna, onSalvato }: {
 
   const testoVuoto = testo.trim().length === 0
   const eSegnaposto = testo.trim() === SEGNAPOSTO_MESSAGGIO
+  // Stessa regola del backend (STATI_MODIFICABILI), non una copia allentata.
+  const modificabile = campagna.status === 'draft' || campagna.status === 'paused'
 
   return (
     <Riquadro>
       <div className="space-y-4">
         <button
           type="button"
+          disabled={!modificabile}
           onClick={() => setAperto((v) => !v)}
           className="flex w-full items-center justify-between text-left"
         >
           <span className="text-sm font-medium text-white">
-            Modifica la bozza
-            {(testoVuoto || eSegnaposto) && (
+            {campagna.status === 'draft' ? 'Modifica la bozza' : 'Modifica messaggio e impostazioni'}
+            {modificabile && (testoVuoto || eSegnaposto) && (
               <span className="ml-2 text-xs" style={{ color: '#e07a3c' }}>
                 — il messaggio non e&apos; ancora scritto
               </span>
             )}
           </span>
-          {aperto ? <ChevronDown className="h-4 w-4" style={{ color: 'var(--wa-muted)' }} />
-            : <ChevronRight className="h-4 w-4" style={{ color: 'var(--wa-muted)' }} />}
+          {modificabile && (aperto
+            ? <ChevronDown className="h-4 w-4" style={{ color: 'var(--wa-muted)' }} />
+            : <ChevronRight className="h-4 w-4" style={{ color: 'var(--wa-muted)' }} />)}
         </button>
 
-        {aperto && (
+        {/* Campagna in corso: si dice cosa fare, non si sparisce. */}
+        {!modificabile && (
+          <p className="text-sm" style={{ color: 'var(--wa-muted)' }}>
+            La campagna e&apos; in corso: il testo si rilegge a ogni messaggio, quindi non si
+            tocca mentre gira. <strong style={{ color: '#e7f3ef' }}>Mettila in pausa</strong>,
+            correggi, poi riprendi.
+          </p>
+        )}
+
+        {modificabile && aperto && (
           <div className="space-y-6">
             {/* ---- Messaggio ---- */}
             <div className="space-y-2">
@@ -678,6 +690,26 @@ function ModificaBozza({ campagna, onSalvato }: {
                     className="w-full rounded-lg border px-3 py-2 text-sm"
                     style={{ backgroundColor: 'transparent', borderColor: 'var(--wa-border)', color: '#e7f3ef' }}
                   />
+                  {/* Il corsivo del disclaimer non e' un'impostazione: e' il
+                      markup di WhatsApp. Senza dirlo, l'unico modo di
+                      scoprirlo era confrontare due campagne a mano. */}
+                  <p className="mt-1 text-xs" style={{ color: 'var(--wa-muted)' }}>
+                    WhatsApp scrive in <em>corsivo</em> il testo fra underscore:
+                    {' '}
+                    <code>_cosi&apos;_</code>. In <strong>grassetto</strong> fra asterischi:
+                    {' '}
+                    <code>*cosi&apos;*</code>.
+                  </p>
+                  {!cta.trim().startsWith('_') && cta.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => setCta(`_${cta.trim().replace(/^_+|_+$/g, '')}_`)}
+                      className="mt-1 text-xs font-medium"
+                      style={{ color: 'var(--wa-accent)' }}
+                    >
+                      Mettila in corsivo
+                    </button>
+                  )}
                 </div>
               </div>
               <Button
