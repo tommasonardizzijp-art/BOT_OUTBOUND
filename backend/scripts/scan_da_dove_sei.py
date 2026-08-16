@@ -119,7 +119,7 @@ async def main() -> int:
     from app.services.wa_discover import sidebar
     from app.services.wa_discover.sincronizzazione import LetturaSync
     from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
-    from app.utils.phone_pseudonym import hmac_phone
+    from app.utils.phone_pseudonym import hmac_e164
 
     if segnale.exists():
         segnale.unlink()
@@ -152,7 +152,8 @@ async def main() -> int:
         noto = bool(titolo and titolo in titoli_noti)
         if not noto and grezza.get("titolo_e_numero"):
             n = classifica.numero_dal_titolo(titolo)
-            noto = n is not None and hmac_phone(n) in hmac_noti
+            # forma canonica (col '+'): e' quella scritta in phone_hmac
+            noto = n is not None and hmac_e164(n) in hmac_noti
         if noto:
             stato["saltate"] += 1
             if stato["saltate"] % 25 == 0:
