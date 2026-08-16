@@ -35,7 +35,8 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
                                WaNumber, WaNumberStatus)
     from app.services import notifier, wa_number_manager
     from app.config import settings
-    from datetime import datetime, timedelta
+    from app.utils.tempo import adesso_utc
+    from datetime import timedelta
     from loguru import logger
     from sqlalchemy import select, update
 
@@ -99,7 +100,12 @@ async def wa_session_healthcheck(ctx: dict) -> dict:
                      f"({type(exc).__name__}), proseguo con i lock stale")
 
     async with AsyncSessionLocal() as db:
-        cutoff = datetime.utcnow() - timedelta(minutes=int(settings.wa_lock_timeout_min))
+        # AWARE (app/utils/tempo.py): locked_at e' timestamptz e con un cutoff
+        # naive PostgreSQL lo legge come ora locale. Sbagliare qui non da'
+        # errore, cambia solo QUANTI lock si liberano: due ore avanti e si
+        # sbloccano righe che un worker vivo sta lavorando, due ore indietro e
+        # i lock di un worker morto restano su per altre due ore.
+        cutoff = adesso_utc() - timedelta(minutes=int(settings.wa_lock_timeout_min))
         res = await db.execute(
             update(WaCampaignContact)
             .where(WaCampaignContact.locked_by.is_not(None),
@@ -179,7 +185,7 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     eleggibilita' del contratto 7.3 (wa_worker.claim_next_wa_contact): se
     cambia li', va cambiata anche qui.
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     from loguru import logger
     from sqlalchemy import or_, select
@@ -189,6 +195,7 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                                WaContact, WaContactStatus, WaNumber, WaNumberStatus)
     from app.services import bot_state_service
+    from app.utils.tempo import adesso_utc
     from app.workers.wa_worker import enqueue_wa_workers
 
     esito = {"controllate": 0, "riaccodate": 0}
@@ -199,7 +206,11 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
         # ogni quindici minuti, per tutta la durata dell'incidente.
         return esito
 
-    now = datetime.utcnow()
+    # AWARE, come in wa_worker.claim_next_wa_contact: la query di eleggibilita'
+    # e' la stessa e deve dare la stessa risposta. Con un istante naive il
+    # supervisore vedrebbe zero righe eleggibili su una campagna che ne ha, e
+    # smetterebbe di riaccodare proprio il job di invio che esiste per salvare.
+    now = adesso_utc()
     stale_cutoff = now - timedelta(minutes=int(settings.wa_lock_timeout_min))
 
     async with AsyncSessionLocal() as db:

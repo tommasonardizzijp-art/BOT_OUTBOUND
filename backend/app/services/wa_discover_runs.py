@@ -7,13 +7,14 @@ motore resta quello gia' collaudato contro il DOM vero.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from loguru import logger
 from sqlalchemy import desc, select, update
 
 from app.config import settings
 from app.models.wa import WaDiscoverRun
+from app.utils.tempo import adesso_utc, as_utc
 
 # I motivi che il motore restituisce e che NON sono un guasto nostro: la run
 # si chiude 'done' anche con questi, perche' il sistema ha fatto la cosa
@@ -108,7 +109,7 @@ async def chiudi_run(db, run_id: str, esito: dict, *, errore: str | None = None,
     reali) nella finestra fra le due scritture, si vedeva il motivo
     sovrascritto a 'run_orfana' mentendo su una scansione riuscita.
     """
-    ora = datetime.now(timezone.utc)
+    ora = adesso_utc()
     if errore is not None:
         valori = {
             "stato": "failed",
@@ -184,19 +185,13 @@ async def chiudi_se_orfana(db, number_id: str) -> bool:
     run = await run_attiva(db, number_id)
     if run is None:
         return False
-    # AWARE, non utcnow(). La colonna e' DateTime(timezone=True): su
-    # PostgreSQL torna un datetime con tzinfo, e confrontarlo con un naive
-    # solleva TypeError -- che risaliva fino all'endpoint e diventava un 500
-    # al posto del 409 "scan_gia_in_corso" (trovato dal vivo il 16/08). Su
-    # SQLite, dove gira la suite, torna naive: per questo i test erano verdi.
-    # Il naive letto si assume UTC, che e' cio' che il resto del modulo
-    # scrive.
-    limite = datetime.now(timezone.utc) - timedelta(
-        minutes=settings.wa_discover_run_orfana_min)
-    iniziata = run.started_at
-    if iniziata.tzinfo is None:
-        iniziata = iniziata.replace(tzinfo=timezone.utc)
-    if iniziata > limite:
+    # Confronto in Python, quindi puo' SOLLEVARE: `started_at` torna aware da
+    # PostgreSQL e naive da SQLite, e mescolarli alza TypeError -- che il
+    # 16/08 risaliva fino all'endpoint diventando un 500 al posto del 409
+    # "scan_gia_in_corso". `as_utc` livella i due backend (dettagli in
+    # app/utils/tempo.py); la suite gira su SQLite e da sola non lo vedrebbe.
+    limite = adesso_utc() - timedelta(minutes=settings.wa_discover_run_orfana_min)
+    if as_utc(run.started_at) > limite:
         return False
 
     run_id = run.id

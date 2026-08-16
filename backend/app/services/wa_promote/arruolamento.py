@@ -20,7 +20,6 @@ catturato.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import select, update
@@ -29,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                            WaContact, WaContactStatus)
 from app.utils.ids import uuid_valido
+from app.utils.tempo import adesso_utc
 
 
 class CampagnaNonModificabile(Exception):
@@ -96,7 +96,7 @@ async def arruola(db, *, campaign_id: str, contact_ids: list[str]) -> ReportArru
         raise CampagnaNonModificabile(f"campagna {campaign_id} non modificabile: {motivo}")
 
     report = ReportArruolamento()
-    adesso = datetime.utcnow()
+    adesso = adesso_utc()
 
     for contact_id in contact_ids:
         contatto = await db.get(WaContact, contact_id) if uuid_valido(contact_id) else None

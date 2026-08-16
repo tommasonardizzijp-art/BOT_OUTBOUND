@@ -7,17 +7,17 @@ wa_numbers NON ha cooldown_until (schema congelato): il timer di cooldown
 vive in Redis (TTL), non a DB. Stesso stile del contatore soft-block di
 browser_bio.py.
 """
-from datetime import datetime
 
 import arq
 from loguru import logger
 
 from app.config import settings
 from app.services.work_enqueue import arq_redis_settings
+from app.utils.tempo import adesso_utc
 
 
 def _utc_today_str() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d")
+    return adesso_utc().strftime("%Y-%m-%d")
 
 
 def _parse_wa_warmup_steps(spec: str) -> list[int]:

@@ -340,9 +340,8 @@ _STATI_PROTETTI_DA_RESURREZIONE = frozenset({WaNumberStatus.retired, WaNumberSta
 
 async def _persist_status(number_id: str, stato: WaNumberStatus, *,
                           da_lettura_automatica: bool = True) -> None:
-    from datetime import datetime
-
     from app.database import AsyncSessionLocal
+    from app.utils.tempo import adesso_utc
 
     async with AsyncSessionLocal() as db:
         numero = await _wa_number_or_raise(db, number_id)
@@ -384,7 +383,7 @@ async def _persist_status(number_id: str, stato: WaNumberStatus, *,
                 "cooldown -- lo toglie la scadenza del timer, non un health-check")
         else:
             numero.status = stato
-        numero.session_checked_at = datetime.utcnow()
+        numero.session_checked_at = adesso_utc()
         numero.browser_profile = str(profile_dir_for(number_id))
         await db.commit()
 

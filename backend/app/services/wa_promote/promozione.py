@@ -24,7 +24,6 @@ protegge la singola INSERT concorrente fra due chiamate `promuovi()` diverse
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import select
@@ -34,6 +33,7 @@ from app.models.wa import WaContact, WaDiscoveredChat
 from app.services.wa_discover.classifica import e_etichetta_mascherata
 from app.services.wa_promote.regole import promuovibile
 from app.utils.ids import uuid_valido
+from app.utils.tempo import adesso_utc
 
 
 def _gap_fill(contatto: WaContact, riga: WaDiscoveredChat) -> None:
@@ -89,7 +89,7 @@ async def promuovi(db, *, tenant_id: str, ids: list[str]) -> ReportPromozione:
     Task 3 lo respingerebbe comunque).
     """
     report = ReportPromozione()
-    adesso = datetime.utcnow()
+    adesso = adesso_utc()
 
     for id_ in ids:
         if not uuid_valido(id_):

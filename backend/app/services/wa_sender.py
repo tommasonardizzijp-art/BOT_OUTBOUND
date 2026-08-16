@@ -8,11 +8,11 @@ DOM.
 """
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
 
 from loguru import logger
 
 from app.browser.whatsapp_page import OpenResult
+from app.utils.tempo import adesso_utc
 
 # Segnali del POM che significano "la chat 1:1 non esiste": colpa del dato,
 # non nostra. Copiati alla lettera da whatsapp_page.open_chat /
@@ -440,7 +440,7 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
 
     tick = await pom.read_last_tick()
     msg.status = WaMessageStatus.sent
-    msg.sent_at = datetime.utcnow()
+    msg.sent_at = adesso_utc()
     msg.delivery_check = _delivery_da_tick(tick)
     await db.commit()
 
@@ -451,7 +451,7 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
     await wa_number_manager.record_wa_sent(db, number.id)
     await _incrementa_contatore_campagna(db, campaign.id, "sent")
     await _avanza_contatto(db, cc, campaign, step)
-    contact.last_contacted_at = datetime.utcnow()
+    contact.last_contacted_at = adesso_utc()
     await db.commit()
 
     events.emit(campaign.id, "wa.message.sent",
@@ -548,7 +548,7 @@ async def _incrementa_fallimento(db, cc, motivo: str) -> None:
 
     cc.failure_count = (cc.failure_count or 0) + 1
     cc.last_error = motivo[:500]
-    cc.next_action_at = datetime.utcnow() + timedelta(hours=6)
+    cc.next_action_at = adesso_utc() + timedelta(hours=6)
     dnc_ambiguo = False
     if cc.failure_count >= int(settings.wa_max_failures_per_contact):
         cc.status = WaContactStatus.skipped
@@ -590,7 +590,7 @@ async def _avanza_contatto(db, cc, campaign, step) -> None:
         cc.next_action_at = None
     else:
         cc.status = WaContactStatus.in_sequence
-        cc.next_action_at = datetime.utcnow() + timedelta(days=int(prossimo.wait_days or 0))
+        cc.next_action_at = adesso_utc() + timedelta(days=int(prossimo.wait_days or 0))
     cc.locked_by = None
     cc.locked_at = None
     await db.commit()
@@ -617,7 +617,7 @@ async def _esito_guardia_negativa(db, cc, contact, campaign, guardia, masked: st
         cc.next_action_at = None
         cc.locked_by = None
         cc.locked_at = None
-        contact.last_replied_at = datetime.utcnow()
+        contact.last_replied_at = adesso_utc()
         # _incrementa_contatore_campagna fa il proprio commit (contratto
         # §4.2, UPDATE atomico): le assegnazioni sopra vanno fatte PRIMA,
         # cosi' un solo commit chiude tutto -- stesso schema del ramo

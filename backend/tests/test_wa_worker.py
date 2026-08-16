@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pytest
 import pytest_asyncio
 
+from app.utils.tempo import adesso_utc
 from app.workers import wa_worker
 from tests.helpers_wa_tempo import fette_di_quarantena, orologio_virtuale
 
@@ -120,15 +121,22 @@ async def test_claim_ignora_campagna_non_running_e_numero_non_active(db_session)
 
 @pytest.mark.asyncio
 async def test_claim_rispetta_lock_fresco_e_recupera_lock_stale(db_session):
+    # locked_at AWARE: il claim e' un UPDATE ORM con synchronize_session
+    # 'evaluate', che RIVALUTA la WHERE in Python contro gli oggetti gia' in
+    # sessione -- cioe' contro questa riga. Un naive scritto qui viene
+    # confrontato con l'istante aware del worker e alza TypeError. Su
+    # PostgreSQL non capita: la colonna e' timestamptz e rilegge sempre aware.
+    # Questa riga simula cio' che la produzione scrive, e da oggi la
+    # produzione scrive aware (app/utils/tempo.py).
     ctx = await _scenario_claim(db_session)
     ctx["cc"].locked_by = "altro-worker"
-    ctx["cc"].locked_at = datetime.utcnow()
+    ctx["cc"].locked_at = adesso_utc()
     await db_session.commit()
     assert await wa_worker.claim_next_wa_contact(
         db_session, number_id=ctx["number"].id, worker_id="w1") is None
 
     # lock vecchio di 21 minuti: la sessione che lo teneva e' morta
-    ctx["cc"].locked_at = datetime.utcnow() - timedelta(minutes=21)
+    ctx["cc"].locked_at = adesso_utc() - timedelta(minutes=21)
     await db_session.commit()
     preso = await wa_worker.claim_next_wa_contact(
         db_session, number_id=ctx["number"].id, worker_id="w1")
@@ -1163,12 +1171,13 @@ async def test_d21_claim_confine_esatto_lock_timeout(db_session, monkeypatch):
 
     ctx = await _scenario_claim(db_session)
     ctx["cc"].locked_by = "altro-worker"
-    ctx["cc"].locked_at = datetime.utcnow() - timedelta(minutes=19, seconds=59)
+    # AWARE per lo stesso motivo del test sul lock stale qui sopra.
+    ctx["cc"].locked_at = adesso_utc() - timedelta(minutes=19, seconds=59)
     await db_session.commit()
     assert await wa_worker.claim_next_wa_contact(
         db_session, number_id=ctx["number"].id, worker_id="w1") is None
 
-    ctx["cc"].locked_at = datetime.utcnow() - timedelta(minutes=20, seconds=1)
+    ctx["cc"].locked_at = adesso_utc() - timedelta(minutes=20, seconds=1)
     await db_session.commit()
     preso = await wa_worker.claim_next_wa_contact(
         db_session, number_id=ctx["number"].id, worker_id="w1")

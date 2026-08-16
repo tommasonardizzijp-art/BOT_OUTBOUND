@@ -26,7 +26,6 @@ ricompone il '+' subito dopo, prima di ogni hmac_phone()/encrypt().
 """
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import func, select
@@ -37,6 +36,7 @@ from app.services.wa_csv import COLONNA_NOME, COLONNA_NUMERO, parse_wa_csv
 from app.utils.crypto import encrypt
 from app.utils.phone_pseudonym import (PhoneNormalizationError, hmac_e164,
                                        normalize_e164)
+from app.utils.tempo import adesso_utc
 
 
 @dataclass
@@ -103,7 +103,7 @@ async def ingerisci_csv(db, *, tenant_id: str, campaign_id: str,
     righe, colonne_attributo = parse_wa_csv(contenuto)
     report = ReportIngest()
     visti: set[str] = set()
-    adesso = datetime.utcnow()
+    adesso = adesso_utc()
 
     for riga in righe:
         grezzo = riga.valori.get(COLONNA_NUMERO, "")

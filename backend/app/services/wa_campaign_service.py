@@ -11,6 +11,7 @@ from sqlalchemy import exists, func, select, update
 from app.models.wa import (WaCampaign, WaCampaignStatus, WaCampaignType, WaNumber,
                            WaNumberStatus, WaSendCondition, WaSequenceStep)
 from app.services.wa_template import validate_wa_template
+from app.utils.tempo import adesso_utc
 
 
 def calcola_optout_enabled(tipo: WaCampaignType) -> bool:
@@ -70,7 +71,7 @@ async def crea_campagna(db, dati: dict) -> WaCampaign:
         daily_limit=dati.get("daily_limit"),
         active_hours_start=dati.get("active_hours_start"),
         active_hours_end=dati.get("active_hours_end"),
-        created_at=datetime.utcnow(),
+        created_at=adesso_utc(),
     )
     db.add(campagna)
     await db.flush()
@@ -163,7 +164,7 @@ async def avvia(db, campaign_id: str) -> WaCampaign:
                            .where(WaCampaignContact.campaign_id == campaign_id)):
         raise ValueError("La campagna non ha contatti: carica prima la lista.")
 
-    adesso = datetime.utcnow()
+    adesso = adesso_utc()
     # UPDATE atomico: la condizione "nessun'altra running sullo stesso
     # numero" e' RIVALUTATA dentro la stessa istruzione che scrive
     # status=running, sotto il lock di riga che l'UPDATE prende. Se due
