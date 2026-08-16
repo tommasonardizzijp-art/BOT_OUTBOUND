@@ -618,7 +618,12 @@ function ReportPromozioneView({
       </p>
       {report.gia_dnc > 0 && (
         <p style={{ color: 'var(--wa-muted)' }}>
-          {report.gia_dnc} promossi ma gia&apos; in opt-out/do-not-contact: non verranno arruolati.
+          {/* stessa forma della riga delle chat gia' note (espressione,
+              spazio, testo che e' l'unico altro figlio): li' lo spazio si
+              perdeva. Qui non e' stato visto rendere -- serve un report di
+              promozione con gia_dnc>0 -- ma la difesa costa nulla. */}
+          {report.gia_dnc}{' '}
+          promossi ma gia&apos; in opt-out/do-not-contact: non verranno arruolati.
         </p>
       )}
       {report.scarti.length > 0 && (
@@ -738,7 +743,13 @@ function TestataScan({ numberId, onRiscansionato }:
               )}
               {ultima.saltate_gia_note > 0 && (
                 <p className="text-xs" style={{ color: 'var(--wa-muted)' }}>
-                  {ultima.saltate_gia_note} chat gia&apos; note non sono state riaperte.
+                  {/* {' '} esplicito: lo spazio scritto dopo la graffa viene
+                      mangiato dal compilatore JSX e la riga rendeva
+                      "12chat gia' note..." (verificato nel DOM il 16/08, due
+                      nodi di testo: "12" e "chat gia'..."). Stessa difesa gia'
+                      usata due righe sopra, su "su{' '}". */}
+                  {ultima.saltate_gia_note}{' '}
+                  chat gia&apos; note non sono state riaperte.
                 </p>
               )}
             </>
