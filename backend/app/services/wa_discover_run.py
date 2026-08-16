@@ -53,7 +53,7 @@ from app.services.wa_discover.sincronizzazione import (
     lista_utilizzabile, puo_scansionare, puo_scansionare_lettura,
 )
 from app.utils.events import emit as emit_event
-from app.utils.phone_pseudonym import hmac_phone
+from app.utils.phone_pseudonym import hmac_e164
 
 # Quanti passi di scorrimento SENZA righe nuove (mai viste in questo giro)
 # prima di arrendersi. La geometria qui e' piu' semplice che nel motore
@@ -135,7 +135,14 @@ async def _decidi_riga(page, grezza: dict, *,
         return DecisioneRiga(riga=None, ha_aperto=False, saltata=True)
     if grezza.get("titolo_e_numero"):
         numero_dal_titolo = classifica.numero_dal_titolo(titolo)
-        if numero_dal_titolo is not None and hmac_phone(numero_dal_titolo) in hmac_noti:
+        # hmac_e164, non hmac_phone: `numero_dal_titolo` e' l'uscita di
+        # normalize_e164, cioe' cifre NUDE, mentre `hmac_noti` arriva da
+        # WaDiscoveredChat.phone_hmac, che e' nella forma canonica (col '+').
+        # Con hmac_phone sulle cifre nude il confronto non combacia mai e il
+        # salto muore in silenzio proprio sulle righe che dovrebbe coprire
+        # (194 su 241 misurate il 14/08): nessun errore, solo 5,3s e
+        # un'apertura di chat in piu' per ognuna.
+        if numero_dal_titolo is not None and hmac_e164(numero_dal_titolo) in hmac_noti:
             return DecisioneRiga(riga=None, ha_aperto=False, saltata=True)
 
     if grezza.get("titolo_e_numero"):

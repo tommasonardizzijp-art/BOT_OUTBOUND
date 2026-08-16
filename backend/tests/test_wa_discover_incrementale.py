@@ -54,16 +54,19 @@ async def test_chat_col_numero_nel_titolo_si_salta_per_hmac(conta_aperture):
     # Il caso che il primo tentativo sul campo aveva mancato: 194 righe su 241
     # hanno il titolo mascherato a DB, quindi il confronto per titolo non
     # scatta mai. La chiave e' l'hmac.
-    from app.utils.phone_pseudonym import hmac_phone
+    from app.utils.phone_pseudonym import hmac_e164
 
-    # normalize_e164 (classifica.numero_dal_titolo, e lo stesso in
-    # pannello.py:116) ritorna SEMPRE il numero senza '+' -- e' cosi' che
-    # salvataggio.py lo scrive a DB (riga.numero, mai col prefisso). hmac_phone
-    # non normalizza: l'hmac atteso va calcolato sulla stessa forma, altrimenti
-    # non puo' mai combaciare con quello che il codice vero produce.
+    # `hmac_noti` viene letto da WaDiscoveredChat.phone_hmac, che dopo la
+    # migrazione del 13/08 e' SEMPRE nella forma canonica -- hmac del numero
+    # CON il '+', cioe' hmac_e164. L'hmac atteso qui si costruisce con la
+    # stessa funzione che scrive a DB, non con la forma che il chiamante
+    # aveva sottomano: la versione precedente di questo test usava
+    # `hmac_phone` sulle cifre nude, la stessa forma sbagliata del codice
+    # sotto test, ed era quindi verde per costruzione mentre sul campo il
+    # salto non scattava mai.
     decisione = await wa_discover_run._decidi_riga(
         _PaginaFinta(), {"titolo": "+39 334 802 8109", "titolo_e_numero": True},
-        titoli_noti=set(), hmac_noti={hmac_phone("393348028109")})
+        titoli_noti=set(), hmac_noti={hmac_e164("393348028109")})
 
     assert decisione.saltata is True
     assert decisione.riga is None

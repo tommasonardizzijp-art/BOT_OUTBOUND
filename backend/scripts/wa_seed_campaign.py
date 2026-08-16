@@ -31,7 +31,8 @@ from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                            WaCampaignType, WaContact, WaContactStatus, WaNumber,
                            WaNumberStatus, WaSendCondition, WaSequenceStep)
 from app.utils.crypto import encrypt
-from app.utils.phone_pseudonym import hmac_phone, mask_phone
+from app.utils.phone_pseudonym import (hmac_e164, hmac_phone, mask_phone,
+                                       normalize_e164)
 
 
 def _assert_db_di_test(url: str, forzato: bool) -> None:
@@ -98,8 +99,17 @@ async def _get_or_create_number(db, tenant: Tenant, *, label: str, e164: str,
     return numero
 
 
-async def _get_or_create_contact(db, tenant: Tenant, e164: str) -> WaContact:
-    pseudo = hmac_phone(e164)
+async def _get_or_create_contact(db, tenant: Tenant, grezzo: str) -> WaContact:
+    # `--contact` arriva come lo digita un umano, quindi il '+' puo' esserci
+    # o no. Senza normalizzare, lo stesso numero scritto nei due modi produce
+    # due phone_hmac diversi e quindi due WaContact: sono esattamente i 9
+    # duplicati che i collaudi 07-09/08 hanno lasciato a DB e che la
+    # migrazione del 13/08 ha dovuto fondere a mano. Si passa dalle stesse
+    # funzioni di wa_ingest -- normalize_e164 + hmac_e164, forma canonica
+    # CON '+' per la chiave e per encrypt().
+    numero = normalize_e164(grezzo)
+    e164 = "+" + numero
+    pseudo = hmac_e164(numero)
     contatto = await db.scalar(
         select(WaContact).where(WaContact.tenant_id == tenant.id,
                                 WaContact.phone_hmac == pseudo))

@@ -6,7 +6,10 @@ come ripiego sulla concorrenza; gap-fill che integra e non cancella) -- la
 differenza di fondo e' che qui `phone_hmac`/`encrypted_phone` si RIUSANO cosi'
 come sono (vincolo globale del piano Fase B): la riga scoperta li porta gia'
 nello stesso formato di `WaContact` (`salvataggio.py` li scrive con
-`hmac_phone(riga.numero)`/`encrypt(riga.numero)` sullo stesso E.164 con '+'),
+`hmac_e164(riga.numero)`/`encrypt(riga.numero)`, forma canonica CON '+' --
+vero solo dopo la migrazione dell'AVVIO 12/08 §1: prima la Fase A scriveva
+la forma nuda, e questa docstring lo affermava senza che nessun test lo
+verificasse),
 quindi decifrare e ri-cifrare sarebbe lavoro sprecato e un'occasione in piu'
 per un numero in chiaro in un log.
 

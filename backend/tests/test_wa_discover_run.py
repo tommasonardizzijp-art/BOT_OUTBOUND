@@ -14,7 +14,7 @@ import pytest
 
 from app.services import bot_state_service, wa_discover_run
 from app.services.wa_discover import classifica, pannello, sidebar
-from app.utils.phone_pseudonym import hmac_phone
+from app.utils.phone_pseudonym import hmac_e164
 
 from tests.test_wa_discover_modello import _scoperte_di, numero_wa  # noqa: F401
 
@@ -207,7 +207,7 @@ async def test_riga_titolo_numero_salvata_senza_aprire_il_pannello(
     assert esito["salvate"] == 1
     trovate = await _scoperte_di(db_session, numero_wa.id)
     assert len(trovate) == 1
-    assert trovate[0].phone_hmac == hmac_phone("393421460077")
+    assert trovate[0].phone_hmac == hmac_e164("393421460077")
     assert trovate[0].numero_leggibile is True
     assert trovate[0].tipo_chat == classifica.TIPO_INDIVIDUALE
 

@@ -56,89 +56,47 @@ async def test_match_per_numero(db_session):
 
 
 @pytest.mark.asyncio
-async def test_match_per_numero_trova_anche_i_contatti_scritti_dalla_fase_a(db_session):
-    """Il secondo difetto del 12/08, e quello che ha reso cieco il gate
-    opt-out sul 62% della campagna.
-
-    Watcher e Fase A pseudonimizzano DUE stringhe diverse:
-      wa_reply_watcher.py  cerca   hmac_phone("+" + cifre)
-      wa_discover/salvataggio.py  scrive  hmac_phone(riga.numero)
-    e `riga.numero` e' l'output nudo di normalize_e164, che ritorna le cifre
-    SENZA il '+'. Il '+' non viene mai ricomposto, cosi' le due meta' non si
-    incontrano mai: su 262 eventi inbound, matched_by='phone' e' rimasto 0.
-
-    Misurato su produzione: 246 contatti su 258 sono nella forma della Fase A,
-    e 154 hanno chat_title NULL (voluto: la promozione scarta le etichette
-    mascherate). Per quelli il ramo phone e' l'UNICO modo di essere
-    riconosciuti -- rotto lui, sono invisibili al reply-watcher.
-
-    Finche' i dati storici convivono nelle due forme, la lettura deve
-    accettarle entrambe. La scrittura si unifica con la migrazione, non prima:
-    farlo adesso significherebbe che la Fase A non ritrova piu' le righe gia'
-    a DB e ne inserisce di nuove, moltiplicando i duplicati."""
-    from app.utils.phone_pseudonym import hmac_phone
+async def test_hmac_scritto_dalla_fase_a_e_trovato_in_forma_canonica(db_session):
+    """Prova diretta che la Fase A scrive ORA la stessa forma che il
+    watcher cerca -- non un WaContact costruito a mano, ma il percorso vero
+    (salva_scoperta -> promuovi), coperto anche da
+    test_wa_cross_confine_fase_a_promozione_match.py. Qui si verifica lo
+    stesso invariante dal lato del watcher: hmac_e164 (la funzione unica di
+    scrittura, AVVIO 12/08 §1 passo 3) produce cio' che match_contact cerca."""
+    from app.utils.phone_pseudonym import hmac_e164
     from app.services.wa_reply_watcher import match_contact
 
     tenant = await make_tenant(db_session)
     contatto = await make_contact(db_session, tenant, e164="+393331234567")
-    contatto.phone_hmac = hmac_phone("393331234567")  # come scrive la Fase A
+    contatto.phone_hmac = hmac_e164("393331234567")  # come scrive la Fase A oggi
     await db_session.commit()
 
     row = _row("+39 333 1234567", title_is_number=True)
     trovato, via = await match_contact(db_session, tenant.id, row)
-    assert trovato is not None, "contatto della Fase A invisibile al watcher"
+    assert trovato is not None
     assert trovato.id == contatto.id
     assert via == WaMatchedBy.phone
 
 
 @pytest.mark.asyncio
-async def test_fra_due_contatti_con_lo_stesso_numero_vince_quello_arruolato(db_session):
-    """Il rischio che il fix sopra introduce, se lo si scrive distratti.
-
-    `phone_hmac` e' UNIQUE, ma le due forme non sono uguali per il DB: su
-    produzione 9 numeri hanno gia' DUE WaContact distinti. Cercandole
-    entrambe la query puo' tornare due righe, e uno `scalar()` senza ORDER BY
-    ne prende una a caso.
-
-    Se pesca il gemello sbagliato -- quello non arruolato -- persist_wa_optout
-    marca il contatto che non riceve nulla: l'opt-out risulta registrato,
-    l'evento risulta matched_by=phone, e la riga `queued` della campagna NON
-    si ferma. Un fallimento indistinguibile dal successo, proprio sul gate
-    che deve essere il piu' affidabile. Su produzione riguarda 6 numeri
-    ancora `queued`.
-
-    Vince quindi il contatto che ha una riga in wa_campaign_contacts: e' quello
-    a cui stiamo scrivendo, ed e' l'unico che l'opt-out deve poter fermare."""
+async def test_hmac_in_forma_nuda_non_trova_piu_nulla(db_session):
+    """Il cerotto (PR #75) e' stato tolto il 13/08 dopo la migrazione dei
+    dati storici (AVVIO 12/08 §1, passo 4): un WaContact rimasto per
+    qualche motivo nella forma nuda (senza '+') non e' piu' raggiungibile
+    dal watcher -- prova del nove che la `in_` e' stata davvero stretta a
+    un solo valore, non solo che il caso felice funziona."""
     from app.utils.phone_pseudonym import hmac_phone
     from app.services.wa_reply_watcher import match_contact
-    from app.models.wa import WaCampaignStatus, WaContactStatus
-    from tests.factories_wa import (make_campaign, make_campaign_contact,
-                                    make_number)
 
     tenant = await make_tenant(db_session)
-    numero = await make_number(db_session, tenant)
-
-    # Il gemello nato da un onboarding manuale: forma con '+', mai arruolato.
-    orfano = await make_contact(db_session, tenant, e164="+393331234567",
-                                display_name="prova onboarding")
-
-    # Quello vero della campagna: forma della Fase A, arruolato e in attesa.
-    arruolato = await make_contact(db_session, tenant, e164="+393339999999",
-                                   display_name="cliente Primero")
-    arruolato.phone_hmac = hmac_phone("393331234567")
-    campagna, _ = await make_campaign(db_session, tenant, numero,
-                                      status=WaCampaignStatus.running)
-    await make_campaign_contact(db_session, campagna, arruolato,
-                                status=WaContactStatus.queued)
+    contatto = await make_contact(db_session, tenant, e164="+393331234567")
+    contatto.phone_hmac = hmac_phone("393331234567")  # forma nuda, pre-migrazione
     await db_session.commit()
 
     row = _row("+39 333 1234567", title_is_number=True)
     trovato, via = await match_contact(db_session, tenant.id, row)
-    assert via == WaMatchedBy.phone
-    assert trovato.id == arruolato.id, (
-        "ha pescato il gemello non arruolato: l'opt-out si sarebbe registrato "
-        "sul contatto sbagliato e la campagna non si sarebbe fermata")
-    assert trovato.id != orfano.id
+    assert trovato is None
+    assert via == WaMatchedBy.none
 
 
 @pytest.mark.asyncio
