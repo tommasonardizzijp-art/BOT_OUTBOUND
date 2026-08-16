@@ -6,6 +6,7 @@ from sqlalchemy import DateTime, Enum as SAEnum, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+from app.utils.tempo import adesso_utc
 
 
 class TenantStatus(str, enum.Enum):
@@ -26,4 +27,4 @@ class Tenant(Base):
         default=TenantStatus.active, nullable=False)
     settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
-                                                 default=datetime.utcnow, nullable=False)
+                                                 default=adesso_utc, nullable=False)

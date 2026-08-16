@@ -10,7 +10,6 @@ l'UNICO posto che puo' rimettere un numero simile in gioco, e lo fa solo
 verso pending_qr -- mai verso active, che resta compito esclusivo di
 wa_session.check_session (guarda il browser vero).
 """
-from datetime import datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from loguru import logger
@@ -24,6 +23,7 @@ from app.services import wa_discover_gate, wa_discover_runs, wa_profile_lock, wa
 from app.utils.crypto import decrypt, encrypt
 from app.utils.phone_pseudonym import (PhoneNormalizationError, hmac_phone,
                                        mask_phone, normalize_e164)
+from app.utils.tempo import adesso_utc
 from app.workers.wa_discover_worker import enqueue_wa_discover
 
 router = APIRouter(prefix="/wa/numbers", tags=["wa-numbers"])
@@ -306,7 +306,7 @@ async def riattiva(number_id: str, motivo: str = Body(..., embed=True),
     numero.sent_today = 0
     numero.sent_date = None
     numero.warmup_day = 1        # riparte dalla rampa, non dal cap raggiunto
-    stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    stamp = adesso_utc().strftime("%Y-%m-%d %H:%M")
     nota = f"[{stamp}] riattivato: {motivo.strip()}"
     numero.notes = f"{(numero.notes or '').rstrip()}\n{nota}".strip()
     await db.commit()

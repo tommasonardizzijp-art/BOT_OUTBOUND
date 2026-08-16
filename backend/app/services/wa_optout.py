@@ -10,13 +10,13 @@ STOP (cronologia non sincronizzata, chat archiviata, messaggio cancellato),
 la decisione no. Per questo la prova si scrive a DB e non si ricalcola.
 """
 import re
-from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import select, update
 
 from app.config import settings
 from app.utils import events
+from app.utils.tempo import adesso_utc
 
 
 def _pattern(parole_csv: str) -> re.Pattern:
@@ -102,7 +102,7 @@ async def persist_wa_optout(db, contact_id: str, *, prova: str,
     gia_optato = bool(contact.opted_out)
     if not gia_optato:
         contact.opted_out = True
-        contact.opted_out_at = datetime.utcnow()
+        contact.opted_out_at = adesso_utc()
         contact.do_not_contact = True
         contact.dnc_reason = WaDncReason.optout
 

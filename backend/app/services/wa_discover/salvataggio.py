@@ -18,7 +18,6 @@ cercata per hmac, non per titolo -- il titolo di prima non esiste ancora.
 """
 from __future__ import annotations
 
-from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import or_, select
@@ -35,6 +34,7 @@ from app.services.wa_discover.classifica import (
 )
 from app.utils.crypto import encrypt
 from app.utils.phone_pseudonym import hmac_e164
+from app.utils.tempo import adesso_utc
 
 class RigaSenzaIdentita(ValueError):
     """Sollevata quando una riga scoperta non ha ne' `chat_title` ne'
@@ -143,7 +143,7 @@ def _fondi(esistente: WaDiscoveredChat, *, etichetta: str | None,
     # non regredisce.
     esistente.numero_leggibile = esistente.numero_leggibile or riga.numero_leggibile
     esistente.tipo_chat = tipo_vincente(esistente.tipo_chat, riga.tipo)
-    esistente.updated_at = datetime.utcnow()
+    esistente.updated_at = adesso_utc()
     # status NON si tocca qui, apposta: lo muove solo la Fase B (promozione a
     # WaContact / scarto). RigaScoperta non porta uno status -- ogni scoperta
     # della Fase A e' per definizione 'nuovo', e se la fusione lo riscrivesse

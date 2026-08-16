@@ -8,7 +8,7 @@ file sono tutte commentate: dove non c'e' commento, e' lo stesso pattern.
 import asyncio
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import arq
 from loguru import logger
@@ -24,6 +24,7 @@ from app.config import settings
 from app.services import bot_state_service, wa_profile_lock, wa_sender, wa_timing
 from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
 from app.services.work_enqueue import arq_redis_settings
+from app.utils.tempo import adesso_utc
 
 # Quanti guasti NOSTRI consecutivi (selettori, pagina in stato inatteso) su
 # chat diverse fermano il numero. Tre: sotto si rischia di fermarsi per un
@@ -79,7 +80,15 @@ async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
                                WaContact, WaContactStatus, WaNumber, WaNumberStatus,
                                WaSequenceStep)
 
-    now = datetime.utcnow()
+    # AWARE (app/utils/tempo.py). Qui `now` fa due mestieri: e' il parametro
+    # legato alle condizioni su next_action_at/locked_at -- colonne
+    # timestamptz, che con un naive PostgreSQL confronta interpretandolo come
+    # ora locale, cioe' due ore fuori posto e la riga eleggibile che non esce
+    # dalla SELECT -- ed e' il valore scritto in locked_at dal claim qui sotto.
+    # Le due cose devono usare lo stesso istante e la stessa natura: e' la
+    # coerenza fra scrittura e rilettura del lock a decidere se una riga si
+    # sblocca al momento giusto.
+    now = adesso_utc()
     stale_cutoff = now - timedelta(minutes=int(settings.wa_lock_timeout_min))
 
     riga = (
@@ -112,6 +121,17 @@ async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
     # Claim atomico: la WHERE ripete la condizione di lock. Se un altro
     # worker ha vinto la corsa fra SELECT e UPDATE, rowcount e' 0 e qui si
     # esce senza errore -- stesso pattern di browser_bio.claim_next_pending.
+    #
+    # synchronize_session=False non e' un dettaglio di performance: col
+    # default ("evaluate") SQLAlchemy RIVALUTA questa WHERE in Python contro
+    # gli oggetti gia' in sessione. Il confronto `locked_at < stale_cutoff`
+    # diventa quindi anche un confronto Python -- invisibile a un grep, che
+    # qui vede solo SQL. Su PostgreSQL la colonna e' timestamptz e rilegge
+    # sempre aware, ma su SQLite (il default di config.py, e il backend della
+    # suite) torna naive: contro il `stale_cutoff` aware alza
+    # TypeError e il worker di invio muore alla prima riga lockata. La riga
+    # viene comunque rinfrescata subito dopo, quindi non sincronizzarla qui
+    # non toglie nulla.
     claim = await db.execute(
         update(WaCampaignContact)
         .where(
@@ -120,6 +140,7 @@ async def claim_next_wa_contact(db, *, number_id: str, worker_id: str):
                 WaCampaignContact.locked_at < stale_cutoff),
         )
         .values(locked_by=worker_id, locked_at=now)
+        .execution_options(synchronize_session=False)
     )
     await db.commit()
     if (claim.rowcount or 0) == 0:
@@ -212,8 +233,6 @@ async def _niente_da_fare_prima_del_browser(number_id: str) -> str | None:
     Deliberatamente NON prende il lucchetto e NON claima niente: un pre-check
     che lockasse una riga la terrebbe ferma per tutta la quarantena.
     """
-    from datetime import datetime as _dt
-
     from sqlalchemy import func
 
     from app.database import AsyncSessionLocal
@@ -240,7 +259,11 @@ async def _niente_da_fare_prima_del_browser(number_id: str) -> str | None:
         if not await wa_number_manager.has_wa_send_budget(db, number, campagna):
             return "cap_esaurito"
 
-        now = _dt.utcnow()
+        # Stessa query di eleggibilita' di claim_next_wa_contact, stesso
+        # motivo per cui l'istante deve essere aware: se qui il conteggio
+        # sbaglia di due ore, la mini-sessione decide "niente_da_fare" e non
+        # apre nemmeno il browser su una campagna che invece ha lavoro.
+        now = adesso_utc()
         stale_cutoff = now - timedelta(minutes=int(settings.wa_lock_timeout_min))
         pronti = await db.scalar(
             select(func.count(WaCampaignContact.id))
@@ -707,7 +730,7 @@ async def _chiudi_campagna_se_finita(number_id: str) -> str | None:
             .where(WaCampaign.id == campaign_id,
                    WaCampaign.status == WaCampaignStatus.running)
             .values(status=WaCampaignStatus.completed,
-                    completed_at=datetime.utcnow())
+                    completed_at=adesso_utc())
         )
         await db.commit()
         if (chiusura.rowcount or 0) == 0:

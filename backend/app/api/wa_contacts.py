@@ -1,5 +1,5 @@
 """Ingest e gestione contatti di una campagna WhatsApp."""
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ from app.services.wa_promote import arruolamento
 from app.services.wa_promote.arruolamento import CampagnaNonModificabile
 from app.utils.crypto import decrypt
 from app.utils.phone_pseudonym import mask_phone
+from app.utils.tempo import adesso_utc, as_utc
 
 router = APIRouter(prefix="/wa/contacts", tags=["wa-contacts"])
 
@@ -27,9 +28,17 @@ def _lock_fresco(cc: WaCampaignContact) -> bool:
     """Stessa soglia usata da DELETE: un lock piu' vecchio di
     wa_lock_timeout_min e' considerato stale (worker morto a meta'), non
     'in lavorazione'. GET e DELETE devono vedere lo stesso stato, altrimenti
-    un operatore vede 'in lavorazione' su una riga che e' gia' rimovibile."""
-    return bool(cc.locked_by and cc.locked_at and cc.locked_at > (
-        datetime.utcnow() - timedelta(minutes=int(settings.wa_lock_timeout_min))))
+    un operatore vede 'in lavorazione' su una riga che e' gia' rimovibile.
+
+    `as_utc` perche' questo e' l'UNICO confronto del canale che avviene in
+    Python invece che dentro la query, ed e' quindi l'unico che puo'
+    SOLLEVARE: `locked_at` torna aware da PostgreSQL e naive da SQLite, e un
+    confronto misto alza `TypeError`. La stessa forma, sul `started_at` di
+    wa_discover_runs, e' risalita fino all'endpoint come 500 al posto di un
+    409 (16/08) -- e' un errore che la suite su SQLite non puo' vedere da
+    sola."""
+    return bool(cc.locked_by and cc.locked_at and as_utc(cc.locked_at) > (
+        adesso_utc() - timedelta(minutes=int(settings.wa_lock_timeout_min))))
 
 
 @router.post("/ingest")

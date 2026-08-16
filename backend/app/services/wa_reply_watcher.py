@@ -4,7 +4,6 @@ brucerebbe le notifiche del cliente sul telefono (vincolo di coesistenza,
 SDD §9). Matching contatto, dedup eventi, dispatch opt-out/replied.
 """
 import unicodedata
-from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import func, select
@@ -18,6 +17,7 @@ from app.services import bot_state_service, notifier, wa_optout, wa_profile_lock
 from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
 from app.utils import events
 from app.utils.phone_pseudonym import PhoneNormalizationError, hmac_e164, normalize_e164
+from app.utils.tempo import adesso_utc
 
 
 async def match_contact(db, tenant_id: str, row: ChatRow) -> tuple[WaContact | None, WaMatchedBy]:
@@ -246,7 +246,7 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
         cc_attiva.status = WaContactStatus.replied
         cc_attiva.replied_at_step = cc_attiva.current_step
         cc_attiva.next_action_at = None
-        contatto.last_replied_at = datetime.utcnow()
+        contatto.last_replied_at = adesso_utc()
         await _incrementa_contatore_campagna(db, cc_attiva.campaign_id, "replied")
         db.add(WaInboundEvent(tenant_id=tenant_id, wa_number_id=wa_number_id,
                               contact_id=contatto.id, preview_text=row.preview,
@@ -294,7 +294,7 @@ async def numeri_da_scansionare(db) -> list[str]:
         .distinct()
     )
 
-    finestra = datetime.utcnow() - timedelta(days=int(settings.wa_reply_scan_window_days))
+    finestra = adesso_utc() - timedelta(days=int(settings.wa_reply_scan_window_days))
     con_invio_recente = await db.execute(
         select(WaMessage.wa_number_id)
         .join(WaNumber, WaNumber.id == WaMessage.wa_number_id)
