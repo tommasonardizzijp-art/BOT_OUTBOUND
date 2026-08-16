@@ -10,17 +10,22 @@
 // (invariante I1). Le uniche scritture di questa pagina sono i quattro
 // verbi di ciclo vita (start/pause/resume/stop) e la rimozione di un
 // contatto non terminale e non sotto lock fresco.
-import { use, useState } from 'react'
+import { use, useEffect, useState } from 'react'
 import Link from 'next/link'
 import useSWR from 'swr'
 import { toast } from 'sonner'
 import {
   ArrowLeft, AlertTriangle, Lock, Play, Pause, Square, RotateCcw, Wrench,
-  ChevronLeft, ChevronRight, Trash2,
+  ChevronLeft, ChevronRight, ChevronDown, Trash2,
 } from 'lucide-react'
 import {
   waApi, type WaCampaignStatus, type WaContactStatus, type WaCampaignContactRow,
+  type WaCampaignDetail,
 } from '@/lib/waApi'
+
+// Lo stesso segnaposto che il wizard scrive alla creazione: qui serve solo a
+// riconoscere una bozza il cui messaggio non e' MAI stato scritto, e dirlo.
+const SEGNAPOSTO_MESSAGGIO = 'Messaggio da scrivere: completalo nel passo 3.'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { ModaleMotivo } from '@/components/wa/ModaleMotivo'
@@ -306,6 +311,17 @@ export default function DettaglioCampagnaPage({ params }: { params: Promise<{ id
         </div>
       </Riquadro>
 
+      {/* ---- Modifica, solo in bozza ---------------------------------------
+          Il backend accetta PATCH /{id} e PUT /{id}/steps/0 SOLO in draft
+          (una campagna partita si mette in pausa prima di toccarla). Finche'
+          questo riquadro non esisteva, una bozza lasciata a meta' -- messaggio
+          non scritto perche' non era ancora pronto -- non era piu'
+          modificabile da nessuna parte: il wizard non si riapre su una
+          campagna esistente. */}
+      {campagna.status === 'draft' && (
+        <ModificaBozza campagna={campagna} onSalvato={refreshTutto} />
+      )}
+
       {/* ---- Azioni di ciclo vita ------------------------------------------ */}
       <Riquadro>
         <div className="space-y-3">
@@ -514,6 +530,170 @@ export default function DettaglioCampagnaPage({ params }: { params: Promise<{ id
         </div>
       </Riquadro>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Modifica di una bozza: messaggio e impostazioni.
+//
+// Due form separati e due salvataggi separati perche' sono due rotte diverse
+// con due validazioni diverse: il messaggio passa da PUT /steps/0, che
+// rivalida i segnaposto contro le colonne EFFETTIVAMENTE presenti nei
+// contatti caricati; le impostazioni da PATCH /{id}, che rifiuta 422 se
+// l'opt-out resta attivo senza CTA. Un salvataggio unico nasconderebbe quale
+// delle due ha rifiutato.
+// ---------------------------------------------------------------------------
+function ModificaBozza({ campagna, onSalvato }: {
+  campagna: WaCampaignDetail; onSalvato: () => Promise<void>
+}) {
+  const [aperto, setAperto] = useState(false)
+
+  const [testo, setTesto] = useState(campagna.step_0.template_a ?? '')
+  const [salvandoTesto, setSalvandoTesto] = useState(false)
+  const [erroreTesto, setErroreTesto] = useState<string | null>(null)
+
+  const [nome, setNome] = useState(campagna.name)
+  const [cta, setCta] = useState(campagna.optout_cta ?? '')
+  const [salvandoImp, setSalvandoImp] = useState(false)
+  const [erroreImp, setErroreImp] = useState<string | null>(null)
+
+  // Il testo a DB puo' cambiare sotto (un altro salvataggio, un refresh):
+  // si riallinea la textarea solo quando il pannello e' chiuso, cosi' non si
+  // cancella sotto le dita cio' che si sta scrivendo.
+  useEffect(() => {
+    if (!aperto) {
+      setTesto(campagna.step_0.template_a ?? '')
+      setNome(campagna.name)
+      setCta(campagna.optout_cta ?? '')
+    }
+  }, [aperto, campagna.step_0.template_a, campagna.name, campagna.optout_cta])
+
+  async function salvaTesto() {
+    setErroreTesto(null)
+    setSalvandoTesto(true)
+    try {
+      await waApi.campagne.updateStep0(campagna.id, { template_a: testo })
+      await onSalvato()
+      toast.success('Messaggio salvato.')
+    } catch (e: unknown) {
+      // messaggio del backend testuale (es. segnaposto ignoto), mai un
+      // "Errore 422" generico
+      setErroreTesto(e instanceof Error ? e.message : 'Errore nel salvataggio del messaggio.')
+    } finally {
+      setSalvandoTesto(false)
+    }
+  }
+
+  async function salvaImpostazioni() {
+    setErroreImp(null)
+    setSalvandoImp(true)
+    try {
+      await waApi.campagne.update(campagna.id, {
+        name: nome.trim(),
+        optout_cta: cta.trim() || null,
+      })
+      await onSalvato()
+      toast.success('Impostazioni salvate.')
+    } catch (e: unknown) {
+      setErroreImp(e instanceof Error ? e.message : 'Errore nel salvataggio delle impostazioni.')
+    } finally {
+      setSalvandoImp(false)
+    }
+  }
+
+  const testoVuoto = testo.trim().length === 0
+  const eSegnaposto = testo.trim() === SEGNAPOSTO_MESSAGGIO
+
+  return (
+    <Riquadro>
+      <div className="space-y-4">
+        <button
+          type="button"
+          onClick={() => setAperto((v) => !v)}
+          className="flex w-full items-center justify-between text-left"
+        >
+          <span className="text-sm font-medium text-white">
+            Modifica la bozza
+            {(testoVuoto || eSegnaposto) && (
+              <span className="ml-2 text-xs" style={{ color: '#e07a3c' }}>
+                — il messaggio non e&apos; ancora scritto
+              </span>
+            )}
+          </span>
+          {aperto ? <ChevronDown className="h-4 w-4" style={{ color: 'var(--wa-muted)' }} />
+            : <ChevronRight className="h-4 w-4" style={{ color: 'var(--wa-muted)' }} />}
+        </button>
+
+        {aperto && (
+          <div className="space-y-6">
+            {/* ---- Messaggio ---- */}
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-white">Messaggio</label>
+              {erroreTesto && <Errore messaggio={erroreTesto} />}
+              <textarea
+                value={testo}
+                onChange={(e) => setTesto(e.target.value)}
+                rows={8}
+                className="w-full rounded-lg border px-3 py-2 text-sm"
+                style={{ backgroundColor: 'transparent', borderColor: 'var(--wa-border)', color: '#e7f3ef' }}
+              />
+              <div className="flex items-center gap-3">
+                <Button
+                  type="button"
+                  disabled={salvandoTesto || testoVuoto}
+                  onClick={salvaTesto}
+                  style={{ backgroundColor: 'var(--wa-accent)', color: '#04120e' }}
+                >
+                  {salvandoTesto ? 'Salvataggio...' : 'Salva il messaggio'}
+                </Button>
+                {campagna.optout_enabled && campagna.optout_cta && (
+                  <span className="text-xs" style={{ color: 'var(--wa-muted)' }}>
+                    La CTA di opt-out viene aggiunta dal sistema, non va scritta qui.
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* ---- Impostazioni ---- */}
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-white">Impostazioni</label>
+              {erroreImp && <Errore messaggio={erroreImp} />}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <span className="mb-1 block text-xs" style={{ color: 'var(--wa-muted)' }}>Nome</span>
+                  <input
+                    value={nome}
+                    onChange={(e) => setNome(e.target.value)}
+                    className="w-full rounded-lg border px-3 py-2 text-sm"
+                    style={{ backgroundColor: 'transparent', borderColor: 'var(--wa-border)', color: '#e7f3ef' }}
+                  />
+                </div>
+                <div>
+                  <span className="mb-1 block text-xs" style={{ color: 'var(--wa-muted)' }}>
+                    CTA di opt-out
+                  </span>
+                  <input
+                    value={cta}
+                    onChange={(e) => setCta(e.target.value)}
+                    className="w-full rounded-lg border px-3 py-2 text-sm"
+                    style={{ backgroundColor: 'transparent', borderColor: 'var(--wa-border)', color: '#e7f3ef' }}
+                  />
+                </div>
+              </div>
+              <Button
+                type="button"
+                disabled={salvandoImp || !nome.trim()}
+                onClick={salvaImpostazioni}
+                variant="outline"
+                style={{ borderColor: 'var(--wa-border)', color: 'var(--wa-muted)' }}
+              >
+                {salvandoImp ? 'Salvataggio...' : 'Salva le impostazioni'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </Riquadro>
   )
 }
 
