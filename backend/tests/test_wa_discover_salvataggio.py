@@ -17,7 +17,9 @@ from app.models.wa import WaDiscoveredChat
 from app.services.wa_discover.classifica import (
     TIPO_GRUPPO, TIPO_IGNOTO, TIPO_INDIVIDUALE, RigaScoperta,
 )
-from app.services.wa_discover.salvataggio import salva_scoperta, tipo_vincente
+from app.services.wa_discover.salvataggio import (
+    RigaSenzaIdentita, salva_scoperta, tipo_vincente,
+)
 from app.utils.phone_pseudonym import hmac_e164
 
 from tests.test_wa_discover_modello import _scoperte_di, numero_wa  # noqa: F401
@@ -133,6 +135,30 @@ async def test_titolo_numerico_non_estraibile_si_salva_mascherato(db_session, nu
     assert tutte[0].phone_hmac is None
     numeri_in_chiaro = "3421460077998877"
     assert numeri_in_chiaro not in (tutte[0].chat_title or "")
+
+
+@pytest.mark.asyncio
+async def test_riga_senza_identita_non_si_scrive(db_session, numero_wa):
+    """Trovato in review (adversarial I, 15/08): titolo vuoto E numero non
+    letto -> ne' chat_title ne' phone_hmac, nessuna delle due
+    UniqueConstraint di wa_discovered_chats potrebbe riconoscere la riga in
+    futuro (NULL != NULL in SQL). L'unico chiamante di produzione
+    (wa_discover_run.py) gia' filtra i titoli vuoti PRIMA di arrivare qui --
+    ma quel filtro vive nel CHIAMANTE, non in salva_scoperta: un secondo
+    chiamante (es. uno script di recupero mirato che chiama salva_scoperta
+    direttamente -- ne esiste gia' uno, scritto per recuperare a mano le
+    chat senza numero) che non lo replicasse scriverebbe la riga orfana che
+    il docstring del modulo dice di voler escludere strutturalmente. La
+    guardia deve stare QUI, e deve sollevare
+    (non un valore di ritorno stringa come 'creata'/'aggiornata' che un
+    chiamante distratto ignorerebbe)."""
+    riga = RigaScoperta(titolo=None, numero=None, numero_leggibile=False,
+                        tipo=TIPO_IGNOTO)
+    with pytest.raises(RigaSenzaIdentita):
+        await salva_scoperta(db_session, numero_wa.tenant_id, numero_wa.id, riga)
+
+    trovate = await _scoperte_di(db_session, numero_wa.id)
+    assert trovate == [], "nessuna riga deve essere stata scritta"
 
 
 @pytest.mark.asyncio

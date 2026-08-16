@@ -49,7 +49,15 @@ _ATTESE_HEADER_S = (0.8, 1.5, 2.5, 3.0)
 # Il pannello info costa di piu' ad aprirsi dell'header (misurato PoC-4: 5,3s
 # medi, coda 3,5-8,7s): la progressione copre quella coda senza bloccare il
 # caso rapido, che esce alla prima lettura non vuota.
-_ATTESE_PANNELLO_S = (1.0, 1.5, 2.0, 2.5)
+#
+# 7s cumulativi bastano a PC scarico e non bastano altrimenti: il tasso di
+# fallimento misurato passa dal 5% del PoC-4 (macchina dedicata) all'11%
+# reale (10 contatti su ~94 su PRIMERO MAGAZZINO, 15/08). Il selettore
+# [data-testid='drawer-right'] NON e' obsoleto (sonda su una chat fallita,
+# SIMONE: 365 caratteri letti a macchina ferma) -- e' intermittenza sotto
+# carico, non un selettore morto. Chi apre il pannello e lo trova subito
+# esce al primo giro, quindi la coda lunga la paga solo chi ne ha bisogno.
+_ATTESE_PANNELLO_S = (1.0, 1.5, 2.0, 2.5, 4.0, 5.0, 5.0)
 
 # Un numero nel testo del pannello si riconosce dal prefisso '+': a differenza
 # dei titoli (dove titolo_e_numero legge l'INTERA stringa), qui il numero

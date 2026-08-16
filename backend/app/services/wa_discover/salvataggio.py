@@ -36,6 +36,25 @@ from app.services.wa_discover.classifica import (
 from app.utils.crypto import encrypt
 from app.utils.phone_pseudonym import hmac_e164
 
+class RigaSenzaIdentita(ValueError):
+    """Sollevata quando una riga scoperta non ha ne' `chat_title` ne'
+    `phone_hmac`: nessuna delle due `UniqueConstraint` di `WaDiscoveredChat`
+    potrebbe riconoscerla in futuro (NULL != NULL in SQL, docstring del
+    modulo). Un'eccezione, non un valore di ritorno stringa in piu' accanto
+    a 'creata'/'aggiornata': una stringa la ignora un chiamante distratto,
+    un'eccezione no.
+
+    Trovato in review (adversarial I, 15/08): l'unica cosa che impediva
+    questa riga di finire a DB era un filtro nel CHIAMANTE (il loop di scan
+    in wa_discover_run.py scarta i titoli vuoti prima di costruire una
+    RigaScoperta) -- non salva_scoperta stessa. Un invariante dichiarato nel
+    docstring del modulo e garantito da un `if` in un altro file non e' un
+    invariante, e' una convenzione: un secondo chiamante (es. uno script di
+    recupero mirato) che non replicasse quel filtro avrebbe scritto la riga
+    orfana per davvero.
+    """
+
+
 # Rango del tipo chat in una fusione: 'ignoto' e' l'unico stato che puo'
 # avanzare. Tra individuale e gruppo non c'e' un ordine di merito -- se un
 # giro successivo porta un segnale diverso da quello gia' salvato, la riga
@@ -151,6 +170,18 @@ async def salva_scoperta(db, tenant_id: str, number_id: str, riga: RigaScoperta)
     # il cerotto (PR #75) e poi la migrazione (probe_hmac_duplicati.py +
     # migra_hmac_forma_canonica.py, 13/08).
     phone_hmac = hmac_e164(riga.numero) if riga.numero else None
+
+    if etichetta is None and phone_hmac is None:
+        # La guardia vive QUI, non nel chiamante (vedi RigaSenzaIdentita):
+        # senza identita' non c'e' niente da scrivere che potrebbe mai
+        # essere ritrovato da _trova_esistente in una ri-scansione.
+        logger.warning(
+            f"[WaDiscover] number_id={number_id}: riga scoperta SCARTATA, "
+            "nessuna identita' (titolo vuoto/assente e numero non letto) -- "
+            "nessuna delle due UniqueConstraint di wa_discovered_chats "
+            "potrebbe riconoscerla in futuro")
+        raise RigaSenzaIdentita(
+            f"number_id={number_id}: ne' titolo ne' numero, riga non scrivibile")
 
     esistente = await _trova_esistente(db, number_id, etichetta, phone_hmac)
 

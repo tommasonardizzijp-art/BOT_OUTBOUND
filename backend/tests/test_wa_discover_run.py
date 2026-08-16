@@ -101,8 +101,11 @@ class _FakePage:
 
     async def evaluate(self, script, *args):
         if "elementFromPoint" in script:
-            # "La lista e' utilizzabile?": falso quando un pannello la copre.
-            return not self.drawer_aperti
+            # "La lista e' utilizzabile?": la JS reale (_JS_RIGHE_CANDIDATE,
+            # Task 12) ritorna un booleano PER RIGA candidata, non un singolo
+            # bool -- _almeno_una_cliccabile decide se ALMENO UNA lo e'. Qui
+            # una sola riga finta basta: coperta quando c'e' un drawer sopra.
+            return [not self.drawer_aperti]
         if "textContent" in script and "children.length" in script:
             # I testi della pagina, letti da leggi_percentuale DOPO il click su
             # Impostazioni: prima di quel click il pannello non c'e'.

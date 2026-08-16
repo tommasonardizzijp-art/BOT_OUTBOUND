@@ -25,7 +25,13 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     // (righe scartate, placeholder mancanti, stato macchina non valido):
     // mostrarlo e' meglio di un generico "Errore 422".
     const detail = await res.json().catch(() => null)
-    throw new Error(detail?.detail ?? `Errore ${res.status}`)
+    const grezzo = detail?.detail
+    const messaggio = typeof grezzo === 'string'
+      ? grezzo
+      // I 409 del discover mandano {codice, messaggio}: senza questo ramo
+      // l'utente vedrebbe "[object Object]".
+      : (grezzo?.messaggio ?? `Errore ${res.status}`)
+    throw new Error(messaggio)
   }
   if (res.status === 204) return undefined as T
   return res.json()
@@ -186,6 +192,34 @@ export type WaDiscoveredChat = {
   discovered_at: string | null
 }
 
+// wa_numbers._serializza_run: una riga di wa_discover_runs. `motivo` sono i
+// valori del motore (completato, raccolta_parziale, fermato_dopo_stallo,
+// sync_ignota, sync_sotto_soglia, sidebar_coperta, wa_halted,
+// numero_non_attivo, profilo_occupato, sessione_non_loggata,
+// errore_imprevisto, in_corso): non ri-derivarli lato client.
+export type WaDiscoverRun = {
+  id: string
+  stato: 'running' | 'done' | 'failed'
+  avviato_da: 'manuale' | 'cron'
+  started_at: string | null
+  finished_at: string | null
+  salvate: number
+  aggiornate: number
+  saltate_gia_note: number
+  non_verificate: number
+  dichiarato: number | null
+  copertura: number | null
+  motivo: string
+  sync_stato: 'letta' | 'assente' | 'ignota'
+  errore: string | null
+}
+
+export type WaDiscoverStato = {
+  ultima: WaDiscoverRun | null
+  storico: WaDiscoverRun[]
+  in_corso: boolean
+}
+
 export type ScartoPromozione = { id: string; motivo: string }
 
 // wa_discover.promote(): risposta di POST /wa/discovered-chats/promote,
@@ -197,6 +231,26 @@ export type ReportPromozione = {
   gia_dnc: number
   scarti: ScartoPromozione[]
   contatti_promossi_ids: string[]
+}
+
+// wa_contacts.disponibili(): i contatti gia' in rubrica ancora arruolabili.
+// `ambito` non e' un dettaglio: WaContact non ha un wa_number_id -- i contatti
+// stanno sul tenant, e il legame col numero esiste solo per chi e' arrivato
+// dall'auto-discover (via wa_discovered_chats). Chi e' entrato da CSV non e'
+// legato ad alcun numero, e con ambito='numero' non compare.
+export type AmbitoContatti = 'numero' | 'tutti'
+
+export type WaContattoDisponibile = {
+  id: string
+  numero: string
+  nome: string | null
+  chat_title: string | null
+}
+
+export type ContattiDisponibili = {
+  contatti: WaContattoDisponibile[]
+  totale_disponibili: number
+  esclusi: { gia_in_campagna: number; opt_out_o_dnc: number }
 }
 
 // wa_contacts.enroll(): risposta di POST /wa/contacts/enroll.
@@ -251,6 +305,11 @@ export const waApi = {
       req<{ status: string; prossimo_passo: string }>(`/wa/numbers/${id}/riattiva`, {
         method: 'POST', body: JSON.stringify({ motivo }),
       }),
+    // Apre un browser sulla macchina del backend e blocca gli invii su TUTTI
+    // i numeri finche' non finisce: la conferma in UI deve dirlo.
+    discover: (id: string) =>
+      req<{ run_id: string; queued: boolean }>(`/wa/numbers/${id}/discover`, { method: 'POST' }),
+    discoverStato: (id: string) => req<WaDiscoverStato>(`/wa/numbers/${id}/discover`),
   },
 
   campagne: {
@@ -312,6 +371,15 @@ export const waApi = {
     },
     rimuovi: (campaignContactId: string) =>
       req<{ rimosso: boolean }>(`/wa/contacts/${campaignContactId}`, { method: 'DELETE' }),
+    // wa_contacts.disponibili(): chi si puo' ancora arruolare in questa
+    // campagna, senza passare da un file.
+    disponibili: (campaignId: string, ambito: AmbitoContatti,
+                  params?: { limit?: number; offset?: number }) => {
+      const q = new URLSearchParams({ campaign_id: campaignId, ambito })
+      if (params?.limit) q.set('limit', String(params.limit))
+      if (params?.offset) q.set('offset', String(params.offset))
+      return req<ContattiDisponibili>(`/wa/contacts/disponibili?${q}`)
+    },
     // wa_contacts.enroll(): arruola WaContact gia' esistenti (usciti da
     // waApi.scoperti.promote) in una campagna in bozza.
     enroll: (campaignId: string, contactIds: string[]) =>

@@ -1,7 +1,8 @@
 import pytest
 
+from app.services.wa_discover import sincronizzazione
 from app.services.wa_discover.sincronizzazione import (
-    percentuale_da_testi, puo_scansionare,
+    lista_utilizzabile, percentuale_da_testi, puo_scansionare,
 )
 
 
@@ -174,3 +175,69 @@ async def test_pannello_che_non_si_chiude_proprio_non_blocca_la_lettura():
         escape_necessari=99,
     )
     assert await leggi_percentuale(pagina) == 42
+
+
+# ---------------------------------------------------------------------------
+# lista_utilizzabile / _almeno_una_cliccabile
+#
+# Il caso trovato dal vivo il 15/08 (due volte di fila, riprendendo uno scan a
+# meta' lista): quando la sidebar e' scorsa, la prima riga renderizzata puo'
+# stare dietro l'intestazione (top positivo, passa i filtri, ma il centro
+# cade sulla barra di ricerca). La versione precedente usciva alla PRIMA
+# candidata (`return` dentro il ciclo JS): concludeva "pannello aperto sopra
+# la lista" con la lista perfettamente utilizzabile, solo scorsa -- zero chat
+# raccolte su ogni scan che non riparte dall'inizio. A scroll zero non
+# succedeva mai (la prima riga e' gia' sotto l'intestazione), motivo per cui
+# non era mai emerso prima.
+# ---------------------------------------------------------------------------
+
+def test_almeno_una_cliccabile_vero_se_la_seconda_lo_e():
+    # La prima riga (dietro l'intestazione) non e' cliccabile, la seconda si:
+    # la guardia deve dire True, non fermarsi alla prima candidata.
+    assert sincronizzazione._almeno_una_cliccabile([False, True]) is True
+
+
+def test_almeno_una_cliccabile_falso_se_tutte_coperte():
+    assert sincronizzazione._almeno_una_cliccabile([False, False]) is False
+
+
+def test_almeno_una_cliccabile_falso_senza_candidati():
+    # Nessuna riga con area visibile, o #pane-side assente: niente da
+    # giudicare, non si dichiara utilizzabile cio' che non si e' potuto
+    # guardare.
+    assert sincronizzazione._almeno_una_cliccabile([]) is False
+    assert sincronizzazione._almeno_una_cliccabile(None) is False
+
+
+class _PaginaListaCandidati:
+    """Fake minimale: page.evaluate ritorna direttamente i booleani per-riga
+    che la JS reale (_JS_RIGHE_CANDIDATE) calcolerebbe con
+    getBoundingClientRect/elementFromPoint -- quella parte non e' testabile
+    in Python, la decisione su cosa farne si'."""
+
+    def __init__(self, candidati):
+        self._candidati = candidati
+
+    async def evaluate(self, _script):
+        return self._candidati
+
+
+@pytest.mark.asyncio
+async def test_lista_utilizzabile_vero_se_una_riga_e_cliccabile_anche_non_la_prima():
+    pagina = _PaginaListaCandidati([False, True])
+    assert await lista_utilizzabile(pagina) is True
+
+
+@pytest.mark.asyncio
+async def test_lista_utilizzabile_falso_se_nessuna_riga_e_cliccabile():
+    pagina = _PaginaListaCandidati([False, False])
+    assert await lista_utilizzabile(pagina) is False
+
+
+@pytest.mark.asyncio
+async def test_lista_utilizzabile_falso_se_evaluate_solleva():
+    class _PaginaRotta:
+        async def evaluate(self, _script):
+            raise RuntimeError("pagina chiusa")
+
+    assert await lista_utilizzabile(_PaginaRotta()) is False

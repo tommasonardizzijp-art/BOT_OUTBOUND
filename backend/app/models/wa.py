@@ -7,7 +7,7 @@ vedi nota sugli enum nella migrazione 025 per il motivo).
 """
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -301,6 +302,18 @@ class WaCampaignContact(Base):
 class WaMessage(Base):
     """Log invii, analogo di Message (SDD 5.2 wa_messages)."""
     __tablename__ = "wa_messages"
+    __table_args__ = (
+        # Indice unico PARZIALE, non una UniqueConstraint piena sulla tripla
+        # (AVVIO 12/08 §5, migration 034): wa_sender.py permette una riga
+        # nuova quando la precedente per lo stesso step e' 'failed' (retry).
+        # Solo 'sending'/'sent' sono lo stato che il codice applicativo gia'
+        # tratta come "invio gia' registrato, non rimandare" -- l'indice
+        # rispecchia quell'invariante, non lo stringe.
+        Index("uq_wa_messages_campaign_contact_step_attivo",
+             "campaign_id", "contact_id", "step_index", unique=True,
+             postgresql_where=text("status IN ('sending', 'sent')"),
+             sqlite_where=text("status IN ('sending', 'sent')")),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True,
                                     default=lambda: str(uuid.uuid4()))
@@ -429,3 +442,59 @@ class WaDiscoveredChat(Base):
         DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+
+class WaDiscoverRun(Base):
+    """Una scansione auto-discover: quando, chi l'ha chiesta, cosa ha raccolto.
+
+    Esiste per rispondere a "perche' stavolta ne ha trovati 12" senza aprire i
+    log. Col discover periodico (cantiere 2) diventa l'unica traccia: li'
+    nessuno guarda lo schermo mentre gira.
+
+    L'indice unico PARZIALE su (number_id) WHERE stato='running' e' la guardia
+    "una scansione alla volta per numero" scritta nel DB e non solo nel codice:
+    due click ravvicinati sul bottone non possono aprire due run.
+    """
+    __tablename__ = "wa_discover_runs"
+    __table_args__ = (
+        Index("ix_wa_discover_runs_number_started", "number_id", "started_at"),
+        Index("uq_wa_discover_runs_una_running_per_numero", "number_id",
+              unique=True,
+              sqlite_where=text("stato = 'running'"),
+              postgresql_where=text("stato = 'running'")),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True,
+                                    default=lambda: str(uuid.uuid4()))
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"),
+                                           nullable=False)
+    number_id: Mapped[str] = mapped_column(String(36), ForeignKey("wa_numbers.id"),
+                                           nullable=False)
+    # AWARE, non datetime.utcnow. La colonna e' timestamptz: un naive scritto
+    # qui viene interpretato come ora LOCALE e finisce a DB spostato di tutto
+    # l'offset del fuso (misurato il 16/08 su questa macchina: 2 ore indietro
+    # in ora legale). Conta perche' wa_discover_run_orfana_min (420 min) deve
+    # restare SOPRA wa_discover_job_timeout_s (6 h) -- config.py lo valida
+    # all'avvio, margine 60 minuti: uno scarto di 2 ore se lo mangia tutto e
+    # una scansione lunga ma viva verrebbe chiusa come orfana a ~5 ore.
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    stato: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
+    avviato_da: Mapped[str] = mapped_column(String(20), default="manuale", nullable=False)
+
+    salvate: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    aggiornate: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    saltate_gia_note: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    non_verificate: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    dichiarato: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Percentuale 0-100 della raccolta sul dichiarato. Salvata invece che
+    # ricalcolata: il conto cambia (l'incrementale ha aggiunto i salti) e una
+    # run vecchia deve restare leggibile con la formula del suo tempo.
+    copertura: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    motivo: Mapped[str] = mapped_column(String(30), default="in_corso", nullable=False)
+    sync_letta: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sync_stato: Mapped[str] = mapped_column(String(10), default="ignota", nullable=False)
+    errore: Mapped[str | None] = mapped_column(Text, nullable=True)

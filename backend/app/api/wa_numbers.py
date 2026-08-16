@@ -15,14 +15,16 @@ from datetime import datetime
 from fastapi import APIRouter, Body, Depends, HTTPException
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.database import get_db
 from app.models.wa import WaNumber, WaNumberStatus
-from app.services import wa_profile_lock, wa_session
+from app.services import wa_discover_gate, wa_discover_runs, wa_profile_lock, wa_session
 from app.utils.crypto import decrypt, encrypt
 from app.utils.phone_pseudonym import (PhoneNormalizationError, hmac_phone,
                                        mask_phone, normalize_e164)
+from app.workers.wa_discover_worker import enqueue_wa_discover
 
 router = APIRouter(prefix="/wa/numbers", tags=["wa-numbers"])
 
@@ -311,3 +313,101 @@ async def riattiva(number_id: str, motivo: str = Body(..., embed=True),
     logger.warning(f"[WA] numero {number_id[:8]} riattivato -> pending_qr: {motivo.strip()}")
     return {"status": numero.status.value,
             "prossimo_passo": "avvia il login QR, poi verifica la sessione"}
+
+
+def _serializza_run(run) -> dict:
+    return {
+        "id": run.id,
+        "stato": run.stato,
+        "avviato_da": run.avviato_da,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "salvate": run.salvate,
+        "aggiornate": run.aggiornate,
+        "saltate_gia_note": run.saltate_gia_note,
+        "non_verificate": run.non_verificate,
+        "dichiarato": run.dichiarato,
+        "copertura": run.copertura,
+        "motivo": run.motivo,
+        "sync_stato": run.sync_stato,
+        "errore": run.errore,
+    }
+
+
+@router.post("/{number_id}/discover")
+async def avvia_discover(number_id: str, db=Depends(get_db)) -> dict:
+    """Lancia una scansione auto-discover sul numero.
+
+    Rifiuta invece di accodare: nessuno stato differito, nessun browser che si
+    apre da solo mezz'ora dopo quando nessuno guarda. Il codice del rifiuto va
+    in `detail` insieme alla frase da mostrare -- "Errore 409" non dice a
+    nessuno cosa fare dopo.
+    """
+    numero = await _numero_o_404(db, number_id)
+
+    rifiuto = await wa_discover_gate.puo_lanciare(db, numero)
+    if rifiuto is not None:
+        raise HTTPException(409, {"codice": rifiuto,
+                                  "messaggio": wa_discover_gate.MESSAGGI[rifiuto]})
+
+    try:
+        run = await wa_discover_runs.apri_run(db, tenant_id=numero.tenant_id,
+                                              number_id=number_id)
+        await db.commit()
+    except IntegrityError:
+        # Due POST quasi simultanei sullo stesso numero: il gate ha visto
+        # 'nessuna run attiva' per entrambi (finestra fra la lettura del
+        # gate e l'INSERT), e l'indice unico parziale del Task 1 fa vincere
+        # UNA sola apri_run -- corretto, nessuna riga doppia. Ma senza
+        # questo except la seconda solleva IntegrityError DENTRO
+        # l'endpoint e risulterebbe un 500 generico invece del 409
+        # scan_gia_in_corso che il gate stesso avrebbe dato con un
+        # millisecondo di ritardo. Il rollback e' necessario: senza,
+        # la sessione resta sporca e un PendingRollbackError risalirebbe
+        # al posto nostro alla prossima query.
+        await db.rollback()
+        raise HTTPException(409, {"codice": "scan_gia_in_corso",
+                                  "messaggio": wa_discover_gate.MESSAGGI["scan_gia_in_corso"]})
+
+    try:
+        accodato = await enqueue_wa_discover(number_id, run.id)
+        errore_accodamento = "accodamento ARQ rifiutato"
+    except Exception as exc:  # noqa: BLE001 -- vedi sotto
+        # enqueue_job di ARQ torna None (quindi enqueue_wa_discover torna
+        # False) SOLO se il _job_id collide -- il nostro ha un UUID fresco
+        # a ogni chiamata, non puo' mai succedere: quel ramo e' quasi morto.
+        # Lo scenario vero (Redis giu') fa SOLLEVARE arq.create_pool, non
+        # tornare un sentinella: senza questo except prendeva la strada non
+        # gestita (500, run appesa 'running' per sempre).
+        logger.error(f"[WaDiscover] {number_id}: enqueue_wa_discover ha "
+                     f"sollevato invece di tornare False ({type(exc).__name__}: {exc})")
+        accodato = False
+        errore_accodamento = f"{type(exc).__name__}: {exc}"
+
+    if not accodato:
+        # ARQ ha scartato l'accodamento (torna False) o ha sollevato
+        # (gestito sopra): in entrambi i casi la run non verra' mai chiusa
+        # da nessuno, e l'indice unico parziale renderebbe il numero non
+        # piu' scansionabile. Si chiude subito.
+        await wa_discover_runs.chiudi_run(db, run.id, {}, errore=errore_accodamento)
+        await db.commit()
+        raise HTTPException(409, {
+            "codice": "accodamento_fallito",
+            "messaggio": ("La coda dei job ha rifiutato la scansione. "
+                          "Verifica che il worker ARQ sia in esecuzione."),
+        })
+
+    return {"run_id": run.id, "queued": True}
+
+
+@router.get("/{number_id}/discover")
+async def stato_discover(number_id: str, db=Depends(get_db)) -> dict:
+    await _numero_o_404(db, number_id)
+    ultima = await wa_discover_runs.ultima_run(db, number_id)
+    righe = await wa_discover_runs.storico(
+        db, number_id, limit=settings.wa_discover_storico_limit)
+    return {
+        "ultima": _serializza_run(ultima) if ultima else None,
+        "storico": [_serializza_run(r) for r in righe],
+        "in_corso": ultima is not None and ultima.stato == "running",
+    }

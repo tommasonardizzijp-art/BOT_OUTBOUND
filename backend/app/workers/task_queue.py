@@ -1,5 +1,6 @@
 """ARQ worker configuration."""
 from arq.worker import func
+from app.config import settings
 from app.services.work_enqueue import ARQ_MAIN_QUEUE, arq_redis_settings
 from app.workers.scrape_worker import scrape_followers_task
 from app.workers.list_worker import list_followers_task
@@ -8,6 +9,7 @@ from app.workers.message_worker import run_campaign_task
 from app.workers.import_worker import resolve_imports_task
 from app.workers.lead_qualification_worker import qualify_leads_task
 from app.workers.wa_worker import recover_wa_sending_on_startup, wa_send_task
+from app.workers.wa_discover_worker import wa_discover_task
 
 
 async def pre_generate_messages_task(ctx: dict, campaign_id: str) -> None:
@@ -430,6 +432,14 @@ class WorkerSettings:
         # Job discrezionale a singolo colpo (C.1): nessun Retry(defer) interno,
         # max_tries di default basta.
         run_organic_session_task,
+        # Scansione auto-discover: un colpo solo, nessun Retry(defer) interno
+        # (a differenza di wa_send_task, che rischedula fra mini-sessioni),
+        # quindi il max_tries di default basta. Timeout PROPRIO, non i 3600s
+        # globali: un primo scan su una lista grande sta sotto le 6 ore
+        # (vedi config.py), e job_timeout globale lo ucciderebbe a 1 ora
+        # lasciando la run 'running' per sempre (indice unico parziale,
+        # numero non piu' scansionabile -- trovato in review, Task 11).
+        func(wa_discover_task, timeout=settings.wa_discover_job_timeout_s),
     ]
     cron_jobs = []
     queue_name = ARQ_MAIN_QUEUE
