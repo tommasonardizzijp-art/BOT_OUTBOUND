@@ -54,7 +54,11 @@ const TEMPLATE_SEGNAPOSTO_INIZIALE = 'Messaggio da scrivere: completalo nel pass
 
 // Stesso testo di default usato da backend/tests/factories_wa.py per una
 // campagna marketing: coerente con quello che un test/seed si aspetta gia'.
-const CTA_DEFAULT_MARKETING = "Scrivi STOP per non ricevere piu' messaggi."
+// In CORSIVO per default: gli underscore sono il markup di WhatsApp, e senza
+// il disclaimer finale arriva con lo stesso peso visivo del messaggio. Il
+// 16/08 la differenza fra due campagne era esattamente questa, e non c'era
+// modo di capirlo dalla UI. Resta un default, si puo' riscrivere.
+const CTA_DEFAULT_MARKETING = "_Scrivi STOP per non ricevere piu' messaggi._"
 
 const ESEMPIO_CSV =
   'numero,nome,ultimo_ordine\n+393331112223,Marco,10/01/2026\n+393334445556,Anna,\n'

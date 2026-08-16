@@ -29,6 +29,29 @@ router = APIRouter(prefix="/wa/campaigns", tags=["wa-campaigns"])
 CAMPI_MODIFICABILI = {"name", "daily_limit", "optout_cta", "active_hours_start",
                       "active_hours_end", "optout_enabled"}
 
+# Gli stati in cui una campagna si puo' ancora toccare. 'paused' e' incluso, e
+# non e' un allargamento disinvolto: e' la strada che il messaggio d'errore
+# prometteva gia' ("metti in pausa una campagna avviata prima di modificarla")
+# mentre il controllo esigeva 'draft' -- e paused -> draft NON esiste come
+# transizione. Il risultato era che una campagna, una volta avviata, non era
+# piu' correggibile: chi seguiva l'istruzione finiva su un secondo 409.
+# Trovato dal vivo il 16/08, su una campagna da 666 contatti gia' partita con
+# una CTA di opt-out da sistemare.
+#
+# 'running' resta escluso di proposito: li' il consumo e' vivo e la
+# mini-sessione d'invio rilegge il template a ogni messaggio -- riscriverlo
+# sotto le sue mani e' esattamente il caso da non permettere.
+STATI_MODIFICABILI = {WaCampaignStatus.draft, WaCampaignStatus.paused}
+
+
+def _esigi_modificabile(campagna: WaCampaign) -> None:
+    if campagna.status in STATI_MODIFICABILI:
+        return
+    raise HTTPException(
+        409,
+        f"la campagna e' in stato {campagna.status.value}: si modifica in bozza "
+        "o in pausa. Se e' in corso, mettila in pausa, correggi, poi riprendi.")
+
 
 def _serializza(c: WaCampaign) -> dict:
     return {
@@ -152,10 +175,7 @@ async def aggiorna(campaign_id: str, campi: dict, db=Depends(get_db)) -> dict:
     risultato lascerebbe optout_enabled=True con una CTA vuota, 422 -- si
     valida sui valori FINALI, prima di scrivere niente sull'oggetto."""
     campagna = await _campagna_o_404(db, campaign_id)
-    if campagna.status != WaCampaignStatus.draft:
-        raise HTTPException(
-            409, f"la campagna e' in stato {campagna.status.value}: si modifica solo "
-                 "in bozza (metti in pausa una campagna avviata prima di modificarla)")
+    _esigi_modificabile(campagna)
 
     aggiornamenti = {k: campi[k] for k in CAMPI_MODIFICABILI & campi.keys()}
     optout_enabled = aggiornamenti.get("optout_enabled", campagna.optout_enabled)
@@ -178,10 +198,7 @@ async def aggiorna_step(campaign_id: str, dati: dict, db=Depends(get_db)) -> dic
     contatti gia' caricati (non contro un elenco dichiarato dal client): uno
     step con placeholder ignoti non si salva (Task 6)."""
     campagna = await _campagna_o_404(db, campaign_id)
-    if campagna.status != WaCampaignStatus.draft:
-        raise HTTPException(
-            409, f"la campagna e' in stato {campagna.status.value}: il testo si "
-                 "modifica solo in bozza")
+    _esigi_modificabile(campagna)
     step = await _step0_o_404(db, campaign_id)
 
     template_a = dati.get("template_a") or ""

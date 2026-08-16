@@ -147,6 +147,95 @@ async def test_patch_in_draft_applica_solo_i_campi_ammessi(db_session, client):
     assert body["status"] == "draft"       # non scavalcato dal body
 
 
+# ---------------------------------------------------------------------------
+# Modifica di una campagna gia' avviata: si passa dalla PAUSA.
+#
+# Il messaggio d'errore prometteva gia' questa strada ("metti in pausa una
+# campagna avviata prima di modificarla") ma il controllo esigeva `draft`, e
+# non esiste nessuna transizione paused -> draft: seguendo l'istruzione si
+# finiva su un secondo 409. In pratica il testo di una campagna, una volta
+# avviata, non era piu' correggibile -- trovato dal vivo il 16/08 con una
+# campagna da 666 contatti gia' partita e una CTA di opt-out da sistemare.
+#
+# 'paused' e' lo stato giusto in cui permetterlo: il consumo e' fermo, quindi
+# non c'e' una mini-sessione che sta leggendo il template mentre lo si
+# riscrive.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_patch_in_pausa_e_permesso(db_session, client):
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number,
+                                      status=WaCampaignStatus.paused)
+    await db_session.commit()
+
+    r = await client.patch(f"/api/wa/campaigns/{campaign.id}",
+                           json={"optout_cta": "_Scrivi STOP_"})
+    assert r.status_code == 200, r.text
+    assert r.json()["optout_cta"] == "_Scrivi STOP_"
+
+
+@pytest.mark.asyncio
+async def test_put_step0_in_pausa_e_permesso(db_session, client):
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number,
+                                      status=WaCampaignStatus.paused)
+    await db_session.commit()
+
+    r = await client.put(f"/api/wa/campaigns/{campaign.id}/steps/0",
+                         json={"template_a": "Testo corretto in pausa."})
+    assert r.status_code == 200, r.text
+    assert r.json()["template_a"] == "Testo corretto in pausa."
+
+
+@pytest.mark.asyncio
+async def test_su_una_campagna_in_corso_si_rifiuta_ancora(db_session, client):
+    """Il consumo e' vivo: riscrivere il template sotto le mani della
+    mini-sessione d'invio e' esattamente cio' che non deve succedere."""
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number,
+                                      status=WaCampaignStatus.running)
+    await db_session.commit()
+
+    r = await client.patch(f"/api/wa/campaigns/{campaign.id}", json={"name": "x"})
+    assert r.status_code == 409
+    r = await client.put(f"/api/wa/campaigns/{campaign.id}/steps/0",
+                         json={"template_a": "x"})
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_su_una_campagna_fermata_si_rifiuta(db_session, client):
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number,
+                                      status=WaCampaignStatus.stopped)
+    await db_session.commit()
+
+    r = await client.patch(f"/api/wa/campaigns/{campaign.id}", json={"name": "x"})
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_il_rifiuto_dice_una_strada_che_esiste(db_session, client):
+    """Il vecchio testo mandava a mettere in pausa, ma poi la pausa veniva
+    rifiutata lo stesso: un'istruzione che non porta da nessuna parte e'
+    peggio di nessuna istruzione."""
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number,
+                                      status=WaCampaignStatus.running)
+    await db_session.commit()
+
+    r = await client.patch(f"/api/wa/campaigns/{campaign.id}", json={"name": "x"})
+    dettaglio = r.json()["detail"].lower()
+    assert "pausa" in dettaglio
+    assert "bozza" in dettaglio or "in pausa" in dettaglio
+
+
 @pytest.mark.asyncio
 async def test_put_step0_con_placeholder_coperto_dal_csv_si_salva(db_session, client):
     tenant = await make_tenant(db_session)
