@@ -1,4 +1,5 @@
 """Claim atomico dei pending: pool disgiunti tra account + stale release."""
+import uuid
 from datetime import datetime, timedelta
 import pytest
 
@@ -11,7 +12,11 @@ from app.services.browser_bio import claim_next_pending
 async def _mk_campaign_with_pending(db, n):
     camp = Campaign(name="t", status=CampaignStatus.scraping, source_type="scrape")
     db.add(camp); await db.flush()
-    base = 970000000000 + int(datetime.utcnow().timestamp()) % 100000
+    # uuid4(), non l'orologio: due test avviati nello stesso secondo
+    # generavano lo stesso base e collidevano sulla UNIQUE(campaign_id,
+    # ig_user_id) -- l'orologio non e' una sorgente di unicita' (stesso
+    # difetto gia' corretto altrove dalla PR #69).
+    base = 970000000000 + (uuid.uuid4().int % 100000)
     for i in range(n):
         db.add(Follower(campaign_id=camp.id, ig_user_id=base + i,
                         username=f"u{base+i}", status=FollowerStatus.pending))
