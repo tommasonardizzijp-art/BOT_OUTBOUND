@@ -1,21 +1,22 @@
 """Anomalies API — list and acknowledge events recorded by the anomaly detector."""
 import json
 from datetime import datetime, timedelta
+from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.database import get_db
 from app.models.anomaly import Anomaly
+from app.models.user import User
+from app.utils.auth_deps import require_admin
 
 router = APIRouter(prefix="/anomalies", tags=["anomalies"])
 
 
-# TODO(2.A): add Depends(require_admin) to mutating + listing routes once auth is merged.
-
-
 @router.get("")
 async def list_anomalies(
+    _: Annotated[User, Depends(require_admin)],
     since_hours: int = Query(default=24, ge=1, le=24 * 30),
     campaign_id: str | None = None,
     account_id: str | None = None,
@@ -65,7 +66,11 @@ async def list_anomalies(
 
 
 @router.post("/{anomaly_id}/ack")
-async def acknowledge_anomaly(anomaly_id: str, db: AsyncSession = Depends(get_db)):
+async def acknowledge_anomaly(
+    anomaly_id: str,
+    _: Annotated[User, Depends(require_admin)],
+    db: AsyncSession = Depends(get_db),
+):
     a = await db.scalar(select(Anomaly).where(Anomaly.id == anomaly_id))
     if not a:
         raise HTTPException(status_code=404, detail="Anomaly not found")
@@ -77,6 +82,7 @@ async def acknowledge_anomaly(anomaly_id: str, db: AsyncSession = Depends(get_db
 
 @router.get("/summary")
 async def anomalies_summary(
+    _: Annotated[User, Depends(require_admin)],
     since_hours: int = Query(default=24, ge=1, le=24 * 30),
     db: AsyncSession = Depends(get_db),
 ):

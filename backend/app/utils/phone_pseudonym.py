@@ -87,6 +87,21 @@ def hmac_phone(e164: str) -> str:
     return hmac.new(key, e164.encode("utf-8"), sha256).hexdigest()
 
 
+def hmac_e164(cifre_senza_piu: str) -> str:
+    """hmac_phone della forma canonica (CON '+'), a partire dalle cifre nude
+    che `normalize_e164` restituisce.
+
+    Un solo posto per non dimenticare di ricomporre il '+' prima di
+    pseudonimizzare: dimenticarlo qui e' esattamente il difetto che ha reso
+    invisibile l'opt-out il 12/08 (AVVIO 12/08 §1) -- wa_discover/salvataggio.py
+    chiamava `hmac_phone(riga.numero)` sulle cifre nude, il reply-watcher
+    cercava solo `hmac_phone("+" + cifre)`, e le due meta' non si
+    incontravano mai. Ogni call-site che pseudonimizza un numero di un
+    contatto (wa_ingest.py, wa_discover/salvataggio.py) passa da qui.
+    """
+    return hmac_phone("+" + cifre_senza_piu)
+
+
 def mask_phone(e164: str) -> str:
     """Prefisso e ultime 3 cifre, il resto oscurato (es. +39, poi 5 pallini, poi 077).
 

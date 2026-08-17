@@ -26,7 +26,6 @@ ricompone il '+' subito dopo, prima di ogni hmac_phone()/encrypt().
 """
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import func, select
@@ -35,8 +34,9 @@ from sqlalchemy.exc import IntegrityError
 from app.config import settings
 from app.services.wa_csv import COLONNA_NOME, COLONNA_NUMERO, parse_wa_csv
 from app.utils.crypto import encrypt
-from app.utils.phone_pseudonym import (PhoneNormalizationError, hmac_phone,
+from app.utils.phone_pseudonym import (PhoneNormalizationError, hmac_e164,
                                        normalize_e164)
+from app.utils.tempo import adesso_utc
 
 
 @dataclass
@@ -103,7 +103,7 @@ async def ingerisci_csv(db, *, tenant_id: str, campaign_id: str,
     righe, colonne_attributo = parse_wa_csv(contenuto)
     report = ReportIngest()
     visti: set[str] = set()
-    adesso = datetime.utcnow()
+    adesso = adesso_utc()
 
     for riga in righe:
         grezzo = riga.valori.get(COLONNA_NUMERO, "")
@@ -117,12 +117,13 @@ async def ingerisci_csv(db, *, tenant_id: str, campaign_id: str,
             continue
 
         # normalize_e164 ritorna le cifre SENZA '+' (contratto M1): si
-        # ricompone qui, PRIMA di hmac_phone()/encrypt(), per restare
-        # coerenti con la forma usata dalle factory condivise (vedi
-        # docstring del modulo).
+        # ricompone qui per encrypt() (che vuole la forma leggibile CON '+',
+        # vedi docstring del modulo), mentre hmac_e164 ricompone da se' per
+        # la pseudonimizzazione -- stessa funzione condivisa usata da
+        # wa_discover/salvataggio.py (AVVIO 12/08 §1, passo 3).
         e164 = "+" + numero
 
-        pseudo = hmac_phone(e164)
+        pseudo = hmac_e164(numero)
         if pseudo in visti:
             report.duplicati_nel_file += 1
             continue

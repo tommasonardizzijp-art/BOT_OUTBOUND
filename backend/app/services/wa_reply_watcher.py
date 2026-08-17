@@ -4,10 +4,9 @@ brucerebbe le notifiche del cliente sul telefono (vincolo di coesistenza,
 SDD §9). Matching contatto, dedup eventi, dispatch opt-out/replied.
 """
 import unicodedata
-from datetime import datetime
 
 from loguru import logger
-from sqlalchemy import exists, func, select
+from sqlalchemy import func, select
 
 from app.browser.whatsapp_page import ChatRow, WhatsAppWebPage
 from app.config import settings
@@ -17,7 +16,8 @@ from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
 from app.services import bot_state_service, notifier, wa_optout, wa_profile_lock
 from app.services.wa_session import WHATSAPP_WEB_URL, _open_wa_browser
 from app.utils import events
-from app.utils.phone_pseudonym import PhoneNormalizationError, hmac_phone, normalize_e164
+from app.utils.phone_pseudonym import PhoneNormalizationError, hmac_e164, normalize_e164
+from app.utils.tempo import adesso_utc
 
 
 async def match_contact(db, tenant_id: str, row: ChatRow) -> tuple[WaContact | None, WaMatchedBy]:
@@ -28,13 +28,18 @@ async def match_contact(db, tenant_id: str, row: ChatRow) -> tuple[WaContact | N
     2) title parsabile come numero -> hmac -> wa_contacts.phone_hmac.
     3) nessun match -> (None, WaMatchedBy.none), diagnostica.
 
-    Il contratto di wa_ingest.py (M2) dice che hmac_phone riceve SEMPRE il
-    numero CON il '+' ricomposto, mai l'output nudo di normalize_e164 (che le
-    cifre le ritorna senza). E' la forma canonica e resta quella giusta, ma
-    NON e' quella che c'e' a DB: wa_discover/salvataggio.py non ha mai
-    ricomposto il '+', e su produzione 246 contatti su 258 sono nella forma
-    nuda. Finche' la migrazione non li riallinea, questo ramo cerca entrambe
-    le forme -- il perche' in dettaglio e' nel corpo, dove sta il codice.
+    hmac_e164 pseudonimizza sempre la forma canonica (CON il '+'): e' il
+    contratto unico di phone_pseudonym.py da quando la scrittura si e'
+    unificata (AVVIO 12/08 §1, passo 3). Prima di quella migrazione questo
+    ramo cercava DUE forme (con e senza '+'), perche' wa_discover/
+    salvataggio.py scriveva la forma nuda mentre wa_ingest.py scriveva quella
+    canonica -- lo stesso numero pseudonimizzato in due modi diversi, mai
+    riconciliati, e' la causa dell'opt-out perso il 12/08 (matched_by='phone'
+    fermo a 0 su 262 eventi inbound). Il cerotto che accettava entrambe le
+    forme (PR #75) e' stato tolto il 13/08 dopo aver fuso i 9 duplicati e
+    riscritto i 246+250 phone_hmac storici nella forma canonica: ora
+    UniqueConstraint(tenant_id, phone_hmac) garantisce un solo WaContact per
+    numero, quindi una sola forma nella query trova sempre quello giusto.
 
     Un title che supera il check title_is_number del POM (solo cifre/spazi/+)
     ma fallisce comunque normalize_e164 (lunghezza fuori range E.164) e'
@@ -46,37 +51,11 @@ async def match_contact(db, tenant_id: str, row: ChatRow) -> tuple[WaContact | N
         except PhoneNormalizationError:
             return None, WaMatchedBy.none
 
-        # Due forme, non una, e non e' una svista da tollerare in eterno:
-        # wa_ingest.py (CSV) ricompone il '+' prima di hmac_phone, mentre
-        # wa_discover/salvataggio.py passa l'output NUDO di normalize_e164,
-        # che il '+' non ce l'ha. Cercando solo la prima forma questo ramo non
-        # ha mai agganciato nulla -- matched_by='phone' fermo a 0 su 262 eventi
-        # inbound -- e siccome 154 contatti su 258 hanno chat_title NULL per
-        # progetto (la promozione scarta le etichette mascherate), per loro era
-        # l'unica strada: invisibili al reply-watcher, quindi nessun opt-out.
-        #
-        # Qui si accettano entrambe di proposito. La forma canonica e' quella
-        # CON il '+' (e' gia' quella di wa_numbers e wa_ingest), ma unificare
-        # la SCRITTURA prima di aver migrato i dati storici farebbe l'opposto
-        # di quel che sembra: la Fase A non ritroverebbe piu' le righe gia' a
-        # DB e ne inserirebbe di nuove, moltiplicando i duplicati. Prima la
-        # migrazione, poi si stringe questa `in_` a un solo valore.
-        arruolato = exists().where(WaCampaignContact.contact_id == WaContact.id)
         contatto = await db.scalar(
-            select(WaContact)
-            .where(
+            select(WaContact).where(
                 WaContact.tenant_id == tenant_id,
-                WaContact.phone_hmac.in_([hmac_phone("+" + cifre), hmac_phone(cifre)]),
+                WaContact.phone_hmac == hmac_e164(cifre),
             )
-            # phone_hmac e' UNIQUE, ma le due forme non sono uguali per il DB:
-            # 9 numeri hanno gia' due WaContact distinti. Senza un ordine, uno
-            # scalar() ne prende uno a caso, e pescare il gemello non arruolato
-            # farebbe registrare l'opt-out sul contatto che non riceve nulla --
-            # mentre la riga `queued` della campagna resta viva. Vince chi ha
-            # una riga in wa_campaign_contacts: e' quello a cui stiamo
-            # scrivendo. L'id come secondo criterio perche' l'esito non dipenda
-            # dal piano di esecuzione.
-            .order_by(arruolato.desc(), WaContact.id)
         )
         if contatto is not None:
             return contatto, WaMatchedBy.phone
@@ -267,7 +246,7 @@ async def process_chat_row(db, *, tenant_id: str, wa_number_id: str, row: ChatRo
         cc_attiva.status = WaContactStatus.replied
         cc_attiva.replied_at_step = cc_attiva.current_step
         cc_attiva.next_action_at = None
-        contatto.last_replied_at = datetime.utcnow()
+        contatto.last_replied_at = adesso_utc()
         await _incrementa_contatore_campagna(db, cc_attiva.campaign_id, "replied")
         db.add(WaInboundEvent(tenant_id=tenant_id, wa_number_id=wa_number_id,
                               contact_id=contatto.id, preview_text=row.preview,
@@ -315,7 +294,7 @@ async def numeri_da_scansionare(db) -> list[str]:
         .distinct()
     )
 
-    finestra = datetime.utcnow() - timedelta(days=int(settings.wa_reply_scan_window_days))
+    finestra = adesso_utc() - timedelta(days=int(settings.wa_reply_scan_window_days))
     con_invio_recente = await db.execute(
         select(WaMessage.wa_number_id)
         .join(WaNumber, WaNumber.id == WaMessage.wa_number_id)

@@ -205,6 +205,20 @@ gruppi/liste aziendali Primero riconoscibili dal nome (`PRIMERO FARM`, `Primero 
 non un nome di persona). **Comportamento corretto del pannello, non un bug**: un gruppo non ha
 un numero singolo da mostrare.
 
+### Aggiornamento 15/08/2026 — il 5% di mancata apertura è vero solo a macchina scarica
+
+Misurato dal vivo su `PRIMERO MAGAZZINO` (produzione, non PoC): **10 contatti su ~94** che
+hanno richiesto l'apertura del pannello sono rimasti senza numero — **11%**, più del doppio
+del 5% dichiarato sopra. La causa non è il selettore: una sonda dedicata su una chat fallita
+due volte su due (`SIMONE`) ha confermato che `[data-testid='drawer-right']` **funziona**
+(365 caratteri letti a macchina ferma, con la stessa strada del motore). È il carico della
+macchina di produzione — assente sul PC dedicato del PoC-4 — a far scadere più spesso i 7
+secondi cumulativi che `_ATTESE_PANNELLO_S` (`backend/app/services/wa_discover/pannello.py`)
+dava all'apertura. Portata a `(1.0, 1.5, 2.0, 2.5, 4.0, 5.0, 5.0)` (Task 7 del piano
+`docs/superpowers/plans/2026-08-14-wa-discover-lancio-ui.md`). Le righe salvate senza numero
+si recuperano da sole al giro successivo: il salto incrementale (Task 6) le ignora solo se
+hanno gia' un numero.
+
 ### Trappola grave: l'indice assoluto di riga non regge un'apertura in sequenza
 
 Iterando `[role='row']` per indice preso da uno scan iniziale, dopo alcune chat aperte gli

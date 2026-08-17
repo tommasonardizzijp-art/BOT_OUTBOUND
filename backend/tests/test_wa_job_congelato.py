@@ -13,11 +13,12 @@ riavvio fatto mentre il worker lavorava.
 Due difese, provate qui: la pulizia all'avvio del worker principale (che
 rimuove la causa) e l'allarme del supervisore (che rende visibile il
 congelamento invece di contare "0 riaccodate" e tacere)."""
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import fakeredis.aioredis
 import pytest
 
+from app.utils.tempo import adesso_utc
 from tests.factories_wa import (make_campaign, make_campaign_contact,
                                 make_contact, make_number, make_tenant)
 
@@ -122,7 +123,7 @@ async def _scenario_eleggibile(db_session):
     campagna, _step = await make_campaign(db_session, tenant, numero,
                                           status=WaCampaignStatus.running)
     cc = await make_campaign_contact(db_session, campagna, contatto)
-    cc.next_action_at = datetime.utcnow() - timedelta(minutes=1)
+    cc.next_action_at = adesso_utc() - timedelta(minutes=1)
     await db_session.commit()
     return {"numero": numero, "campagna": campagna, "cc": cc}
 

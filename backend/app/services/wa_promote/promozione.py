@@ -6,7 +6,10 @@ come ripiego sulla concorrenza; gap-fill che integra e non cancella) -- la
 differenza di fondo e' che qui `phone_hmac`/`encrypted_phone` si RIUSANO cosi'
 come sono (vincolo globale del piano Fase B): la riga scoperta li porta gia'
 nello stesso formato di `WaContact` (`salvataggio.py` li scrive con
-`hmac_phone(riga.numero)`/`encrypt(riga.numero)` sullo stesso E.164 con '+'),
+`hmac_e164(riga.numero)`/`encrypt(riga.numero)`, forma canonica CON '+' --
+vero solo dopo la migrazione dell'AVVIO 12/08 §1: prima la Fase A scriveva
+la forma nuda, e questa docstring lo affermava senza che nessun test lo
+verificasse),
 quindi decifrare e ri-cifrare sarebbe lavoro sprecato e un'occasione in piu'
 per un numero in chiaro in un log.
 
@@ -21,7 +24,6 @@ protegge la singola INSERT concorrente fra due chiamate `promuovi()` diverse
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import select
@@ -31,6 +33,7 @@ from app.models.wa import WaContact, WaDiscoveredChat
 from app.services.wa_discover.classifica import e_etichetta_mascherata
 from app.services.wa_promote.regole import promuovibile
 from app.utils.ids import uuid_valido
+from app.utils.tempo import adesso_utc
 
 
 def _gap_fill(contatto: WaContact, riga: WaDiscoveredChat) -> None:
@@ -86,7 +89,7 @@ async def promuovi(db, *, tenant_id: str, ids: list[str]) -> ReportPromozione:
     Task 3 lo respingerebbe comunque).
     """
     report = ReportPromozione()
-    adesso = datetime.utcnow()
+    adesso = adesso_utc()
 
     for id_ in ids:
         if not uuid_valido(id_):

@@ -43,14 +43,17 @@ import asyncio
 from dataclasses import dataclass
 
 from loguru import logger
+from sqlalchemy import select
 
 from app.services import bot_state_service, wa_profile_lock
 from app.services.inbox_browser.ritmo import campiona_pausa, zona_pausa
 from app.services.wa_discover import classifica, pannello, salvataggio, sidebar
 from app.services.wa_discover.sincronizzazione import (
-    SOGLIA_DEFAULT, leggi_percentuale, lista_utilizzabile, puo_scansionare,
+    SOGLIA_DEFAULT, leggi_percentuale, leggi_sincronizzazione,
+    lista_utilizzabile, puo_scansionare, puo_scansionare_lettura,
 )
 from app.utils.events import emit as emit_event
+from app.utils.phone_pseudonym import hmac_e164
 
 # Quanti passi di scorrimento SENZA righe nuove (mai viste in questo giro)
 # prima di arrendersi. La geometria qui e' piu' semplice che nel motore
@@ -85,9 +88,14 @@ class DecisioneRiga:
     """
     riga: classifica.RigaScoperta | None
     ha_aperto: bool
+    # Riga gia' presente in wa_discovered_chats con un numero: non si riapre
+    # il pannello. Distinta da riga=None, che significa "provato e fallito".
+    saltata: bool = False
 
 
-async def _decidi_riga(page, grezza: dict) -> DecisioneRiga:
+async def _decidi_riga(page, grezza: dict, *,
+                       titoli_noti: set[str] | None = None,
+                       hmac_noti: set[str] | None = None) -> DecisioneRiga:
     """Da una riga grezza di sidebar.scan_sidebar (titolo, titolo_e_numero) a
     una RigaScoperta pronta per salva_scoperta, o a `None` se non si puo'
     scrivere nulla.
@@ -102,7 +110,40 @@ async def _decidi_riga(page, grezza: dict) -> DecisioneRiga:
     (vedi classifica.etichetta_visibile e il test
     test_il_nome_vero_sostituisce_l_etichetta_mascherata).
     """
+    titoli_noti = titoli_noti or set()
+    hmac_noti = hmac_noti or set()
     titolo = grezza.get("titolo")
+
+    # Riscansione incrementale: una chat gia' in staging con il suo numero non
+    # si ripaga. Il costo di uno scan non e' nello scorrere, e' nel CLICCARE
+    # ogni riga per aprire il pannello -- 12 secondi l'una, misurati il 14/08
+    # su PRIMERO MAGAZZINO (78 chat in 16 minuti). Su 900 chat sono ore, e il
+    # discover periodico diventerebbe impraticabile.
+    #
+    # LA CHIAVE E' L'HMAC, NON IL TITOLO. Provato sul campo il 14/08 e
+    # fallito: su 241 righe in staging, 194 hanno il titolo MASCHERATO
+    # (`+39•••••761`, vincolo P12) perche' il titolo E' il numero, mentre dal
+    # DOM quel titolo arriva in chiaro. Confrontando i titoli il salto scatta
+    # su 47 righe su 241 invece che su 232 -- cioe' quasi mai, proprio dove
+    # servirebbe di piu'. Il titolo resta il ripiego per le chat con un nome
+    # vero, che un numero nel titolo non ce l'hanno.
+    #
+    # Conseguenza dichiarata: un contatto che cambia numero mantenendo lo
+    # stesso nome non viene riverificato. Per lo scopo -- trovare chi ci ha
+    # scritto di nuovo -- e' accettabile.
+    if titolo and titolo in titoli_noti:
+        return DecisioneRiga(riga=None, ha_aperto=False, saltata=True)
+    if grezza.get("titolo_e_numero"):
+        numero_dal_titolo = classifica.numero_dal_titolo(titolo)
+        # hmac_e164, non hmac_phone: `numero_dal_titolo` e' l'uscita di
+        # normalize_e164, cioe' cifre NUDE, mentre `hmac_noti` arriva da
+        # WaDiscoveredChat.phone_hmac, che e' nella forma canonica (col '+').
+        # Con hmac_phone sulle cifre nude il confronto non combacia mai e il
+        # salto muore in silenzio proprio sulle righe che dovrebbe coprire
+        # (194 su 241 misurate il 14/08): nessun errore, solo 5,3s e
+        # un'apertura di chat in piu' per ognuna.
+        if numero_dal_titolo is not None and hmac_e164(numero_dal_titolo) in hmac_noti:
+            return DecisioneRiga(riga=None, ha_aperto=False, saltata=True)
 
     if grezza.get("titolo_e_numero"):
         numero = classifica.numero_dal_titolo(titolo)
@@ -151,18 +192,27 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
     durata prevista del giro). None nei test che non montano un lock vero.
     """
     esito = {
-        "salvate": 0, "aggiornate": 0, "non_verificate": 0,
-        "dichiarato": None, "motivo": "completato",
+        "salvate": 0, "aggiornate": 0, "saltate_gia_note": 0,
+        "non_verificate": 0, "dichiarato": None, "motivo": "completato",
+        "sync_stato": "ignota", "sync_letta": None,
     }
 
-    # Gate di sincronizzazione (Task 3). La percentuale NON sta nel body della
-    # pagina: vive dentro Impostazioni, e va aperto per leggerla (verificato nel
-    # PoC-5 -- il censimento della sola sidebar non trovo' nessuna percentuale,
-    # comparve solo dopo il click). Leggere document.body.innerText senza aprire
-    # nulla non trova mai niente: il gate direbbe sempre "non lo so" e
-    # lascerebbe passare sempre, cioe' non sarebbe un gate.
-    percentuale = await leggi_percentuale(page)
-    ok_sync, motivo_sync = puo_scansionare(percentuale, soglia=soglia_sync)
+    # Gate di sincronizzazione, tri-stato (Task 7). La percentuale NON sta nel
+    # body della pagina: vive dentro Impostazioni, e va aperto per leggerla
+    # (verificato nel PoC-5 -- il censimento della sola sidebar non trovo'
+    # nessuna percentuale, comparve solo dopo il click). Leggere
+    # document.body.innerText senza aprire nulla non trova mai niente.
+    #
+    # Una lettura sola, nessun ritentativo: il 15/08 e' stato verificato dal
+    # vivo che _SEL_IMPOSTAZIONI non matcha affatto su questo WhatsApp Web
+    # (due sessioni distinte, "voce Impostazioni non trovata"). Con un
+    # selettore sbagliato riprovare a 5s e 15s non cambia l'esito -- costa
+    # venti secondi a ogni scansione per riottenere lo stesso "ignota".
+    lettura = await leggi_sincronizzazione(page)
+
+    esito["sync_stato"] = lettura.stato
+    esito["sync_letta"] = lettura.percentuale
+    ok_sync, motivo_sync = puo_scansionare_lettura(lettura, soglia=soglia_sync)
     if not ok_sync:
         logger.info(f"[WaDiscover] {number_id}: scan non avviato -- {motivo_sync}")
         emit_event(number_id, "wa_discover_skipped", motivo_sync, level="warn")
@@ -191,6 +241,28 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
     # termine di paragone con cui, a fine giro, ci si accorge di una
     # raccolta parziale invece di chiamarla "completata".
     esito["dichiarato"] = await sidebar.totale_dichiarato(page)
+
+    # Righe gia' in staging CON un numero: quelle senza vanno riprovate, e'
+    # proprio il caso in cui il pannello non era arrivato.
+    #
+    # Si tengono DUE insiemi perche' le due chiavi coprono popolazioni
+    # diverse: l'hmac copre le chat il cui titolo e' il numero (194 su 241
+    # misurate il 14/08, e il loro chat_title a DB e' mascherato quindi
+    # inconfrontabile), il titolo copre quelle con un nome vero (47 su 241).
+    # Un titolo mascherato non entra nell'insieme dei titoli: non
+    # combacerebbe mai con quello che arriva dal DOM.
+    from app.models.wa import WaDiscoveredChat
+    noti = await db.execute(
+        select(WaDiscoveredChat.chat_title, WaDiscoveredChat.phone_hmac).where(
+            WaDiscoveredChat.number_id == number_id,
+            WaDiscoveredChat.phone_hmac.is_not(None)))
+    coppie = noti.all()
+    hmac_noti = {h for _, h in coppie}
+    titoli_noti = {t for t, _ in coppie if t and "•" not in t}
+    if hmac_noti:
+        logger.info(f"[WaDiscover] {number_id}: {len(hmac_noti)} chat gia' note "
+                    f"col numero ({len(titoli_noti)} anche per titolo), "
+                    "non verranno riaperte")
 
     titoli_processati: set[str] = set()
     scroll_senza_nuove = 0
@@ -221,8 +293,11 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
             titoli_processati.add(titolo)
             nuove_in_questo_passo += 1
 
-            decisione = await _decidi_riga(page, grezza)
-            if decisione.riga is not None:
+            decisione = await _decidi_riga(page, grezza, titoli_noti=titoli_noti,
+                                           hmac_noti=hmac_noti)
+            if decisione.saltata:
+                esito["saltate_gia_note"] += 1
+            elif decisione.riga is not None:
                 stato_salv = await salvataggio.salva_scoperta(
                     db, tenant_id, number_id, decisione.riga)
                 if stato_salv == "creata":
@@ -243,7 +318,13 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
             # di sessione). Sempre "piena" quando si apre: a differenza di
             # Instagram non esiste qui un archivio di nomi gia' noti da un
             # giro all'altro che giustifichi una zona "rapida".
-            await asyncio.sleep(campiona_pausa(zona_pausa("piena", decisione.ha_aperto)))
+            #
+            # Le righe saltate non hanno toccato WhatsApp: nessuna pausa da
+            # pagare. E' quello che rende rapido il ritorno al punto dove il
+            # giro precedente si era fermato, invece di ricamminare la lista
+            # a 0,3 secondi per riga.
+            if not decisione.saltata:
+                await asyncio.sleep(campiona_pausa(zona_pausa("piena", decisione.ha_aperto)))
 
         if esito["motivo"] == "wa_halted":
             break
@@ -261,10 +342,11 @@ async def _esegui_scan(page, *, db, tenant_id: str, number_id: str,
                 "interrotto per non scorrere all'infinito su una sidebar piantata")
             break
 
-    raccolte = esito["salvate"] + esito["aggiornate"]
-    dettaglio = (f"{raccolte} chat raccolte ({esito['salvate']} nuove, "
-                f"{esito['aggiornate']} aggiornate), {esito['non_verificate']} "
-                "righe non verificate (si ritentano al giro dopo)")
+    raccolte = esito["salvate"] + esito["aggiornate"] + esito["saltate_gia_note"]
+    dettaglio = (f"{raccolte} chat coperte ({esito['salvate']} nuove, "
+                f"{esito['aggiornate']} aggiornate, {esito['saltate_gia_note']} "
+                f"gia' note), {esito['non_verificate']} righe non verificate "
+                "(si ritentano al giro dopo)")
 
     if esito["motivo"] == "wa_halted":
         emit_event(number_id, "wa_discover_stopped",
@@ -317,7 +399,6 @@ async def esegui_discover_run(number_id: str, *, soglia_sync: int = SOGLIA_DEFAU
         return esito
 
     async with AsyncSessionLocal() as db:
-        from sqlalchemy import select
         number = await db.scalar(select(WaNumber).where(WaNumber.id == number_id))
         if number is None or number.status != WaNumberStatus.active:
             esito["motivo"] = "numero_non_attivo"

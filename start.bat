@@ -37,6 +37,10 @@ echo.
 echo [2/5] Applico migrazioni database...
 pushd "%~dp0backend"
 call venv\Scripts\activate
+:: Questa macchina e' la produzione fissa (vedi nota sopra sul --reload):
+:: il DB remoto e' sempre quello giusto, la conferma interattiva di
+:: scripts.migrate blocca l'avvio senza sblocco visibile in finestra.
+set "MIGRATE_CONFIRM=1"
 python -m scripts.migrate
 if errorlevel 1 (
     echo [ERRORE] Migrazioni fallite. Avvio annullato.

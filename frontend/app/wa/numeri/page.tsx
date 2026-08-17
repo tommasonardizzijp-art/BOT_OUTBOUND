@@ -13,7 +13,7 @@
 // configurato in WA_WARMUP_ADVANCE_STEPS_PER_DAY partendo dal valore impostato
 // qui, quindi una frenata fatta da questo dialog dura al massimo fino al
 // giorno dopo. La leva che regge nel tempo e' il cap/giorno.
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import useSWR from 'swr'
 import { toast } from 'sonner'
 import { waApi, type WaNumber, type WaNumberStatus } from '@/lib/waApi'
@@ -110,6 +110,7 @@ export default function WaNumeriPage() {
                 <th className="px-4 py-3 text-right font-medium">Inviati oggi</th>
                 <th className="px-4 py-3 text-left font-medium">Proxy</th>
                 <th className="px-4 py-3 text-left font-medium">Ultimo check</th>
+                <th className="px-4 py-3 text-left font-medium">Ultimo scan</th>
                 <th className="px-4 py-3 text-left font-medium">Azioni</th>
               </tr>
             </thead>
@@ -161,6 +162,7 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
             : <span className="text-xs" style={{ color: 'var(--wa-muted)' }}>Si</span>}
         </td>
         <td className="px-4 py-3" style={{ color: 'var(--wa-muted)' }}>{formatCheck(numero.session_checked_at)}</td>
+        <td className="px-4 py-3"><UltimoScanCella numero={numero} /></td>
         <td className="px-4 py-3">
           <div className="flex flex-wrap gap-2">
             {/* G7: 'disconnected' aggiunto qui, non e' un nuovo bottone. Il
@@ -189,6 +191,9 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
             {numero.status !== 'retired' && numero.status !== 'suspended' && (
               <ModificaWarmupDayButton numero={numero} onChanged={onChanged} />
             )}
+            {numero.status === 'active' && (
+              <ScansionaContattiButton numero={numero} onChanged={onChanged} />
+            )}
           </div>
         </td>
       </tr>
@@ -196,7 +201,7 @@ function RigaNumero({ numero, onChanged }: { numero: WaNumber; onChanged: () => 
         // Avviso ESPLICITO in UI (non solo nel log del backend): minaccia T3
         // della SDD -- numeri diversi correlati perche' escono dallo stesso IP.
         <tr>
-          <td colSpan={9} className="px-4 pb-3 pt-0">
+          <td colSpan={10} className="px-4 pb-3 pt-0">
             <div
               className="rounded-lg border px-3 py-2 text-xs"
               style={{ borderColor: '#7a5a2a', backgroundColor: 'rgba(224, 122, 60, 0.12)', color: '#f2c9a0' }}
@@ -477,5 +482,121 @@ function ModificaWarmupDayButton({ numero, onChanged }: { numero: WaNumber; onCh
         </form>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// Etichette leggibili per i motivi del motore. Un motivo non mappato si
+// mostra grezzo: mai una cella muta.
+const MOTIVO_LABEL: Record<string, string> = {
+  in_corso: 'in corso',
+  completato: 'completo',
+  raccolta_parziale: 'raccolta parziale',
+  fermato_dopo_stallo: 'fermato dopo stallo',
+  sync_ignota: 'sincronizzazione ignota',
+  sync_sotto_soglia: 'sincronizzazione incompleta',
+  sidebar_coperta: 'lista coperta da un pannello',
+  wa_halted: 'canale fermato',
+  numero_non_attivo: 'numero non attivo',
+  profilo_occupato: 'profilo occupato',
+  sessione_non_loggata: 'sessione scaduta',
+  errore_imprevisto: 'errore',
+}
+
+const MOTIVI_BUONI = new Set(['completato'])
+
+function UltimoScanCella({ numero }: { numero: WaNumber }) {
+  const { data } = useSWR(
+    `wa-discover-${numero.id}`,
+    () => waApi.numeri.discoverStato(numero.id),
+    // FAIL-CLOSED, stesso criterio di OrganicSessionButton: si continua a
+    // pollare finche' NON si sa che e' finita. Il caso peggiore e' un
+    // bottone disabilitato piu' a lungo, non un secondo browser aperto.
+    { refreshInterval: (ultimo) => (ultimo?.in_corso ?? true) ? 10_000 : 0 },
+  )
+
+  const ultima = data?.ultima
+  if (!ultima) return <span style={{ color: 'var(--wa-muted)' }}>Mai</span>
+  if (ultima.stato === 'running') {
+    return <span style={{ color: 'var(--wa-accent)' }}>In corso...</span>
+  }
+
+  const buono = MOTIVI_BUONI.has(ultima.motivo)
+  return (
+    <div className="text-xs leading-tight">
+      <div style={{ color: 'var(--wa-muted)' }}>{formatCheck(ultima.finished_at)}</div>
+      <div style={{ color: buono ? 'var(--wa-muted)' : '#e07a3c' }}>
+        {ultima.dichiarato
+          ? `${ultima.salvate + ultima.aggiornate + ultima.saltate_gia_note}/${ultima.dichiarato}`
+          : `${ultima.salvate + ultima.aggiornate}`}
+        {ultima.copertura !== null && ` (${ultima.copertura}%)`}
+        {' · '}{MOTIVO_LABEL[ultima.motivo] ?? ultima.motivo}
+      </div>
+    </div>
+  )
+}
+
+function ScansionaContattiButton({ numero, onChanged }: { numero: WaNumber; onChanged: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [avvio, setAvvio] = useState(false)
+  const { data: stato, mutate: refreshStato } = useSWR(
+    `wa-discover-${numero.id}`,
+    () => waApi.numeri.discoverStato(numero.id),
+    { refreshInterval: (ultimo) => (ultimo?.in_corso ?? true) ? 10_000 : 0 },
+  )
+  const inCorso = stato?.in_corso ?? false
+  const eraInCorso = useRef(false)
+
+  // Un solo toast sulla transizione in-corso -> finita, come
+  // OrganicSessionButton: senza questo, ogni giro di polling ne stampa uno.
+  useEffect(() => {
+    if (eraInCorso.current && stato && !stato.in_corso && stato.ultima) {
+      const u = stato.ultima
+      const coperte = u.salvate + u.aggiornate + u.saltate_gia_note
+      if (u.stato === 'failed') {
+        toast.error(`Scansione di ${numero.label} fallita: ${u.errore ?? u.motivo}`)
+      } else if (u.motivo === 'completato') {
+        toast.success(`${numero.label}: ${coperte} chat coperte, ${u.salvate} nuove.`)
+      } else {
+        toast.info(
+          `${numero.label}: scansione chiusa come "${MOTIVO_LABEL[u.motivo] ?? u.motivo}"`
+          + (u.copertura !== null ? ` — copertura ${u.copertura}%.` : '.'))
+      }
+      onChanged()
+    }
+    eraInCorso.current = inCorso
+  }, [stato, inCorso, numero.label, onChanged])
+
+  const handleConfirm = async () => {
+    setAvvio(true)
+    try {
+      await waApi.numeri.discover(numero.id)
+      toast.info(`Scansione avviata per ${numero.label}. Puo' durare parecchi minuti.`)
+      await refreshStato()
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Errore')
+    } finally {
+      setAvvio(false)
+    }
+  }
+
+  return (
+    <>
+      <Button
+        size="sm" variant="outline" type="button" disabled={avvio || inCorso}
+        onClick={() => setOpen(true)}
+        style={{ borderColor: 'var(--wa-border)', color: 'var(--wa-muted)' }}
+      >
+        {avvio || inCorso ? 'Scansione in corso...' : 'Scansiona contatti'}
+      </Button>
+      <ConfirmDialog
+        open={open}
+        onOpenChange={setOpen}
+        title={`Scansiona i contatti di ${numero.label}`}
+        description={"Apre un browser sulla macchina che ospita il backend e legge la lista chat di questo numero. Non invia nulla. Blocca gli invii su TUTTI i numeri finche' non finisce, e su una rubrica grande puo' durare parecchi minuti."}
+        confirmLabel="Scansiona"
+        variant="warning"
+        onConfirm={handleConfirm}
+      />
+    </>
   )
 }

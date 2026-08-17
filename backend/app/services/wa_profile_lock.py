@@ -163,3 +163,23 @@ async def release_stale(*, stale_after_min: int | None = None) -> int:
     finally:
         await redis.aclose()
     return rilasciati
+
+
+async def profilo_occupato_da() -> str | None:
+    """Il number_id di UN profilo con il lucchetto preso, o None se nessuno.
+
+    Serve al gate globale del discover: i lock sono per-numero e non si
+    escludono fra loro, ma i browser condividono la RAM della macchina. Su
+    questo PC (7,5 GB, 1,2 GB per profilo) due sessioni insieme sono la
+    condizione in cui il 14/08 sender e scan hanno girato sovrapposti.
+
+    Sola lettura: non prende, non rilascia, non rinnova nulla.
+    """
+    redis = await arq.create_pool(arq_redis_settings())
+    try:
+        async for key in redis.scan_iter(match="wa:profile-lock:*"):
+            nome = key.decode() if isinstance(key, bytes) else key
+            return nome.split("wa:profile-lock:", 1)[1]
+        return None
+    finally:
+        await redis.aclose()

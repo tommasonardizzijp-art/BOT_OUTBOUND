@@ -4,11 +4,13 @@ di toccare backend/tests/conftest.py, che dopo PR-0 e' congelato."""
 import uuid
 from datetime import datetime
 
+from app.utils.tempo import adesso_utc
+
 from app.models.tenant import Tenant
 from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
                            WaCampaignType, WaContact, WaContactStatus,
-                           WaDiscoveredChat, WaNumber, WaNumberStatus,
-                           WaSendCondition, WaSequenceStep)
+                           WaDiscoveredChat, WaDiscoverRun, WaNumber,
+                           WaNumberStatus, WaSendCondition, WaSequenceStep)
 from app.utils.crypto import encrypt
 from app.utils.phone_pseudonym import hmac_phone
 
@@ -55,7 +57,7 @@ async def make_campaign(db, tenant, number, *, name="Campagna Test",
         optout_enabled=(tipo == WaCampaignType.marketing),
         optout_cta=("Scrivi STOP per non ricevere piu' messaggi."
                     if tipo == WaCampaignType.marketing else None),
-        started_at=datetime.utcnow() if status == WaCampaignStatus.running else None,
+        started_at=adesso_utc() if status == WaCampaignStatus.running else None,
     )
     db.add(camp)
     await db.flush()
@@ -104,6 +106,24 @@ async def make_discovered_chat(db, tenant, number, *,
     return riga
 
 
+async def make_discover_run(db, tenant, number, *, stato: str = "running",
+                            avviato_da: str = "manuale", salvate: int = 0,
+                            aggiornate: int = 0, saltate_gia_note: int = 0,
+                            non_verificate: int = 0, dichiarato: int | None = None,
+                            copertura: int | None = None, motivo: str = "in_corso",
+                            sync_stato: str = "ignota") -> WaDiscoverRun:
+    run = WaDiscoverRun(
+        id=str(uuid.uuid4()), tenant_id=tenant.id, number_id=number.id,
+        stato=stato, avviato_da=avviato_da, salvate=salvate, aggiornate=aggiornate,
+        saltate_gia_note=saltate_gia_note, non_verificate=non_verificate,
+        dichiarato=dichiarato, copertura=copertura, motivo=motivo,
+        sync_stato=sync_stato,
+    )
+    db.add(run)
+    await db.flush()
+    return run
+
+
 async def make_campaign_contact(db, campaign, contact, *,
                                 status=WaContactStatus.queued,
                                 current_step: int = -1) -> WaCampaignContact:
@@ -111,7 +131,7 @@ async def make_campaign_contact(db, campaign, contact, *,
     NULL su una riga non terminale, e i campi di lock restano vuoti (I1)."""
     cc = WaCampaignContact(id=str(uuid.uuid4()), campaign_id=campaign.id,
                            contact_id=contact.id, status=status, current_step=current_step,
-                           next_action_at=datetime.utcnow(), failure_count=0)
+                           next_action_at=adesso_utc(), failure_count=0)
     db.add(cc)
     await db.flush()
     return cc

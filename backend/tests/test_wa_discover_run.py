@@ -14,7 +14,7 @@ import pytest
 
 from app.services import bot_state_service, wa_discover_run
 from app.services.wa_discover import classifica, pannello, sidebar
-from app.utils.phone_pseudonym import hmac_phone
+from app.utils.phone_pseudonym import hmac_e164
 
 from tests.test_wa_discover_modello import _scoperte_di, numero_wa  # noqa: F401
 
@@ -101,8 +101,11 @@ class _FakePage:
 
     async def evaluate(self, script, *args):
         if "elementFromPoint" in script:
-            # "La lista e' utilizzabile?": falso quando un pannello la copre.
-            return not self.drawer_aperti
+            # "La lista e' utilizzabile?": la JS reale (_JS_RIGHE_CANDIDATE,
+            # Task 12) ritorna un booleano PER RIGA candidata, non un singolo
+            # bool -- _almeno_una_cliccabile decide se ALMENO UNA lo e'. Qui
+            # una sola riga finta basta: coperta quando c'e' un drawer sopra.
+            return [not self.drawer_aperti]
         if "textContent" in script and "children.length" in script:
             # I testi della pagina, letti da leggi_percentuale DOPO il click su
             # Impostazioni: prima di quel click il pannello non c'e'.
@@ -204,7 +207,7 @@ async def test_riga_titolo_numero_salvata_senza_aprire_il_pannello(
     assert esito["salvate"] == 1
     trovate = await _scoperte_di(db_session, numero_wa.id)
     assert len(trovate) == 1
-    assert trovate[0].phone_hmac == hmac_phone("393421460077")
+    assert trovate[0].phone_hmac == hmac_e164("393421460077")
     assert trovate[0].numero_leggibile is True
     assert trovate[0].tipo_chat == classifica.TIPO_INDIVIDUALE
 
