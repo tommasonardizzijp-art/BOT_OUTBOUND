@@ -17,6 +17,13 @@ from app.workers.task_queue import (
     telegram_commands,
 )
 
+# Un'ora fra due Telegram sullo stesso numero congelato. Il supervisore gira
+# ogni 15 minuti e la chiave in-progress dura sei ore: senza freno un solo
+# incidente varrebbe fino a 24 messaggi. Cosi' ne valgono al massimo sei --
+# abbastanza per ricordare che il canale e' ancora fermo, non tanti da
+# insegnare a scorrere oltre.
+_ALERT_CONGELATO_COOLDOWN_S = 3600
+
 
 async def wa_session_healthcheck(ctx: dict) -> dict:
     """Ogni 30 minuti nelle ore attive (SDD Q56): per ogni numero non
@@ -188,7 +195,8 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     riparare riaccodando -- ed e' quello dell'incidente 14/08. Se il worker
     principale viene ucciso mentre un `wa:send:*` e' checked-out, la sua chiave
     `arq:in-progress:` resta orfana e ARQ salta per sempre quel job (fino alla
-    scadenza del TTL, fino a un'ora). Qui l'enqueue viene scartato perche' il
+    scadenza del TTL, che e' di SEI ore -- vedi wa_job_recovery, non e'
+    job_timeout+10). Qui l'enqueue viene scartato perche' il
     job ESISTE ancora: il supervisore contava "0 riaccodate", cioe' leggeva un
     congelamento come normalita'. Da ora, quando l'enqueue viene scartato, si
     guarda Redis per distinguere un job sano -- schedulato nel futuro (break
@@ -308,12 +316,43 @@ async def _segnala_se_congelato(ctx: dict, campaign_id: str, number_id: str) -> 
         redis = await arq.create_pool(arq_redis_settings())
     try:
         job_id = await wa_send_job_congelato(redis, number_id)
+        # Il cooldown si prende QUI, dentro il try: il pool viene chiuso nel
+        # finally quando e' nostro, e fuori non sarebbe piu' utilizzabile.
+        # SET nx ex su Redis invece del dizionario in memoria che usa
+        # notifier.send_scrape_warning_alert: il cron worker si riavvia, e un
+        # allarme che ricomincia da capo a ogni riavvio e' proprio il rumore
+        # che si vuole evitare.
+        # FAIL-OPEN, e non e' un dettaglio: se questo SET solleva (un blip di
+        # Redis) l'eccezione risalirebbe al try per-campagna del supervisore e
+        # il congelamento non verrebbe ne' contato ne' segnalato. Il freno al
+        # rumore non deve mai poter spegnere l'allarme che frena: nel dubbio
+        # si urla.
+        primo = True
+        if job_id:
+            try:
+                primo = bool(await redis.set(
+                    f"wa:alert:congelato:{number_id}", b"1",
+                    nx=True, ex=_ALERT_CONGELATO_COOLDOWN_S))
+            except Exception as exc:
+                logger.warning(f"[WA] cooldown allarme non verificabile "
+                               f"({type(exc).__name__}): allarmo comunque")
     finally:
         if proprio:
             await redis.aclose()
 
     if job_id is None:
         return False
+
+    if not primo:
+        # Il congelamento c'e' ancora e va contato, ma su Telegram si tace:
+        # il TTL della chiave in-progress e' di SEI ore e il supervisore gira
+        # ogni 15 minuti, quindi senza freno un singolo incidente varrebbe
+        # fino a 24 messaggi. Un allarme che martella e' un allarme che si
+        # impara a ignorare, ed e' lo stesso motivo per cui questa funzione
+        # ha il terzo controllo sul lucchetto.
+        logger.error(f"[WA] supervisore: campagna {campaign_id} ancora "
+                     f"CONGELATA sul job {job_id} (Telegram in cooldown)")
+        return True
 
     logger.error(f"[WA] supervisore: campagna {campaign_id} eleggibile ma il job "
                  f"{job_id} e' CONGELATO (in coda con lo score scaduto e la "
@@ -323,7 +362,14 @@ async def _segnala_se_congelato(ctx: dict, campaign_id: str, number_id: str) -> 
         f"WhatsApp: job di invio CONGELATO ({job_id}). La campagna "
         f"{campaign_id} ha contatti pronti ma nessuno esegue il job: una "
         "chiave in-progress orfana (worker ucciso a meta' sessione) lo tiene "
-        f"fermo. Sblocco manuale: DEL arq:in-progress:{job_id}",
+        "fermo, e da sola non scade prima di sei ore.\n\n"
+        "Rimedio consigliato: RIAVVIA il worker principale, che ripulisce le "
+        "chiavi orfane da solo all'avvio.\n\n"
+        "Se proprio vuoi sbloccarlo a mano, prima verifica che NON esista "
+        f"`wa:profile-lock:{number_id}`: se c'e', qualcuno sta lavorando su "
+        "questo numero adesso e cancellare la chiave farebbe ripescare il job "
+        "da un secondo poll. Solo se il lucchetto non c'e': "
+        f"DEL arq:in-progress:{job_id}",
         level="error")
     return True
 

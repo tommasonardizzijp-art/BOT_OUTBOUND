@@ -1,17 +1,37 @@
 """Il job di invio WhatsApp congelato da una chiave in-progress orfana.
 
-Quando ARQ prende in carico un job scrive `arq:in-progress:{job_id}` con TTL
-`job_timeout + 10` (qui job_timeout=3600 -> 3610s) e la cancella solo in
-`finish_job` (arq/worker.py). Se il processo muore mentre il job e' checked-out
--- un riavvio del worker a meta' mini-sessione -- quella chiave resta orfana, e
-`start_jobs` SALTA qualunque job in coda che abbia la sua chiave in-progress:
+Quando ARQ prende in carico un job scrive `arq:in-progress:{job_id}` e la
+cancella solo in `finish_job` (arq/worker.py). Se il processo muore mentre il
+job e' checked-out -- un riavvio del worker a meta' mini-sessione -- quella
+chiave resta orfana, e `start_jobs` SALTA qualunque job in coda che abbia la
+sua chiave in-progress:
 
     if ongoing_exists or not score or score > timestamp_ms(): continue
 
 Il job resta in `arq:queue` con lo score gia' scaduto e nessuno lo esegue fino
-alla scadenza del TTL: fino a un'ora di invii persi a ogni riavvio fatto mentre
-il worker lavorava, in silenzio (nessun errore, da nessuna parte -- incidente
+alla scadenza del TTL, in silenzio: nessun errore, da nessuna parte (incidente
 14/08: campagna running, 48 contatti eleggibili, zero invii per ore).
+
+QUEL TTL E' DI SEI ORE, NON DI UNA. Non vale `job_timeout + 10`: ARQ ne tiene
+UNO SOLO per tutto il worker, ed e' il MASSIMO fra i timeout di TUTTE le
+funzioni registrate (arq/worker.py:272-273):
+
+    max_timeout = max(f.timeout_s or self.job_timeout_s for f in self.functions.values())
+    self.in_progress_timeout_s = (max_timeout or 0) + 10
+
+Da quando `task_queue.py` registra `func(wa_discover_task, timeout=21600)` --
+Task 11, che serviva a non far uccidere dal timeout uno scan lungo -- quel
+massimo e' 21600, quindi il TTL di OGNI job di questo worker e' 21610s = 6 ore.
+Un accorgimento pensato per il discover ha sestuplicato in silenzio la durata
+dei congelamenti dell'invio. Riscontro dal campo, indipendente dalla lettura
+del codice: il 17/08 due chiavi in-progress lasciate orfane il giorno prima
+avevano `ttl` 21132 e 21413.
+
+Conta perche' chiude la scorciatoia "tanto si sana da sola in un'ora": sei ore
+di invii persi sono una giornata di campagna. Ed e' anche l'unico motivo per
+cui l'allarme del supervisore ha una finestra utile: col ritardo strutturale
+del predicato (30-55 min, vedi `wa_send_job_congelato`) a TTL di un'ora
+avrebbe suonato quasi solo dopo l'auto-guarigione.
 
 Il TTL NON viene rinnovato durante l'esecuzione, quindi un pttl che cala non
 distingue un job vivo da una chiave orfana: l'unico momento in cui la
@@ -91,16 +111,26 @@ async def wa_send_job_congelato(redis, number_id: str) -> str | None:
     Il terzo controllo e' il lucchetto di profilo (`wa:profile-lock:{number_id}`),
     l'unico segnale che dice "qualcuno sta DAVVERO lavorando su questo numero":
     esegui_mini_sessione lo tiene per tutta la sessione e lo rinnova a ogni
-    messaggio. Se il worker muore a meta', il lucchetto resta orfano finche' non
-    lo raccoglie release_stale_wa_profile_locks (cron :05/:20/:35/:50, soglia
-    wa_profile_lock_stale_min=25 min): il congelamento viene quindi segnalato con
-    al piu' una mezz'ora di ritardo, invece che mai. Si riusa quella disciplina
-    invece di introdurre una soglia nuova.
+    messaggio. Si riusa quella disciplina invece di introdurre una soglia nuova.
 
-    Finestra residua dichiarata, non chiusa: fra l'inizio del job e
-    l'acquisizione del lucchetto ci sono i cancelli di precheck (pochi secondi).
-    Un tick del supervisore che cadesse esattamente li' darebbe un falso
-    allarme: secondi contro minuti, si accetta.
+    PREZZO DEL TERZO CONTROLLO: 30-55 MINUTI DI SILENZIO. Quando il worker
+    muore a meta' sessione restano orfane DUE chiavi, non una: la in-progress e
+    anche `wa:profile-lock:{number_id}`. Finche' c'e' il lucchetto questa
+    funzione dice "sano". Il lucchetto sparisce solo con
+    release_stale_wa_profile_locks (cron :05/:20/:35/:50, soglia
+    wa_profile_lock_stale_min=25 min) -> fino a 40 min; poi il supervisore gira
+    a :10/:25/:40/:55 -> altri 15. Con un TTL di sei ore resta comunque una
+    finestra utile ampia, ma il ritardo va detto giusto: non e' "al piu' una
+    mezz'ora".
+
+    Due percorsi in cui tace pur essendo congelato, entrambi transitori:
+    - il lucchetto NON e' esclusivo dell'invio. Lo prendono sullo stesso
+      number_id anche l'health-check di sessione (apre un Chromium, minuti) e
+      il reply-scan: uno di questi in corso zittisce il tick del supervisore
+      anche su un job genuinamente congelato. Il tick dopo lo vede.
+    - fra l'inizio del job e l'acquisizione del lucchetto ci sono i cancelli di
+      precheck (pochi secondi): un tick esattamente li' darebbe un falso
+      allarme. Secondi contro minuti, si accetta.
     """
     from app.services import wa_profile_lock
     from app.services.work_enqueue import ARQ_MAIN_QUEUE

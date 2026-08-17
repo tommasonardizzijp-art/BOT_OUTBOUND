@@ -7,8 +7,11 @@ a meta' mini-sessione lascia la chiave orfana, e `start_jobs` salta per sempre
 un job che ha la sua chiave in-progress (arq/worker.py, la guardia
 `if ongoing_exists or not score or score > timestamp_ms(): continue`). Il job
 resta in `arq:queue` con lo score gia' scaduto e nessuno lo esegue fino alla
-scadenza del TTL: con job_timeout=3600, fino a un'ora di invii persi per ogni
-riavvio fatto mentre il worker lavorava.
+scadenza del TTL: SEI ore di invii persi per ogni riavvio fatto mentre il
+worker lavorava. Non e' job_timeout+10 -- ARQ tiene un solo TTL per worker,
+pari al MASSIMO fra i timeout di tutte le funzioni registrate, e da quando il
+discover e' registrato con timeout=21600 quel massimo vale per tutti
+(dettaglio e prove in app/services/wa_job_recovery.py).
 
 Due difese, provate qui: la pulizia all'avvio del worker principale (che
 rimuove la causa) e l'allarme del supervisore (che rende visibile il
@@ -231,3 +234,135 @@ async def test_supervisore_muto_sul_break_fra_mini_sessioni(db_session, _enqueue
 
     assert esito["congelate"] == 0
     assert _telegram_spia == []
+
+
+@pytest.mark.asyncio
+async def test_il_secondo_giro_conta_il_congelamento_ma_non_riscrive_su_telegram(
+        db_session, _enqueue_scartato, _telegram_spia, fake_redis):
+    """La chiave in-progress dura SEI ore e il supervisore gira ogni 15 minuti:
+    senza freno un solo incidente varrebbe fino a 24 messaggi, e un allarme che
+    martella e' un allarme che si impara a ignorare. Il congelamento deve
+    restare contato -- il canale e' ancora fermo -- ma Telegram tace."""
+    import time
+
+    from app.workers import cron_worker
+    from app.workers.wa_worker import wa_send_job_id
+
+    ctx_db = await _scenario_eleggibile(db_session)
+    job_id = wa_send_job_id(ctx_db["numero"].id)
+    await fake_redis.zadd("arq:queue", {job_id: time.time() * 1000 - 60_000})
+    await fake_redis.set(f"arq:in-progress:{job_id}", b"1")
+
+    primo = await cron_worker.wa_campaign_supervisor({"redis": fake_redis})
+    secondo = await cron_worker.wa_campaign_supervisor({"redis": fake_redis})
+
+    assert primo["congelate"] == 1 and secondo["congelate"] == 1, (
+        "il secondo giro deve continuare a CONTARE il congelamento: il canale "
+        "e' ancora fermo, e' solo la notifica che si silenzia")
+    assert len(_telegram_spia) == 1, (
+        f"{len(_telegram_spia)} messaggi Telegram invece di 1: il cooldown "
+        "non sta trattenendo il secondo allarme")
+
+
+@pytest.mark.asyncio
+async def test_l_allarme_non_suggerisce_di_cancellare_la_chiave_alla_cieca(
+        db_session, _enqueue_scartato, _telegram_spia, fake_redis):
+    """Il testo dell'alert istruisce un umano, che agisce minuti dopo il tick:
+    nel frattempo una sessione nuova puo' essere partita, e cancellare la
+    chiave di un job VIVO lo fa ripescare. Il messaggio deve nominare il
+    lucchetto da controllare prima, non solo il comando DEL."""
+    import time
+
+    from app.workers import cron_worker
+    from app.workers.wa_worker import wa_send_job_id
+
+    ctx_db = await _scenario_eleggibile(db_session)
+    number_id = ctx_db["numero"].id
+    job_id = wa_send_job_id(number_id)
+    await fake_redis.zadd("arq:queue", {job_id: time.time() * 1000 - 60_000})
+    await fake_redis.set(f"arq:in-progress:{job_id}", b"1")
+
+    await cron_worker.wa_campaign_supervisor({"redis": fake_redis})
+
+    messaggio = _telegram_spia[0][0]
+    assert f"wa:profile-lock:{number_id}" in messaggio, (
+        "l'alert propone un DEL manuale senza dire di verificare prima il "
+        "lucchetto di profilo: e' l'azione che il codice stesso si vieta")
+
+
+@pytest.mark.asyncio
+async def test_se_il_cooldown_non_e_verificabile_l_allarme_parte_lo_stesso(
+        db_session, _enqueue_scartato, _telegram_spia, fake_redis, monkeypatch):
+    """Il freno al rumore non deve poter spegnere l'allarme che frena. Se il
+    SET del cooldown solleva, l'eccezione risalirebbe al try per-campagna del
+    supervisore e il congelamento non verrebbe ne' contato ne' segnalato: un
+    blip di Redis renderebbe muto proprio il guasto da vedere."""
+    import time
+
+    from app.workers import cron_worker
+    from app.workers.wa_worker import wa_send_job_id
+
+    ctx_db = await _scenario_eleggibile(db_session)
+    job_id = wa_send_job_id(ctx_db["numero"].id)
+    await fake_redis.zadd("arq:queue", {job_id: time.time() * 1000 - 60_000})
+    await fake_redis.set(f"arq:in-progress:{job_id}", b"1")
+
+    async def _set_rotto(*a, **kw):
+        raise ConnectionError("redis irraggiungibile")
+    monkeypatch.setattr(fake_redis, "set", _set_rotto)
+
+    esito = await cron_worker.wa_campaign_supervisor({"redis": fake_redis})
+
+    assert esito["congelate"] == 1, (
+        "un cooldown non verificabile ha inghiottito il congelamento")
+    assert len(_telegram_spia) == 1, (
+        "nel dubbio si urla: l'allarme deve partire lo stesso")
+
+
+# ---------------------------------------------------------------------------
+# Ancoraggi: i tre nomi da cui dipende tutto il meccanismo
+#
+# I due test di pulizia qui sopra scrivono le chiavi Redis come STRINGHE
+# LETTERALI. E' voluto -- il loro valore e' l'asserzione negativa, che le
+# chiavi del cron e di Instagram restino intatte -- ma significa che restano
+# verdi anche se il nome vero cambia, e il fix diventerebbe un no-op silenzioso
+# in produzione. Questi tre test legano le costanti alle loro sorgenti, cosi'
+# un cambio di nome diventa rosso qui invece che invisibile.
+# ---------------------------------------------------------------------------
+
+def test_il_glob_della_pulizia_copre_il_job_id_vero_dell_invio():
+    """Se `wa_send_job_id` cambiasse formato, ORPHAN_WA_SEND_PATTERN resterebbe
+    indietro e la pulizia non troverebbe piu' nulla, in silenzio."""
+    import fnmatch
+
+    from app.services.wa_job_recovery import (IN_PROGRESS_PREFIX,
+                                              ORPHAN_WA_SEND_PATTERN)
+    from app.workers.wa_worker import wa_send_job_id
+
+    chiave = IN_PROGRESS_PREFIX + wa_send_job_id("11111111-2222-3333-4444-555555555555")
+    assert fnmatch.fnmatch(chiave, ORPHAN_WA_SEND_PATTERN), (
+        f"il glob {ORPHAN_WA_SEND_PATTERN!r} non copre piu' la chiave reale "
+        f"{chiave!r}: la pulizia non troverebbe nulla e non lo direbbe")
+
+
+def test_il_prefisso_in_progress_e_quello_che_usa_arq():
+    """L'unica costante che non viene da codice nostro. Se arq lo cambiasse in
+    un aggiornamento, tutta la suite resterebbe verde e il fix sarebbe morto."""
+    from arq.constants import in_progress_key_prefix
+
+    from app.services.wa_job_recovery import IN_PROGRESS_PREFIX
+
+    assert IN_PROGRESS_PREFIX == in_progress_key_prefix, (
+        "arq ha cambiato il prefisso delle chiavi in-progress: la pulizia sta "
+        "cercando chiavi che non esistono piu'")
+
+
+def test_la_pulizia_e_cablata_nello_startup_del_worker():
+    """Il test che monkeypatcha on_startup prova che la chiamata c'e' DENTRO la
+    funzione, non che la funzione sia registrata: togliendo `on_startup` dalle
+    WorkerSettings resterebbe tutto verde e la pulizia non girerebbe mai."""
+    from app.workers import task_queue
+
+    assert task_queue.WorkerSettings.on_startup is task_queue.on_startup, (
+        "on_startup non e' piu' registrata nelle WorkerSettings: la pulizia "
+        "delle chiavi orfane non gira all'avvio del worker di produzione")
