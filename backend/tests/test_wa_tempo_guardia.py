@@ -32,6 +32,14 @@ PATTERN_SORVEGLIATI = (
     "app/models/wa.py",
     "app/models/tenant.py",
     "app/api/wa_*.py",
+    # Gli script stanno qui perche' il 17/08 il censimento li ha trovati
+    # ancora naive DOPO il cutover: `scripts/wa_seed_campaign.py` scriveva
+    # `next_action_at` (timestamptz) di ogni contatto di ogni campagna nuova,
+    # e `qa_wa_discover/adv_i` confrontava una soglia naive con `started_at`
+    # aware. La guardia sorvegliava solo `app/`, quindi il difetto era gia'
+    # rientrato senza che niente diventasse rosso.
+    "scripts/wa_*.py",
+    "scripts/qa_wa_discover/*.py",
 )
 
 
@@ -71,7 +79,7 @@ def test_nessun_utcnow_nei_moduli_whatsapp():
     # Se la lista si svuota (rename di cartella, glob che non matcha piu') il
     # test passerebbe senza guardare niente: e' il modo classico in cui una
     # guardia muore in silenzio.
-    assert len(moduli) >= 25, (
+    assert len(moduli) >= 45, (
         f"la guardia sorveglia solo {len(moduli)} file: i pattern non stanno "
         "piu' trovando i moduli WhatsApp")
 
@@ -82,7 +90,7 @@ def test_nessun_utcnow_nei_moduli_whatsapp():
             colpevoli.append(f"{rel}:{riga} -> {forma}")
 
     assert not colpevoli, (
-        f"{len(colpevoli)} usi di utcnow() nei moduli WhatsApp. E' naive: "
+        f"{len(colpevoli)} usi di utcnow() nel codice WhatsApp (app/ e scripts/). E' naive: "
         "scritto in una colonna timestamptz finisce a DB spostato dell'offset "
         "del fuso (-2h in ora legale). Usa app.utils.tempo.adesso_utc().\n  "
         + "\n  ".join(colpevoli))

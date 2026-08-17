@@ -20,7 +20,6 @@ Esempio:
 """
 import argparse
 import asyncio
-from datetime import datetime
 
 from sqlalchemy import select
 
@@ -33,6 +32,7 @@ from app.models.wa import (WaCampaign, WaCampaignContact, WaCampaignStatus,
 from app.utils.crypto import encrypt
 from app.utils.phone_pseudonym import (hmac_e164, hmac_phone, mask_phone,
                                        normalize_e164)
+from app.utils.tempo import adesso_utc
 
 
 def _assert_db_di_test(url: str, forzato: bool) -> None:
@@ -140,7 +140,7 @@ async def _get_or_create_campaign(db, tenant: Tenant, numero: WaNumber, *, name:
         status=WaCampaignStatus.running if avvia else WaCampaignStatus.draft,
         optout_enabled=optout,
         optout_cta=("Scrivi STOP per non ricevere piu' messaggi." if optout else None),
-        started_at=datetime.utcnow() if avvia else None,
+        started_at=adesso_utc() if avvia else None,
     )
     db.add(camp)
     await db.flush()
@@ -158,7 +158,12 @@ async def _get_or_create_campaign_contact(db, camp: WaCampaign, contatto: WaCont
         db.add(WaCampaignContact(
             campaign_id=camp.id, contact_id=contatto.id,
             status=WaContactStatus.queued, current_step=-1,
-            next_action_at=datetime.utcnow(), failure_count=0,
+            # next_action_at governa QUANDO il sequence engine prende in mano
+            # questo contatto, ed e' timestamptz (models/wa.py). Scritto naive
+            # da questo script finiva a DB 2 ore indietro: il contatto
+            # risultava eleggibile due ore prima del dovuto, e la campagna
+            # nasceva gia' storta anche dopo la migrazione dello storico.
+            next_action_at=adesso_utc(), failure_count=0,
         ))
         await db.flush()
 

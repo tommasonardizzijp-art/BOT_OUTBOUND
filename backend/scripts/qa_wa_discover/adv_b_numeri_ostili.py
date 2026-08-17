@@ -133,7 +133,7 @@ async def _caso16_contatori_enormi() -> tuple[bool, str]:
         from datetime import datetime
         return User(id="00000000-0000-0000-0000-0000000000b6",
                    email="admin-adv-b16@test.local", password_hash="x",
-                   role="admin", is_active=True, created_at=datetime.utcnow())
+                   role="admin", is_active=True, created_at=datetime(2026, 1, 1))
 
     async def _get_db():
         async with maker() as s:
