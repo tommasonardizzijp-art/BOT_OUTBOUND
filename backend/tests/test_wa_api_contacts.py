@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 
+from app.utils.tempo import adesso_utc
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -114,7 +116,9 @@ async def test_lista_contatti_in_lavorazione_coerente_con_delete(db_session, cli
     contact = await make_contact(db_session, tenant)
     cc = await make_campaign_contact(db_session, campaign, contact)
     cc.locked_by = "worker-vivo"
-    cc.locked_at = datetime.utcnow() - timedelta(hours=5)   # ben oltre il timeout
+    # aware, non naive: locked_at e' timestamptz (models/wa.py). Su SQLite la
+    # differenza non emerge, in produzione sposta la soglia di due ore.
+    cc.locked_at = adesso_utc() - timedelta(hours=5)   # ben oltre il timeout
     await db_session.commit()
 
     r = await client.get(f"/api/wa/contacts?campaign_id={campaign.id}")
@@ -136,7 +140,7 @@ async def test_rimozione_contatto_sotto_lock_fresco_rifiutata(db_session, client
     contact = await make_contact(db_session, tenant)
     cc = await make_campaign_contact(db_session, campaign, contact)
     cc.locked_by = "worker-vivo"
-    cc.locked_at = datetime.utcnow()
+    cc.locked_at = adesso_utc()
     await db_session.commit()
 
     r = await client.delete(f"/api/wa/contacts/{cc.id}")
@@ -144,7 +148,7 @@ async def test_rimozione_contatto_sotto_lock_fresco_rifiutata(db_session, client
     await db_session.refresh(cc)
     assert cc.locked_by == "worker-vivo"        # I1: mai toccato
 
-    cc.locked_at = datetime.utcnow() - timedelta(minutes=45)   # lock stale
+    cc.locked_at = adesso_utc() - timedelta(minutes=45)   # lock stale
     await db_session.commit()
     r2 = await client.delete(f"/api/wa/contacts/{cc.id}")
     assert r2.status_code == 200, r2.text

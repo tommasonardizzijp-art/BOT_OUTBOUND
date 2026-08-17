@@ -2,6 +2,8 @@
 toccare task_queue.py (Task 12, brief Step 1)."""
 import uuid
 
+from app.utils.tempo import adesso_utc
+
 import pytest
 
 from tests.factories_wa import (make_campaign, make_campaign_contact,
@@ -51,8 +53,11 @@ async def _scenario_messaggio_sending(db_session):
     campaign, step = await make_campaign(db_session, tenant, number)
     cc = await make_campaign_contact(db_session, campaign, contact)
     cc.locked_by = f"wa-{uuid.uuid4().hex[:6]}"
-    from datetime import datetime
-    cc.locked_at = datetime.utcnow()
+    # locked_at e' timestamptz (models/wa.py): un naive scritto da un processo
+    # su Europe/Rome finisce a DB due ore indietro. Qui non si vede -- la suite
+    # gira su SQLite, che restituisce naive qualunque cosa gli si dia -- ed e'
+    # proprio per questo che va scritto giusto: e' una riga da cui si copia.
+    cc.locked_at = adesso_utc()
     await db_session.commit()
 
     msg = WaMessage(id=str(uuid.uuid4()), campaign_id=campaign.id,
