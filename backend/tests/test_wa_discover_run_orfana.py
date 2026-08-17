@@ -127,9 +127,12 @@ async def test_il_gate_sblocca_il_numero_dopo_aver_chiuso_l_orfana(db_session, m
     monkeypatch.setattr(wa_discover_gate.bot_state_service, "is_wa_halted", _async_false)
     monkeypatch.setattr(wa_discover_gate.wa_profile_lock, "profilo_occupato_da", _async_none)
     monkeypatch.setattr(wa_discover_gate, "ram_libera_mb", lambda: 4000)
-    # Neutralizza anche il gate sul commit: senza, questi test
-    # dipenderebbero dalla memoria reale della macchina.
-    monkeypatch.setattr(wa_discover_gate, "commit_disponibile_mb", lambda: 20000)
+    # Neutralizza anche il gate sul commit: senza, questi test dipenderebbero
+    # dalla memoria reale della macchina. `raising=False` perche' quella funzione
+    # arriva con un'altra PR: cosi' questo file sta in piedi con e senza, invece
+    # di legare l'ordine dei merge.
+    monkeypatch.setattr(wa_discover_gate, "commit_disponibile_mb", lambda: 20000,
+                        raising=False)
 
     tenant = await make_tenant(db_session)
     number = await make_number(db_session, tenant)
@@ -152,9 +155,12 @@ async def test_il_gate_rifiuta_ancora_se_la_run_e_recente(db_session, monkeypatc
     monkeypatch.setattr(wa_discover_gate.bot_state_service, "is_wa_halted", _async_false)
     monkeypatch.setattr(wa_discover_gate.wa_profile_lock, "profilo_occupato_da", _async_none)
     monkeypatch.setattr(wa_discover_gate, "ram_libera_mb", lambda: 4000)
-    # Neutralizza anche il gate sul commit: senza, questi test
-    # dipenderebbero dalla memoria reale della macchina.
-    monkeypatch.setattr(wa_discover_gate, "commit_disponibile_mb", lambda: 20000)
+    # Neutralizza anche il gate sul commit: senza, questi test dipenderebbero
+    # dalla memoria reale della macchina. `raising=False` perche' quella funzione
+    # arriva con un'altra PR: cosi' questo file sta in piedi con e senza, invece
+    # di legare l'ordine dei merge.
+    monkeypatch.setattr(wa_discover_gate, "commit_disponibile_mb", lambda: 20000,
+                        raising=False)
 
     tenant = await make_tenant(db_session)
     number = await make_number(db_session, tenant)
