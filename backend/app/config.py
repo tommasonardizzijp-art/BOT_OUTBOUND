@@ -526,6 +526,16 @@ class Settings(BaseSettings):
     # discover non parte: il caso peggiore non e' uno scan lento, e' l'OOM che
     # uccide a meta' la mini-sessione d'invio che sta girando accanto.
     wa_discover_ram_min_mb: int = 1500
+    # Commit di sistema (RAM + pagefile) ancora concedibile sotto il quale non si
+    # apre un browser. E' una risorsa DIVERSA dalla RAM fisica qui sopra: il
+    # 17/08 il bot si e' fermato 90 minuti perche' il commit era al tetto mentre
+    # la RAM fisica sembrava respirare -- Memurai ha chiesto la riserva per il
+    # salvataggio, se l'e' vista negare ed e' rimasto appeso.
+    # Il numero e' PRUDENZIALE, non derivato da una misura del fabbisogno esatto:
+    # al momento del guasto il commit disponibile era ~4,6 GB, quindi la soglia
+    # sta sopra quel valore. Va rivisto se rifiuta scansioni che sarebbero andate
+    # bene (il segnale e' `commit_insufficiente` nei log a macchina scarica).
+    wa_discover_commit_min_mb: int = 6000
     # Quante run mostrare nello storico di /wa/scoperti.
     wa_discover_storico_limit: int = 10
     # 900 chat x ~12,3s (misurato, PRIMERO MAGAZZINO) ~= 3 ore per il primo
