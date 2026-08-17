@@ -24,6 +24,8 @@ from unittest.mock import patch
 
 import _bootstrap  # noqa: E402
 
+from app.utils.tempo import adesso_utc  # noqa: E402
+
 
 @contextmanager
 def _override_dipendenze(app, get_db, get_current_user, session_maker):
@@ -32,7 +34,7 @@ def _override_dipendenze(app, get_db, get_current_user, session_maker):
     def _admin() -> User:
         return User(id="00000000-0000-0000-0000-0000000000a1",
                    email="admin-adv-a10@test.local", password_hash="x",
-                   role="admin", is_active=True, created_at=datetime.utcnow())
+                   role="admin", is_active=True, created_at=datetime(2026, 1, 1))
 
     async def _get_db():
         async with session_maker() as s:
@@ -73,7 +75,7 @@ async def main() -> None:
             setup_db, tenant_id=tenant.id, number_id=number.id)
         # Oltre la soglia orfana, scritto A MANO (UPDATE diretto), non via
         # chiudi_se_orfana: e' esattamente lo scenario del caso 10.
-        vecchia.started_at = (datetime.utcnow()
+        vecchia.started_at = (adesso_utc()
                               - timedelta(minutes=settings.wa_discover_run_orfana_min + 5))
         await setup_db.commit()
         vecchia_id = vecchia.id

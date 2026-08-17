@@ -39,7 +39,7 @@ async def _caso33_due_post_sequenziali(app, maker) -> tuple[bool, str]:
     def _admin():
         return __import__("app.models.user", fromlist=["User"]).User(
             id="00000000-0000-0000-0000-0000000000f3", email="admin-adv-f33@test.local",
-            password_hash="x", role="admin", is_active=True, created_at=datetime.utcnow())
+            password_hash="x", role="admin", is_active=True, created_at=datetime(2026, 1, 1))
 
     async def _get_db():
         async with maker() as s:
@@ -98,7 +98,7 @@ async def _caso34_tutti_gli_stati_non_attivi(app, maker) -> tuple[bool, str]:
     def _admin():
         return __import__("app.models.user", fromlist=["User"]).User(
             id="00000000-0000-0000-0000-0000000000f4", email="admin-adv-f34@test.local",
-            password_hash="x", role="admin", is_active=True, created_at=datetime.utcnow())
+            password_hash="x", role="admin", is_active=True, created_at=datetime(2026, 1, 1))
 
     async def _enqueue_ok(number_id, run_id):
         return True
@@ -214,7 +214,7 @@ async def _caso37_riattivazione_con_run_aperta(maker) -> tuple[bool, str]:
     def _admin():
         return __import__("app.models.user", fromlist=["User"]).User(
             id="00000000-0000-0000-0000-0000000000f7", email="admin-adv-f37@test.local",
-            password_hash="x", role="admin", is_active=True, created_at=datetime.utcnow())
+            password_hash="x", role="admin", is_active=True, created_at=datetime(2026, 1, 1))
 
     async def _get_db():
         async with maker() as s:

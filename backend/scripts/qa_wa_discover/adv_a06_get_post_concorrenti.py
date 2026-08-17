@@ -32,7 +32,7 @@ def _override_dipendenze(app, get_db, get_current_user, session_maker):
     def _admin() -> User:
         return User(id="00000000-0000-0000-0000-0000000000a6",
                    email="admin-adv-a6@test.local", password_hash="x",
-                   role="admin", is_active=True, created_at=datetime.utcnow())
+                   role="admin", is_active=True, created_at=datetime(2026, 1, 1))
 
     async def _get_db():
         async with session_maker() as s:

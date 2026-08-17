@@ -14,9 +14,11 @@ Uso:
 """
 import asyncio
 import re
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import _bootstrap  # noqa: E402
+
+from app.utils.tempo import adesso_utc  # noqa: E402
 
 _CIFRE_LUNGHE = re.compile(r"\d(?:[\s.\-/]{0,3}\d){5,}")
 
@@ -37,8 +39,7 @@ async def _semina_scenari(maker) -> dict:
         #    mano): deve finire failed/run_orfana, MAI restare running.
         run_orfana = await wa_discover_runs.apri_run(
             db, tenant_id=tenant.id, number_id=n_orfana.id)
-        run_orfana.started_at = (datetime.utcnow()
-                                 - timedelta(minutes=1000))
+        run_orfana.started_at = adesso_utc() - timedelta(minutes=1000)
         await db.commit()
 
     async with maker() as db:
@@ -81,7 +82,11 @@ async def _semina_scenari(maker) -> dict:
 async def _caso45_nessuna_running_oltre_soglia(maker, settings) -> tuple[bool, str]:
     from sqlalchemy import text
 
-    limite = datetime.utcnow() - timedelta(minutes=settings.wa_discover_run_orfana_min)
+    # Naive, questo limite finiva confrontato con `started_at` che e'
+    # timestamptz: PostgreSQL lo casta usando il fuso della sessione e la
+    # soglia scivolava di 2 ore. Un caso di collaudo che passa perche' guarda
+    # la finestra sbagliata e' peggio di un caso che non esiste.
+    limite = adesso_utc() - timedelta(minutes=settings.wa_discover_run_orfana_min)
     async with maker() as db:
         righe = (await db.execute(text(
             "SELECT id, number_id FROM wa_discover_runs "
@@ -128,7 +133,7 @@ async def _caso47_nessuna_scrittura_invio_durante_scan(maker, seme) -> tuple[boo
         from app.models.wa import WaMessage
         msg = WaMessage(campaign_id=camp.id, contact_id=contatto.id,
                         wa_number_id=numero.id, step_index=0, template_variant="a",
-                        rendered_text="ciao", queued_at=datetime.utcnow() - timedelta(days=1))
+                        rendered_text="ciao", queued_at=adesso_utc() - timedelta(days=1))
         db.add(msg)
         await db.commit()
 
@@ -141,8 +146,12 @@ async def _caso47_nessuna_scrittura_invio_durante_scan(maker, seme) -> tuple[boo
         righe = (await db.execute(text(
             "SELECT COUNT(*) FROM wa_messages WHERE wa_number_id = :nid "
             "AND queued_at BETWEEN :a AND :b"),
+            # I due estremi del BETWEEN devono essere dello stesso tipo:
+            # `run.started_at` arriva aware dal DB, e un `utcnow()` naive come
+            # estremo destro spostava la finestra di 2 ore -- proprio la
+            # finestra che questo controllo deve misurare.
             {"nid": seme["n_ok"], "a": run.started_at,
-             "b": run.finished_at or datetime.utcnow()})).scalar()
+             "b": run.finished_at or adesso_utc()})).scalar()
         totale_messaggi = (await db.execute(text(
             "SELECT COUNT(*) FROM wa_messages WHERE wa_number_id = :nid"),
             {"nid": seme["n_ok"]})).scalar()

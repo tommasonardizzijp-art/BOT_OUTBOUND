@@ -37,7 +37,7 @@ async def _caso41_storico_rispetta_il_limite(app, maker) -> tuple[bool, str]:
     def _admin() -> User:
         return User(id="00000000-0000-0000-0000-0000000000h1",
                    email="admin-adv-h41@test.local", password_hash="x",
-                   role="admin", is_active=True, created_at=datetime.utcnow())
+                   role="admin", is_active=True, created_at=datetime(2026, 1, 1))
 
     async def _get_db():
         async with maker() as s:
