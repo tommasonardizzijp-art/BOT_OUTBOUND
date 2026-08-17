@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.services import wa_discover_gate, wa_discover_runs
+from app.utils.tempo import adesso_utc
 from tests.factories_wa import make_discover_run, make_number, make_tenant
 
 
@@ -92,7 +93,7 @@ async def test_run_vecchia_viene_chiusa_come_orfana(db_session):
     number = await make_number(db_session, tenant)
     run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
                                           number_id=number.id)
-    run.started_at = datetime.utcnow() - timedelta(hours=9)
+    run.started_at = adesso_utc() - timedelta(hours=9)
     await db_session.commit()
 
     assert await wa_discover_runs.chiudi_se_orfana(db_session, number.id) is True
@@ -126,12 +127,18 @@ async def test_il_gate_sblocca_il_numero_dopo_aver_chiuso_l_orfana(db_session, m
     monkeypatch.setattr(wa_discover_gate.bot_state_service, "is_wa_halted", _async_false)
     monkeypatch.setattr(wa_discover_gate.wa_profile_lock, "profilo_occupato_da", _async_none)
     monkeypatch.setattr(wa_discover_gate, "ram_libera_mb", lambda: 4000)
+    # Neutralizza anche il gate sul commit: senza, questi test dipenderebbero
+    # dalla memoria reale della macchina. `raising=False` perche' quella funzione
+    # arriva con un'altra PR: cosi' questo file sta in piedi con e senza, invece
+    # di legare l'ordine dei merge.
+    monkeypatch.setattr(wa_discover_gate, "commit_disponibile_mb", lambda: 20000,
+                        raising=False)
 
     tenant = await make_tenant(db_session)
     number = await make_number(db_session, tenant)
     run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
                                           number_id=number.id)
-    run.started_at = datetime.utcnow() - timedelta(hours=9)
+    run.started_at = adesso_utc() - timedelta(hours=9)
     await db_session.commit()
 
     assert await wa_discover_gate.puo_lanciare(db_session, number) is None
@@ -148,6 +155,12 @@ async def test_il_gate_rifiuta_ancora_se_la_run_e_recente(db_session, monkeypatc
     monkeypatch.setattr(wa_discover_gate.bot_state_service, "is_wa_halted", _async_false)
     monkeypatch.setattr(wa_discover_gate.wa_profile_lock, "profilo_occupato_da", _async_none)
     monkeypatch.setattr(wa_discover_gate, "ram_libera_mb", lambda: 4000)
+    # Neutralizza anche il gate sul commit: senza, questi test dipenderebbero
+    # dalla memoria reale della macchina. `raising=False` perche' quella funzione
+    # arriva con un'altra PR: cosi' questo file sta in piedi con e senza, invece
+    # di legare l'ordine dei merge.
+    monkeypatch.setattr(wa_discover_gate, "commit_disponibile_mb", lambda: 20000,
+                        raising=False)
 
     tenant = await make_tenant(db_session)
     number = await make_number(db_session, tenant)
@@ -181,7 +194,7 @@ async def test_orfana_chiusa_sopravvive_anche_se_il_gate_rifiuta_dopo(db_session
     number = await make_number(db_session, tenant)
     run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
                                           number_id=number.id)
-    run.started_at = datetime.utcnow() - timedelta(hours=9)
+    run.started_at = adesso_utc() - timedelta(hours=9)
     await db_session.commit()
 
     codice = await wa_discover_gate.puo_lanciare(db_session, number)
@@ -234,7 +247,7 @@ async def test_orfana_non_sovrascrive_una_chiusura_legittima_nel_mezzo(db_sessio
     number = await make_number(db_session, tenant)
     run = await wa_discover_runs.apri_run(db_session, tenant_id=tenant.id,
                                           number_id=number.id)
-    run.started_at = datetime.utcnow() - timedelta(hours=9)
+    run.started_at = adesso_utc() - timedelta(hours=9)
     await db_session.commit()
 
     chiudi_run_vero = wa_discover_runs.chiudi_run

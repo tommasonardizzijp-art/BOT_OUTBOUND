@@ -69,6 +69,10 @@ import pytest_asyncio  # noqa: E402
 
 from app.services import notifier  # noqa: E402
 
+from tests import _guardia_aware  # noqa: E402
+
+_guardia_aware.installa()
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _suite_lock():
