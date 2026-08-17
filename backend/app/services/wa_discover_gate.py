@@ -36,12 +36,64 @@ MESSAGGI = {
     "ram_insufficiente": (
         "Memoria insufficiente per aprire un browser: chiudi qualche finestra "
         "e riprova."),
+    "commit_insufficiente": (
+        "Memoria di sistema quasi esaurita (troppe applicazioni aperte): chiudi "
+        "qualche finestra e riprova. Aprire un browser adesso rischia di far "
+        "cadere Redis, non solo di far fallire la scansione."),
 }
 
 
 def ram_libera_mb() -> int:
-    """RAM disponibile in MB. Funzione a se' per poterla sostituire nei test."""
+    """RAM FISICA disponibile in MB. Funzione a se' per poterla sostituire nei test."""
     return int(psutil.virtual_memory().available / (1024 * 1024))
+
+
+def commit_disponibile_mb() -> int | None:
+    """Commit di sistema ancora concedibile, in MB. `None` se non misurabile.
+
+    NON e' la RAM fisica libera, ed e' la distinzione che conta: Windows concede
+    memoria fino al *commit limit* (RAM + pagefile), e quando quel tetto si
+    avvicina le richieste vengono rifiutate anche se la RAM fisica sembra
+    respirare. Il 17/08 e' esattamente cosi' che si e' fermato il bot: Memurai ha
+    chiesto la sua riserva per il salvataggio periodico, se l'e' vista negare
+    (`0x5af`, "The paging file is too small"), ed e' rimasto appeso -- campagna
+    ferma 90 minuti. La RAM fisica libera in quel momento non era il segnale.
+
+    Si legge da `GlobalMemoryStatusEx` e non da psutil: `psutil.swap_memory()`
+    su Windows riporta il pagefile, che e' un'altra cosa. Misurato insieme sulla
+    stessa macchina: commit davvero disponibile 12044 MB, `swap_memory().free`
+    20395 MB. Fidarsi del secondo significherebbe credere di avere 8 GB che non
+    ci sono.
+
+    Ritorna `None` fuori da Windows (il chiamante salta il controllo) invece di
+    inventare un equivalente: su Linux il concetto vive in `Committed_AS`, con
+    semantica diversa a seconda dell'overcommit, e una traduzione approssimata
+    qui varrebbe meno di un controllo assente e dichiarato.
+    """
+    import ctypes
+
+    if not hasattr(ctypes, "windll"):
+        return None
+
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    stato = _MemoryStatusEx()
+    stato.dwLength = ctypes.sizeof(stato)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stato)):
+        # Non si tratta come "zero disponibile": un sensore rotto che fa
+        # rifiutare tutto spegne la funzione invece di proteggerla.
+        logger.warning("[WaDiscoverGate] GlobalMemoryStatusEx fallita: "
+                       "controllo commit saltato")
+        return None
+    return int(stato.ullAvailPageFile / (1024 * 1024))
 
 
 async def puo_lanciare(db, number) -> str | None:
@@ -80,5 +132,13 @@ async def puo_lanciare(db, number) -> str | None:
 
     if ram_libera_mb() < settings.wa_discover_ram_min_mb:
         return "ram_insufficiente"
+
+    # Secondo controllo, su una risorsa DIVERSA dalla prima: vedi
+    # `commit_disponibile_mb`. Va dopo perche' e' quello che si puo' saltare
+    # (None fuori da Windows), non perche' conti meno -- il guasto del 17/08 e'
+    # passato proprio di qui mentre la RAM fisica sembrava a posto.
+    commit = commit_disponibile_mb()
+    if commit is not None and commit < settings.wa_discover_commit_min_mb:
+        return "commit_insufficiente"
 
     return None

@@ -13,6 +13,10 @@ def gate_pulito(monkeypatch):
     monkeypatch.setattr(wa_discover_gate.wa_profile_lock, "profilo_occupato_da",
                         _async_return(None))
     monkeypatch.setattr(wa_discover_gate, "ram_libera_mb", lambda: 4000)
+    # Senza questo, ogni test del gate dipenderebbe dalla memoria REALE della
+    # macchina che esegue la suite: verde sul PC scarico, rosso a fine giornata
+    # con dieci finestre aperte. Un rosso che non parla del codice.
+    monkeypatch.setattr(wa_discover_gate, "commit_disponibile_mb", lambda: 20000)
 
 
 def _async_return(valore):
@@ -104,10 +108,56 @@ def test_messaggio_browser_occupato_non_afferma_un_altro_numero():
     assert "un altro" not in wa_discover_gate.MESSAGGI["browser_occupato"].lower()
 
 
+@pytest.mark.asyncio
+async def test_commit_esaurito_ferma_la_scansione_anche_con_RAM_fisica_abbondante(
+        db_session, gate_pulito, monkeypatch):
+    """Il caso del 17/08, che il gate non vedeva. Windows concede memoria fino al
+    *commit limit* (RAM + pagefile): quando quel tetto si avvicina le richieste
+    vengono negate anche se la RAM fisica respira. Quel giorno Memurai ha chiesto
+    la riserva per il salvataggio periodico, se l'e' vista rifiutare ed e' rimasto
+    appeso -- campagna ferma 90 minuti, e la RAM fisica libera non era il segnale.
+
+    `ram_libera_mb` resta a 4000 di proposito: e' cio' che rende questo test una
+    prova. Se il gate guardasse solo la RAM fisica, qui sarebbe verde."""
+    monkeypatch.setattr(wa_discover_gate, "commit_disponibile_mb", lambda: 500)
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    assert await wa_discover_gate.puo_lanciare(db_session, number) == "commit_insufficiente"
+
+
+@pytest.mark.asyncio
+async def test_commit_non_misurabile_non_blocca_la_scansione(
+        db_session, gate_pulito, monkeypatch):
+    """Fuori da Windows `commit_disponibile_mb` ritorna None. Trattare "non lo so"
+    come "zero disponibile" spegnerebbe la funzione su ogni Linux -- e' il difetto
+    fail-closed-su-sensore-cieco: la guardia piu' severa di cosa sa misurare non
+    protegge niente, rifiuta e basta."""
+    monkeypatch.setattr(wa_discover_gate, "commit_disponibile_mb", lambda: None)
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    assert await wa_discover_gate.puo_lanciare(db_session, number) is None
+
+
+def test_commit_disponibile_e_una_misura_diversa_dalla_ram_fisica():
+    """Ancoraggio sulla misura vera, non su un doppio. Su Windows il commit
+    disponibile deve essere un intero positivo e -- avendo un pagefile -- MAGGIORE
+    della sola RAM fisica libera. Se un domani qualcuno "semplificasse"
+    `commit_disponibile_mb` facendola tornare a psutil, questo test lo direbbe:
+    `psutil.swap_memory().free` misura il pagefile, che e' un'altra cosa (misurati
+    insieme il 17/08: commit vero 12044 MB, swap.free 20395 MB)."""
+    commit = wa_discover_gate.commit_disponibile_mb()
+    if commit is None:
+        pytest.skip("non su Windows: il commit non e' misurabile qui")
+    assert commit > 0
+    assert commit > wa_discover_gate.ram_libera_mb(), (
+        "il commit disponibile non supera la RAM fisica libera: la funzione non "
+        "sta misurando il commit (RAM + pagefile) ma qualcos'altro")
+
+
 def test_ogni_codice_di_rifiuto_ha_un_messaggio_per_un_umano():
     # Un 409 senza frase diventa "Errore 409" a schermo, che non dice a
     # nessuno cosa fare dopo.
     for codice in ("numero_non_attivo", "canale_fermo", "browser_occupato",
-                   "scan_gia_in_corso", "ram_insufficiente"):
+                   "scan_gia_in_corso", "ram_insufficiente", "commit_insufficiente"):
         assert codice in wa_discover_gate.MESSAGGI
         assert len(wa_discover_gate.MESSAGGI[codice]) > 20
