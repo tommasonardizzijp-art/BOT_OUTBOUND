@@ -1,7 +1,7 @@
 """ARQ worker configuration."""
 from arq.worker import func
 from app.config import settings
-from app.services.wa_job_recovery import clear_orphan_wa_send_locks
+from app.services.arq_job_recovery import clear_orphan_in_progress_locks
 from app.services.work_enqueue import ARQ_MAIN_QUEUE, arq_redis_settings
 from app.workers.scrape_worker import scrape_followers_task
 from app.workers.list_worker import list_followers_task
@@ -328,11 +328,15 @@ async def on_startup(ctx: dict) -> None:
 
     # Terza recovery, indipendente dalle due sopra (stesso pattern: il
     # fallimento di una non deve impedire le altre). Se questo processo e' stato
-    # ucciso mentre un `wa:send:*` era checked-out, la sua chiave in-progress e'
-    # rimasta orfana e tiene il job fermo in coda fino alla scadenza del TTL
-    # (fino a un'ora di invii persi, in silenzio). L'avvio e' l'unico momento in
-    # cui si sa con certezza che nessun job di QUESTO processo e' in corso --
-    # rationale completo e rischio residuo nel docstring del servizio.
+    # ucciso mentre un job era checked-out, la sua chiave in-progress e' rimasta
+    # orfana e tiene il job fermo in coda fino alla scadenza del TTL: SEI ore,
+    # non una -- ARQ tiene un solo TTL per worker, pari al massimo fra i timeout
+    # di tutte le funzioni registrate, e qui c'e' `wa_discover_task` a 21600s.
+    # Vale per OGNI canale, non solo per l'invio WA: i job Instagram si
+    # congelano allo stesso modo (16/08, due `biobrowser` fermi cosi'). L'avvio
+    # e' l'unico momento in cui si sa con certezza che nessun job di QUESTO
+    # processo e' in corso -- rationale completo, perimetro e rischio residuo
+    # nel docstring del servizio.
     try:
         # ARQ mette il pool in ctx['redis'] prima di chiamare on_startup
         # (arq/worker.py: `self.ctx['redis'] = self.pool`). Se non c'e' non si
@@ -341,9 +345,9 @@ async def on_startup(ctx: dict) -> None:
         # tira dritto, come tutto il resto di questa funzione.
         # Il log di cosa e' stato sbloccato lo fa il servizio, che conosce i
         # job id: qui ripeterlo sarebbe solo rumore a ogni avvio.
-        await clear_orphan_wa_send_locks(ctx["redis"])
+        await clear_orphan_in_progress_locks(ctx["redis"])
     except Exception as e:
-        logger.error(f"[Startup] WA orphan in-progress cleanup failed: {e}")
+        logger.error(f"[Startup] orphan in-progress cleanup failed: {e}")
 
 
 async def browser_bio_account_task(ctx: dict, campaign_id: str, account_id: str) -> None:

@@ -11,7 +11,7 @@ scadenza del TTL: SEI ore di invii persi per ogni riavvio fatto mentre il
 worker lavorava. Non e' job_timeout+10 -- ARQ tiene un solo TTL per worker,
 pari al MASSIMO fra i timeout di tutte le funzioni registrate, e da quando il
 discover e' registrato con timeout=21600 quel massimo vale per tutti
-(dettaglio e prove in app/services/wa_job_recovery.py).
+(dettaglio e prove in app/services/arq_job_recovery.py).
 
 Due difese, provate qui: la pulizia all'avvio del worker principale (che
 rimuove la causa) e l'allarme del supervisore (che rende visibile il
@@ -37,42 +37,208 @@ def fake_redis():
 # Pulizia delle chiavi in-progress orfane (all'avvio del worker principale)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_pulizia_cancella_solo_i_lock_di_invio_wa(fake_redis):
-    """Il test che protegge dal danno peggiore. Il cron worker gira in un
-    processo SEPARATO, che non si riavvia insieme a questo: cancellargli le sue
-    `arq:in-progress:cron:*` significherebbe far rieseguire un cron mentre e' in
-    corso. Deve sparire solo `wa:send:*`, e deve restare la chiave `arq:job:`
-    (senza quella il job non esiste piu' e non lo raccoglie nessuno)."""
-    from app.services.wa_job_recovery import clear_orphan_wa_send_locks
+async def _congela(fake_redis, job_id: str) -> str:
+    """Mette a Redis lo stato ESATTO di un job congelato: score in coda gia'
+    scaduto (ARQ toglie il job dal sorted set solo in finish_job) e chiave
+    in-progress presente. Scriverne solo una delle due farebbe passare i test
+    per il motivo sbagliato."""
+    import time
 
-    await fake_redis.set("arq:in-progress:wa:send:num-1", b"1")
-    await fake_redis.set("arq:in-progress:wa:send:num-2", b"1")
-    intatte = ("arq:in-progress:cron:wa_campaign_supervisor:456",
-               "arq:in-progress:worker:camp-1:acc-1",
-               "arq:job:wa:send:num-1",
-               "wa:profile-lock:num-1")
+    await fake_redis.zadd("arq:queue", {job_id: time.time() * 1000 - 60_000})
+    await fake_redis.set(f"arq:in-progress:{job_id}", b"1")
+    return job_id
+
+
+@pytest.mark.asyncio
+async def test_pulizia_copre_tutti_i_canali_non_solo_l_invio_wa(fake_redis):
+    """Il test che descrive il difetto corretto qui. La PR #96 puliva il solo
+    glob `wa:send:*`, e i job Instagram -- che si congelano con lo stesso
+    identico meccanismo -- restavano fermi sei ore (16/08: due `biobrowser`).
+
+    I job id NON sono scritti a mano: vengono dai costruttori veri, cosi' un
+    cambio di formato diventa rosso qui invece che invisibile in produzione."""
+    from app.services.arq_job_recovery import clear_orphan_in_progress_locks
+    from app.services.browser_bio import browser_bio_job_id
+    from app.services.browser_import import browser_import_job_id
+    from app.services.work_enqueue import dm_worker_job_id
+    from app.workers.wa_discover_worker import wa_discover_job_id
+    from app.workers.wa_worker import wa_send_job_id
+
+    attesi = [
+        await _congela(fake_redis, wa_send_job_id("num-1")),
+        await _congela(fake_redis, wa_discover_job_id("run-1")),
+        await _congela(fake_redis, browser_bio_job_id("camp-1", "acc-1")),
+        await _congela(fake_redis, browser_import_job_id("camp-1", "acc-2")),
+        await _congela(fake_redis, dm_worker_job_id("camp-1", "acc-3")),
+        await _congela(fake_redis, "scrape:camp-1"),
+        await _congela(fake_redis, "list:camp-1"),
+        await _congela(fake_redis, "bios:camp-1"),
+        await _congela(fake_redis, "resolve:camp-1"),
+        await _congela(fake_redis, "organic-session:acc-4"),
+        await _congela(fake_redis, "pregen:camp-1:full"),
+        await _congela(fake_redis, "lead-qualification:run-2"),
+    ]
+
+    ripuliti = await clear_orphan_in_progress_locks(fake_redis)
+
+    assert sorted(ripuliti) == sorted(attesi), (
+        "un canale e' rimasto congelato: la pulizia non copre tutta la coda "
+        "principale")
+    for job_id in attesi:
+        assert not await fake_redis.exists(f"arq:in-progress:{job_id}")
+
+
+@pytest.mark.asyncio
+async def test_pulizia_non_tocca_le_chiavi_del_cron_worker(fake_redis):
+    """Il test che protegge dal danno peggiore, e l'unico motivo per cui la
+    denylist su `cron:` esiste ancora accanto al controllo sulla coda.
+
+    Il cron worker gira in un processo SEPARATO che non si riavvia insieme a
+    questo: rieseguire un cron in corso significa un secondo Chromium sullo
+    stesso profilo (health-check) o un reply-scan doppio. Oggi le sue chiavi
+    sono al riparo gia' per la coda -- accoda su ARQ_CRON_QUEUE, quindi nessuno
+    score in `arq:queue`. La seconda riga di questo test e' il caso IPOTETICO in
+    cui condividesse la coda: deve restare intatta lo stesso."""
+    from app.services.arq_job_recovery import clear_orphan_in_progress_locks
+
+    await fake_redis.set("arq:in-progress:cron:wa_session_healthcheck:456", b"1")
+    condivisa = await _congela(fake_redis, "cron:wa_reply_scan:789")
+
+    ripuliti = await clear_orphan_in_progress_locks(fake_redis)
+
+    assert ripuliti == []
+    assert await fake_redis.exists("arq:in-progress:cron:wa_session_healthcheck:456")
+    assert await fake_redis.exists(f"arq:in-progress:{condivisa}"), (
+        "una chiave del cron con lo score in coda principale e' stata "
+        "cancellata: resta solo il controllo sulla coda, la denylist non tiene")
+
+
+@pytest.mark.asyncio
+async def test_pulizia_non_tocca_un_job_che_non_e_in_coda_qui(fake_redis):
+    """Chiave in-progress senza score in `arq:queue`: cancellarla non
+    sbloccherebbe niente (non c'e' nessun job fermo da liberare) e potrebbe
+    invece far ripescare il lavoro di un altro processo. Si lascia stare."""
+    from app.services.arq_job_recovery import clear_orphan_in_progress_locks
+
+    await fake_redis.set("arq:in-progress:worker:camp-9:acc-9", b"1")
+
+    ripuliti = await clear_orphan_in_progress_locks(fake_redis)
+
+    assert ripuliti == []
+    assert await fake_redis.exists("arq:in-progress:worker:camp-9:acc-9")
+
+
+@pytest.mark.asyncio
+async def test_pulizia_non_tocca_le_chiavi_di_servizio_del_job(fake_redis):
+    """Sparisce SOLO la in-progress. Senza `arq:job:{id}` il job non esiste
+    piu' e non lo raccoglie nessuno; il lucchetto di profilo non e' roba di ARQ
+    e ha la sua scadenza."""
+    from app.services.arq_job_recovery import clear_orphan_in_progress_locks
+
+    job_id = await _congela(fake_redis, "wa:send:num-1")
+    intatte = (f"arq:job:{job_id}", f"arq:retry:{job_id}", "wa:profile-lock:num-1")
     for chiave in intatte:
         await fake_redis.set(chiave, b"1")
 
-    ripuliti = await clear_orphan_wa_send_locks(fake_redis)
+    ripuliti = await clear_orphan_in_progress_locks(fake_redis)
 
-    assert sorted(ripuliti) == ["wa:send:num-1", "wa:send:num-2"]
-    assert not await fake_redis.exists("arq:in-progress:wa:send:num-1")
-    assert not await fake_redis.exists("arq:in-progress:wa:send:num-2")
+    assert ripuliti == [job_id]
     for chiave in intatte:
         assert await fake_redis.exists(chiave), f"{chiave} non doveva essere toccata"
+    assert await fake_redis.zscore("arq:queue", job_id) is not None, (
+        "il job e' stato tolto dalla coda: cosi' non riparte, resta perso")
+
+
+@pytest.mark.asyncio
+async def test_uno_score_zero_non_viene_scambiato_per_assente(fake_redis):
+    """`zscore` ritorna 0.0 per un job accodato all'epoch, ed e' un valore
+    FALSY. Un `if not score` lascerebbe quella chiave in piedi per sempre --
+    ed e' un errore vivo: e' esattamente cio' che fa arq alla guardia di
+    start_jobs (`if ongoing_exists or not score or ...`). Qui si distingue
+    "score assente" da "score zero"."""
+    from app.services.arq_job_recovery import clear_orphan_in_progress_locks
+
+    await fake_redis.zadd("arq:queue", {"wa:send:num-0": 0})
+    await fake_redis.set("arq:in-progress:wa:send:num-0", b"1")
+
+    ripuliti = await clear_orphan_in_progress_locks(fake_redis)
+
+    assert ripuliti == ["wa:send:num-0"], (
+        "uno score 0.0 e' stato letto come 'non in coda': la chiave resta "
+        "orfana e il job non riparte mai")
+
+
+@pytest.mark.asyncio
+async def test_anche_un_job_schedulato_nel_futuro_va_sbloccato(fake_redis):
+    """Score futuro + in-progress presente NON e' un break anti-ban sano: la
+    guardia di arq salta il job per `ongoing_exists` anche quando l'ora arriva,
+    quindi resterebbe fermo lo stesso. All'avvio del worker nessun suo job puo'
+    essere davvero in corso, quindi quella chiave e' orfana per costruzione.
+
+    (Il supervisore, che gira a worker VIVO, fa la scelta opposta e tace: la'
+    lo score futuro e' informazione buona. Due contesti, due predicati.)"""
+    import time
+
+    from app.services.arq_job_recovery import clear_orphan_in_progress_locks
+
+    await fake_redis.zadd("arq:queue", {"wa:send:num-f": time.time() * 1000 + 900_000})
+    await fake_redis.set("arq:in-progress:wa:send:num-f", b"1")
+
+    assert await clear_orphan_in_progress_locks(fake_redis) == ["wa:send:num-f"]
+
+
+@pytest.mark.asyncio
+async def test_una_chiave_malformata_non_ferma_la_pulizia_delle_altre(fake_redis):
+    """Chiave senza job id e job id con separatori strani: non devono sollevare
+    ne' far saltare il resto. La pulizia gira dentro un try in `on_startup`, ma
+    quel try e' la rete -- se scatta, tutte le chiavi successive restano non
+    esaminate e l'avvio sembra riuscito."""
+    from app.services.arq_job_recovery import clear_orphan_in_progress_locks
+
+    await fake_redis.set("arq:in-progress:", b"1")            # job id vuoto
+    await fake_redis.set("arq:in-progress:::::", b"1")        # solo separatori
+    buona = await _congela(fake_redis, "biobrowser:camp-1:acc-1")
+
+    ripuliti = await clear_orphan_in_progress_locks(fake_redis)
+
+    assert ripuliti == [buona], (
+        "una chiave malformata ha fatto saltare la pulizia delle altre")
+    assert await fake_redis.exists("arq:in-progress:")
+
+
+@pytest.mark.asyncio
+async def test_molte_chiavi_orfane_una_sola_delete(fake_redis, monkeypatch):
+    """La pulizia gira all'avvio, quando la coda ha gia' lavoro in attesa: le
+    cancellazioni devono partire in UN comando, non una per chiave."""
+    from app.services import arq_job_recovery
+
+    for i in range(200):
+        await _congela(fake_redis, f"biobrowser:camp-1:acc-{i}")
+
+    delete_originale = fake_redis.delete
+    chiamate = []
+
+    async def _delete_spia(*chiavi):
+        chiamate.append(len(chiavi))
+        return await delete_originale(*chiavi)
+    monkeypatch.setattr(fake_redis, "delete", _delete_spia)
+
+    ripuliti = await arq_job_recovery.clear_orphan_in_progress_locks(fake_redis)
+
+    assert len(ripuliti) == 200
+    assert chiamate == [200], f"{len(chiamate)} DELETE invece di uno solo"
 
 
 @pytest.mark.asyncio
 async def test_pulizia_senza_chiavi_orfane_non_tocca_nulla(fake_redis):
     """Il caso NORMALE (avvio con Redis pulito) non deve ne' cancellare niente
-    ne' sollevare: la pulizia gira a ogni startup del worker di produzione."""
-    from app.services.wa_job_recovery import clear_orphan_wa_send_locks
+    ne' sollevare: la pulizia gira a ogni startup del worker di produzione, e
+    redis-py solleva su un DELETE senza argomenti."""
+    from app.services.arq_job_recovery import clear_orphan_in_progress_locks
 
     await fake_redis.set("arq:in-progress:cron:daily_reset:1", b"1")
 
-    ripuliti = await clear_orphan_wa_send_locks(fake_redis)
+    ripuliti = await clear_orphan_in_progress_locks(fake_redis)
 
     assert ripuliti == []
     assert await fake_redis.exists("arq:in-progress:cron:daily_reset:1")
@@ -94,7 +260,7 @@ def test_on_startup_chiama_la_pulizia_delle_chiavi_orfane(monkeypatch):
     async def _fake_pulizia(redis):
         chiamate["pulizia"] = redis
         return []
-    monkeypatch.setattr(task_queue, "clear_orphan_wa_send_locks", _fake_pulizia)
+    monkeypatch.setattr(task_queue, "clear_orphan_in_progress_locks", _fake_pulizia)
 
     async def _fake_wa():
         chiamate["wa"] = True
@@ -330,19 +496,27 @@ async def test_se_il_cooldown_non_e_verificabile_l_allarme_parte_lo_stesso(
 # un cambio di nome diventa rosso qui invece che invisibile.
 # ---------------------------------------------------------------------------
 
-def test_il_glob_della_pulizia_copre_il_job_id_vero_dell_invio():
-    """Se `wa_send_job_id` cambiasse formato, ORPHAN_WA_SEND_PATTERN resterebbe
-    indietro e la pulizia non troverebbe piu' nulla, in silenzio."""
+def test_lo_scan_copre_la_chiave_reale_di_ogni_canale():
+    """Se un costruttore di job_id cambiasse formato, o lo scan si restringesse,
+    la pulizia smetterebbe di trovare quel canale senza dirlo."""
     import fnmatch
 
-    from app.services.wa_job_recovery import (IN_PROGRESS_PREFIX,
-                                              ORPHAN_WA_SEND_PATTERN)
+    from app.services.arq_job_recovery import (IN_PROGRESS_PREFIX,
+                                               ORPHAN_SCAN_PATTERN)
+    from app.services.browser_bio import browser_bio_job_id
+    from app.services.browser_import import browser_import_job_id
+    from app.services.work_enqueue import dm_worker_job_id
+    from app.workers.wa_discover_worker import wa_discover_job_id
     from app.workers.wa_worker import wa_send_job_id
 
-    chiave = IN_PROGRESS_PREFIX + wa_send_job_id("11111111-2222-3333-4444-555555555555")
-    assert fnmatch.fnmatch(chiave, ORPHAN_WA_SEND_PATTERN), (
-        f"il glob {ORPHAN_WA_SEND_PATTERN!r} non copre piu' la chiave reale "
-        f"{chiave!r}: la pulizia non troverebbe nulla e non lo direbbe")
+    uuid = "11111111-2222-3333-4444-555555555555"
+    for job_id in (wa_send_job_id(uuid), wa_discover_job_id(uuid),
+                   browser_bio_job_id(uuid, uuid), browser_import_job_id(uuid, uuid),
+                   dm_worker_job_id(uuid, uuid)):
+        chiave = IN_PROGRESS_PREFIX + job_id
+        assert fnmatch.fnmatch(chiave, ORPHAN_SCAN_PATTERN), (
+            f"lo scan {ORPHAN_SCAN_PATTERN!r} non copre la chiave reale "
+            f"{chiave!r}: quel canale resterebbe congelato in silenzio")
 
 
 def test_il_prefisso_in_progress_e_quello_che_usa_arq():
@@ -350,11 +524,46 @@ def test_il_prefisso_in_progress_e_quello_che_usa_arq():
     un aggiornamento, tutta la suite resterebbe verde e il fix sarebbe morto."""
     from arq.constants import in_progress_key_prefix
 
-    from app.services.wa_job_recovery import IN_PROGRESS_PREFIX
+    from app.services.arq_job_recovery import IN_PROGRESS_PREFIX
 
     assert IN_PROGRESS_PREFIX == in_progress_key_prefix, (
         "arq ha cambiato il prefisso delle chiavi in-progress: la pulizia sta "
         "cercando chiavi che non esistono piu'")
+
+
+def test_il_prefisso_dei_cron_e_quello_che_usa_arq():
+    """La denylist vale solo se `cron:` e' davvero il prefisso che arq mette ai
+    job dello scheduler (arq/cron.py: `name = name or 'cron:' + coroutine`). Se
+    cambiasse, la denylist diventerebbe muta invece che rossa -- e resterebbe in
+    piedi solo il controllo sulla coda, che e' esattamente la ridondanza che
+    questa costante serve a garantire."""
+    from arq.cron import cron
+
+    from app.services.arq_job_recovery import CRON_JOB_PREFIX
+
+    async def _finta_funzione_cron(ctx): ...
+
+    assert cron(_finta_funzione_cron, minute=0).name.startswith(CRON_JOB_PREFIX), (
+        "arq non nomina piu' i cron job con questo prefisso: la denylist non "
+        "protegge piu' nulla")
+
+
+def test_la_coda_letta_e_quella_del_worker_principale_e_non_quella_del_cron():
+    """Tutto il perimetro della pulizia poggia su un fatto solo: i job del cron
+    worker NON stanno nella coda che questo worker consuma. Se le due code
+    diventassero la stessa, il controllo sullo score smetterebbe di discriminare
+    e resterebbe in piedi solo la denylist -- va saputo, non scoperto in
+    produzione."""
+    from app.services.work_enqueue import ARQ_CRON_QUEUE, ARQ_MAIN_QUEUE
+    from app.workers import cron_worker, task_queue
+
+    assert task_queue.WorkerSettings.queue_name == ARQ_MAIN_QUEUE, (
+        "il worker principale non consuma piu' ARQ_MAIN_QUEUE: la pulizia "
+        "guarda la coda sbagliata e non trova i job congelati")
+    assert cron_worker.CronWorkerSettings.queue_name == ARQ_CRON_QUEUE, (
+        "il cron worker e' finito sulla coda principale: le sue chiavi ora "
+        "sono protette solo dalla denylist su `cron:`")
+    assert ARQ_MAIN_QUEUE != ARQ_CRON_QUEUE
 
 
 def test_la_pulizia_e_cablata_nello_startup_del_worker():

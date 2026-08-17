@@ -37,7 +37,7 @@ def lock_key(number_id: str) -> str:
     """Nome della chiave del lucchetto. Pubblica (era `_lock_key`) perche' la
     sua PRESENZA e' il segnale "qualcuno sta davvero lavorando su questo
     numero", e serve anche a chi vuole solo leggerlo con un pool gia' in mano
-    (wa_job_recovery.wa_send_job_congelato). Sola lettura: acquisire e
+    (arq_job_recovery.wa_send_job_congelato). Sola lettura: acquisire e
     rilasciare restano compito di `held`, che e' l'unico posto in cui il
     confronto sul token e' fatto bene."""
     return f"wa:profile-lock:{number_id}"

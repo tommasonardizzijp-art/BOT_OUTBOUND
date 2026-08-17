@@ -195,7 +195,7 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     riparare riaccodando -- ed e' quello dell'incidente 14/08. Se il worker
     principale viene ucciso mentre un `wa:send:*` e' checked-out, la sua chiave
     `arq:in-progress:` resta orfana e ARQ salta per sempre quel job (fino alla
-    scadenza del TTL, che e' di SEI ore -- vedi wa_job_recovery, non e'
+    scadenza del TTL, che e' di SEI ore -- vedi arq_job_recovery, non e'
     job_timeout+10). Qui l'enqueue viene scartato perche' il
     job ESISTE ancora: il supervisore contava "0 riaccodate", cioe' leggeva un
     congelamento come normalita'. Da ora, quando l'enqueue viene scartato, si
@@ -205,7 +205,7 @@ async def wa_campaign_supervisor(ctx: dict) -> dict:
     la sessione, quindi score scaduto + chiave in-progress da soli NON bastano
     a dire "congelato") -- da uno congelato davvero, e in quel caso si ALLARMA.
     Il predicato completo, col perche' di ognuno dei tre controlli, sta in
-    wa_job_recovery.wa_send_job_congelato. Si allarma e basta: la
+    arq_job_recovery.wa_send_job_congelato. Si allarma e basta: la
     riparazione (cancellare la chiave) sta nella pulizia all'avvio del worker
     principale, perche' e' l'unico processo che sa se il job sia davvero in
     esecuzione -- vedi `_segnala_se_congelato` qui sotto.
@@ -296,13 +296,13 @@ async def _segnala_se_congelato(ctx: dict, campaign_id: str, number_id: str) -> 
     davvero eseguendo: cancellare da qui una chiave di un job VIVO lo farebbe
     ripescare da un secondo poll -> seconda mini-sessione sullo stesso numero.
     La riparazione sta all'avvio del worker principale
-    (wa_job_recovery.clear_orphan_wa_send_locks), l'unico punto in cui "nessun
+    (arq_job_recovery.clear_orphan_in_progress_locks), l'unico punto in cui "nessun
     job di questo processo e' in corso" e' vero per costruzione.
     """
     from loguru import logger
 
     from app.services import notifier
-    from app.services.wa_job_recovery import wa_send_job_congelato
+    from app.services.arq_job_recovery import wa_send_job_congelato
 
     redis = ctx.get("redis")
     proprio = redis is None
