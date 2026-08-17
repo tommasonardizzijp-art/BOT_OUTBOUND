@@ -1,4 +1,4 @@
-"""Il job di invio WhatsApp congelato da una chiave in-progress orfana.
+"""I job congelati da una chiave in-progress orfana. QUALUNQUE job, non solo WA.
 
 Quando ARQ prende in carico un job scrive `arq:in-progress:{job_id}` e la
 cancella solo in `finish_job` (arq/worker.py). Se il processo muore mentre il
@@ -37,6 +37,32 @@ Il TTL NON viene rinnovato durante l'esecuzione, quindi un pttl che cala non
 distingue un job vivo da una chiave orfana: l'unico momento in cui la
 distinzione e' certa e' l'avvio del worker principale, dove per definizione
 nessun job di QUESTO processo e' ancora in corso. E' li' che gira la pulizia.
+
+PERCHE' IL PERIMETRO E' LA CODA E NON IL CANALE. La prima stesura (PR #96)
+puliva il solo glob `wa:send:*`, e il nome del modulo diceva "wa": e' esatta-
+mente per questo che i job Instagram sono rimasti scoperti mentre si congelano
+con lo stesso identico meccanismo (16/08: due `biobrowser` fermi cosi'). Il
+canale non c'entra nulla con la sicurezza dell'operazione. Cio' che la rende
+sicura e' una cosa sola: che il job appartenga alla coda che QUESTO worker
+consuma, perche' allora al suo avvio nessuno lo sta eseguendo. Da qui i due
+controlli di `clear_orphan_in_progress_locks`, entrambi verificati sul sorgente
+di arq installato e non dedotti:
+
+1. il job deve avere uno score in ARQ_MAIN_QUEUE. ARQ toglie il job dal sorted
+   set solo in `finish_job`/`finish_failed_job` (`tr.zrem(self.queue_name, ...)`,
+   arq/worker.py:702 e :717), quindi un job congelato ce l'ha sempre -- e' la
+   definizione stessa del congelamento (score presente e gia' scaduto). I job
+   del cron worker invece vengono accodati con `_queue_name=self.queue_name`
+   (arq/worker.py:759), cioe' su ARQ_CRON_QUEUE: uno `zscore` su `arq:queue`
+   non li trova MAI. Il controllo si adatta da solo ai job futuri: un prefisso
+   nuovo sulla coda principale e' coperto senza toccare questo file, che e'
+   proprio l'errore che si sta correggendo.
+2. il job id non deve cominciare per `cron:` (arq/cron.py:173, `name = name or
+   'cron:' + coroutine`). E' ridondante rispetto al primo per com'e' schierato
+   oggi il sistema, ed e' voluto: se un domani il cron worker condividesse la
+   coda principale, il controllo 1 da solo lo esporrebbe a rieseguire un cron
+   mentre e' in corso (un secondo Chromium sullo stesso profilo, reply-scan
+   doppio). Due condizioni indipendenti, entrambe necessarie.
 """
 import time
 
@@ -44,34 +70,60 @@ from loguru import logger
 
 IN_PROGRESS_PREFIX = "arq:in-progress:"
 
-# ⚠️ Il glob deve restare `wa:send:*`, MAI `arq:in-progress:*`.
-# Il cron worker gira in un processo SEPARATO che non si riavvia insieme a
-# questo, consuma una coda diversa (ARQ_CRON_QUEUE) e le sue chiavi sono
-# `arq:in-progress:cron:*`: cancellargliele significherebbe far ripartire un
-# cron mentre e' ancora in corso (health-check con un secondo Chromium sullo
-# stesso profilo, reply-scan doppio). Stesso discorso per i job Instagram
-# (`worker:`, `scrape:`, `list:`, `bios:`, ...), che qui non c'entrano nulla.
-ORPHAN_WA_SEND_PATTERN = f"{IN_PROGRESS_PREFIX}wa:send:*"
+# arq/cron.py:173 -- il nome di un cron job, e quindi il suo job_id, nasce come
+# `cron:{funzione}`. Ancorato in test: se arq lo cambiasse, la denylist
+# diventerebbe muta invece che rossa.
+CRON_JOB_PREFIX = "cron:"
+
+ORPHAN_SCAN_PATTERN = f"{IN_PROGRESS_PREFIX}*"
 
 
-async def clear_orphan_wa_send_locks(redis) -> list[str]:
-    """Cancella le chiavi in-progress dei job di invio WA rimaste appese, e
-    ritorna i job id ripuliti. Da chiamare SOLO all'avvio del worker principale.
+async def clear_orphan_in_progress_locks(redis) -> list[str]:
+    """Cancella le chiavi in-progress rimaste appese ai job della coda
+    principale, e ritorna i job id ripuliti. Da chiamare SOLO all'avvio del
+    worker principale.
+
+    Copre tutti i canali: invio WhatsApp (`wa:send:`), discover (`wa:discover:`)
+    e i job Instagram (`worker:`, `biobrowser:`, `importbrowser:`, `scrape:`,
+    `list:`, `bios:`, `resolve:`, `organic-session:`, `pregen:`,
+    `lead-qualification:`). Non per elenco -- vedi il docstring del modulo --
+    ma perche' il criterio e' l'appartenenza alla coda.
 
     RISCHIO RESIDUO ACCETTATO (dichiarato, non mitigato qui): se esistesse una
-    SECONDA istanza del worker principale che sta davvero inviando, cancellarle
-    la chiave lascerebbe ripescare il suo job -> una seconda mini-sessione sullo
-    stesso numero. E' contenuto dalle protezioni gia' esistenti -- lucchetto di
-    profilo per numero (wa_profile_lock), claim per contatto (`locked_by`),
-    indice unico parziale su wa_messages -- e il deploy e' a worker singolo.
-    Non si aggiungono altre protezioni: si dichiara e basta.
+    SECONDA istanza del worker principale che sta davvero lavorando, cancellarle
+    la chiave lascerebbe ripescare il suo job -> una seconda sessione sullo
+    stesso account. E' contenuto dalle protezioni gia' esistenti -- lucchetto di
+    profilo browser per numero/account, claim per contatto (`locked_by`), indice
+    unico parziale su wa_messages -- e il deploy e' a worker singolo. Rispetto
+    alla PR #96 la superficie di questo rischio si allarga da un canale a tutti,
+    e resta accettata alle stesse condizioni: si dichiara e basta.
 
     SCAN e non KEYS: KEYS blocca il server per tutta la scansione del keyspace,
     e qui gira all'avvio, quando la coda ha gia' lavoro in attesa.
     """
+    from app.services.work_enqueue import ARQ_MAIN_QUEUE
+
     chiavi: list[str] = []
-    async for chiave in redis.scan_iter(match=ORPHAN_WA_SEND_PATTERN, count=100):
-        chiavi.append(chiave.decode() if isinstance(chiave, bytes) else chiave)
+    saltati: list[str] = []
+    async for chiave in redis.scan_iter(match=ORPHAN_SCAN_PATTERN, count=100):
+        chiave = chiave.decode() if isinstance(chiave, bytes) else chiave
+        job_id = chiave[len(IN_PROGRESS_PREFIX):]
+
+        if job_id.startswith(CRON_JOB_PREFIX):
+            saltati.append(job_id)
+            continue
+        if await redis.zscore(ARQ_MAIN_QUEUE, job_id) is None:
+            # Non e' in coda qui: o e' di un'altra coda, o e' una chiave che non
+            # blocca nessuno. In entrambi i casi cancellarla non sbloccherebbe
+            # nulla e potrebbe far ripartire il lavoro di un altro processo.
+            saltati.append(job_id)
+            continue
+        chiavi.append(chiave)
+
+    if saltati:
+        logger.info(f"[Startup] {len(saltati)} chiavi in-progress lasciate "
+                    f"intatte perche' fuori dalla coda principale: "
+                    f"{', '.join(saltati)}")
 
     if not chiavi:
         # Il caso NORMALE (avvio con Redis pulito). Serve uscire prima: redis-py
@@ -82,8 +134,8 @@ async def clear_orphan_wa_send_locks(redis) -> list[str]:
     await redis.delete(*chiavi)
     job_ids = [c[len(IN_PROGRESS_PREFIX):] for c in chiavi]
     logger.warning(
-        f"[Startup] WA: {len(job_ids)} chiavi in-progress orfane cancellate "
-        f"({', '.join(job_ids)}) -- i job di invio corrispondenti erano bloccati "
+        f"[Startup] {len(job_ids)} chiavi in-progress orfane cancellate "
+        f"({', '.join(job_ids)}) -- i job corrispondenti erano bloccati "
         "in coda e ripartiranno al prossimo poll"
     )
     return job_ids
