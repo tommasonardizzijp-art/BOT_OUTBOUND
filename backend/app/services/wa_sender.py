@@ -169,9 +169,28 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
 
     # 5. Coda inbound. None = CECITA' (nessuna bolla agganciata, o righe
     #    malformate): non e' silenzio, e non si invia. [] = silenzio vero.
+    #
+    #    ECCEZIONE (19/08, nata dal bypass gate cronologia sopra): il JS di
+    #    read_inbound_tail promette null anche per "zero bolle nel DOM", che
+    #    e' esattamente cosa succede su una chat CONFERMATA vuota da
+    #    load_history (punto 3, info.after == 0 dopo aver scrollato fino a
+    #    esaurimento). Prima di oggi non poteva mai succedere: la guardia V2
+    #    a monte garantiva sempre cronologia >= 1 prima di arrivare qui, quindi
+    #    un None era sempre e solo lettura rotta. Con contatti senza cronologia
+    #    ora ammessi, quello stesso None e' la norma per ogni chat davvero
+    #    vuota -- trattarlo come cecita' armava FM2 al primo giro su OGNI
+    #    contatto bypassato (misurato in produzione: 3 di fila, numero fermato
+    #    dopo un solo invio). Qui si distingue coi dati che load_history ha
+    #    gia' raccolto: after == 0 e' "confermato vuoto", non "letto male".
+    #    NON indebolisce la guardia STOP in nessun caso con messaggi veri:
+    #    se ne esistesse anche uno, load_history lo avrebbe gia' contato in
+    #    info.after, e si cadrebbe comunque nel ramo cecita' sotto.
     coda = await pom.read_inbound_tail(n=int(settings.wa_guard_tail_n))
     if coda is None:
-        return EsitoGuardia(False, "coda_non_agganciata")
+        if info.after == 0:
+            coda = []
+        else:
+            return EsitoGuardia(False, "coda_non_agganciata")
 
     for testo in coda:
         if wa_optout.looks_like_stop(testo):

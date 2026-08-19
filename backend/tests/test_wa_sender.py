@@ -155,6 +155,34 @@ async def test_guardia_blocca_su_cecita_del_dom():
 
 
 @pytest.mark.asyncio
+async def test_guardia_passa_su_chat_confermata_vuota_da_load_history():
+    """Bug reale del 19/08: primo giro col bypass gate cronologia, chat MAI
+    avuta prima. load_history scrolla, non trova nulla, after=0 (chat
+    confermata vuota). read_inbound_tail promette null anche per 'zero bolle',
+    identico al segnale di cecita' -- ma qui non e' lettura rotta, e'
+    esattamente cosa ci si aspetta da una chat vuota. Prima di questo fix
+    finiva in 'coda_non_agganciata', arma_fm2=True, bruciava 3 contatti e
+    fermava il numero al primo giro utile del bypass."""
+    pom = _PomFinto(None, count=0)
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is True
+    assert esito.motivo == "silenzio"
+
+
+@pytest.mark.asyncio
+async def test_guardia_blocca_su_cecita_vera_anche_con_storico_non_vuoto():
+    """Contro-prova del fix sopra: se load_history HA trovato messaggi
+    (after>0) e read_inbound_tail torna comunque None, resta cecita' vera --
+    non si trasforma mai in silenzio."""
+    pom = _PomFinto(None, count=5)
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "coda_non_agganciata"
+
+
+@pytest.mark.asyncio
 async def test_guardia_passa_su_silenzio_vero():
     """[] = bolle presenti, nessun inbound: questo si', si invia."""
     pom = _PomFinto([])
