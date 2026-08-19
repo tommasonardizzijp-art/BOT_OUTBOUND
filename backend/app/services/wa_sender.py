@@ -64,13 +64,19 @@ class EsitoApertura:
     colpa_nostra: bool           # True -> conta verso l'escalation FM2 del numero
 
 
-def valuta_apertura(res: OpenResult) -> EsitoApertura:
+def valuta_apertura(res: OpenResult, *, bypassa_gate_cronologia: bool = False) -> EsitoApertura:
     """Traduce (ok, signal) del POM nella decisione. Contratto sez. 3.1-3.2.
 
     Fail-closed su tutto cio' che non e' riconosciuto: un segnale nuovo
     (POM aggiornato, WhatsApp cambiato) non deve mai finire nel ramo che
     marca il contatto, perche' quello e' irreversibile per il contatto e
     invisibile a chi guarda i log.
+
+    `bypassa_gate_cronologia` (default False, decisione 19/08, vedi
+    config.wa_skip_history_gate_campaign_ids): quando True, un contatto senza
+    chat pregressa NON viene skippato -- si prova comunque l'invio. Non tocca
+    nessun altro ramo: la guardia STOP (guardia_pre_invio) gira comunque dopo
+    l'apertura e resta l'unica difesa contro un opt-out gia' scritto.
     """
     signal = res.signal or ""
 
@@ -86,6 +92,10 @@ def valuta_apertura(res: OpenResult) -> EsitoApertura:
         return EsitoApertura(False, None, "cronologia_vuota", True)
 
     if signal in _SEGNALI_CHAT_INESISTENTE:
+        if bypassa_gate_cronologia:
+            logger.info(f"valuta_apertura: {signal!r} senza cronologia, ma "
+                        "gate bypassato per questa campagna -- si prova comunque")
+            return EsitoApertura(True, None, f"no_existing_chat_bypass:{signal}", False)
         return EsitoApertura(False, "skipped", "no_existing_chat", False)
 
     if signal in _SEGNALI_COLPA_NOSTRA:
@@ -307,7 +317,10 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
     masked = mask_phone(e164)
 
     # --- apertura chat -----------------------------------------------------
-    apertura = valuta_apertura(await pom.open_chat(e164))
+    bypass_ids = {s.strip() for s in settings.wa_skip_history_gate_campaign_ids.split(",") if s.strip()}
+    bypassa_gate = str(campaign.id) in bypass_ids
+    apertura = valuta_apertura(await pom.open_chat(e164),
+                               bypassa_gate_cronologia=bypassa_gate)
     if not apertura.puo_inviare:
         logger.info(f"[WA] {masked}: apertura -> {apertura.motivo} "
                     f"(colpa_nostra={apertura.colpa_nostra})")

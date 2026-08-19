@@ -50,6 +50,23 @@ def test_chat_inesistente_e_colpa_del_contatto_non_nostra(signal, atteso):
 
 
 @pytest.mark.parametrize("signal", [
+    "nessuna-cronologia:sezione-chat-vuota:nessuna-conversazione-esistente",
+    "nessuna-cronologia:nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione",
+    "nessuna-cronologia:nessun-messaggio-nel-pannello",
+])
+def test_bypass_gate_cronologia_invia_comunque(signal):
+    """Deroga scoped per campagna (19/08): con bypassa_gate_cronologia=True
+    un 'no_existing_chat' diventa inviabile, non skipped. Il default resta
+    invariato per ogni altro chiamante (vedi test sopra, bypass non passato)."""
+    esito = wa_sender.valuta_apertura(OpenResult(False, 1.0, signal),
+                                      bypassa_gate_cronologia=True)
+    assert esito.puo_inviare is True
+    assert esito.esito_contatto is None
+    assert esito.motivo == f"no_existing_chat_bypass:{signal}"
+    assert esito.colpa_nostra is False
+
+
+@pytest.mark.parametrize("signal", [
     "nessuna-cronologia:casella-ricerca-non-trovata",
     "nessuna-cronologia:ricerca-non-svuotata",
     "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio",
