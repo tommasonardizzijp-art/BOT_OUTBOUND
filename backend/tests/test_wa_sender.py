@@ -502,6 +502,50 @@ async def test_invio_riuscito_scrive_messaggio_stato_e_contatori(db_session, mon
 
 
 @pytest.mark.asyncio
+async def test_toctou_su_chat_confermata_vuota_non_blocca_il_secondo_giro(db_session, monkeypatch):
+    """Bug reale in produzione (19/08), SECONDO punto con lo stesso difetto
+    del fix di guardia_pre_invio: la rilettura TOCTOU subito prima
+    dell'invio chiama di nuovo read_inbound_tail, che promette null anche
+    per 'zero bolle' -- su una chat che guardia_pre_invio ha GIA' confermato
+    vuota (load_history, after=0), quel secondo null e' ancora silenzio, non
+    una cecita' nuova. Prima di questo fix: 'queued'/'cecita_toctou',
+    arma_fm2=True di default -- misurato, 3 contatti bypassati di fila
+    fermavano il numero anche DOPO il primo fix (wa_messages.error=
+    'coda_non_agganciata_seconda_lettura' su tre righe consecutive)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    pom = _PomInvio(None, count=0, tail_seconda_lettura=None)
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert esito.stato == "sent"
+    assert pom.inviato is not None
+
+
+@pytest.mark.asyncio
+async def test_toctou_su_cecita_vera_dopo_storico_pieno_blocca_ancora(db_session, monkeypatch):
+    """Contro-prova: se la guardia aveva visto una chat CON messaggi
+    (chat_confermata_vuota=False) e la rilettura TOCTOU torna None, resta
+    cecita' vera e blocca come prima -- il fix sopra non si applica a un
+    DOM che ha davvero smesso di rispondere a meta' invio."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    pom = _PomInvio([], count=30, tail_seconda_lettura=None)
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert esito.stato == "queued"
+    assert esito.motivo == "cecita_toctou"
+    assert pom.inviato is None
+
+
+@pytest.mark.asyncio
 async def test_il_numero_in_chiaro_non_finisce_mai_nei_log(db_session, monkeypatch, caplog):
     from app.config import settings
     monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)

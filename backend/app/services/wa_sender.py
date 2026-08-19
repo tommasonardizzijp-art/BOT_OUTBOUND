@@ -115,6 +115,13 @@ class EsitoGuardia:
     puo_inviare: bool
     motivo: str
     prova: str | None = None      # il testo dell'inbound che ha bloccato
+    # True se load_history (punto 3) ha confermato zero messaggi in questa
+    # chat, scrollando fino a esaurimento. Serve al chiamante (invia_a_
+    # contatto) per la RILETTURA TOCTOU subito prima dell'invio: quella
+    # rilettura interpella di nuovo read_inbound_tail, che promette null
+    # anche per "zero bolle nel DOM" -- sulla stessa chat confermata vuota
+    # qui, quel null e' ancora silenzio vero, non cecita' nuova (19/08).
+    chat_confermata_vuota: bool = False
 
 
 async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
@@ -246,7 +253,7 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
     if coda and gia_scritto_prima:
         return EsitoGuardia(False, "ha_risposto", prova=coda[-1][:300])
 
-    return EsitoGuardia(True, "silenzio")
+    return EsitoGuardia(True, "silenzio", chat_confermata_vuota=(info.after == 0))
 
 
 def prepara_testo(step, contact, campaign) -> tuple[str, str]:
@@ -435,12 +442,26 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
     # --- RILETTURA TOCTOU: fra guardia e invio passano ~20s misurati -------
     # Non si ricarica la cronologia (gia' fatta dalla guardia): costa poco ed
     # e' l'unica difesa contro uno STOP arrivato nel frattempo.
+    #
+    # Stessa eccezione del punto 5 della guardia (19/08, bug reale in
+    # produzione: 3 contatti bypassati di fila su chat vuote sono bastati a
+    # fermare il numero anche DOPO il fix di guardia_pre_invio, perche'
+    # questa e' una SECONDA chiamata indipendente a read_inbound_tail e
+    # aveva lo stesso 'None per zero bolle = cecita'' non corretto). Se
+    # guardia_pre_invio ha gia' confermato la chat vuota (dati di
+    # load_history, non un'assunzione nuova), un None qui e' ancora
+    # silenzio vero -- non e' cambiato nulla nel frattempo che potremmo
+    # vedere comunque, dato che una chat senza bolle non ha un posto dove
+    # nascondere uno STOP.
     coda2 = await pom.read_inbound_tail(n=int(settings.wa_guard_tail_n))
     if coda2 is None:
-        msg.status = WaMessageStatus.skipped
-        msg.error = "coda_non_agganciata_seconda_lettura"
-        await db.commit()
-        return EsitoInvio("queued", "cecita_toctou")
+        if guardia.chat_confermata_vuota:
+            coda2 = []
+        else:
+            msg.status = WaMessageStatus.skipped
+            msg.error = "coda_non_agganciata_seconda_lettura"
+            await db.commit()
+            return EsitoInvio("queued", "cecita_toctou")
     for testo_in in coda2:
         if wa_optout.looks_like_stop(testo_in):
             msg.status = WaMessageStatus.skipped
