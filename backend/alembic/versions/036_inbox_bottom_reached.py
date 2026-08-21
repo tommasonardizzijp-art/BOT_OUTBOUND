@@ -35,7 +35,14 @@ def upgrade() -> None:
             server_default=sa.false(),
         ),
     )
+    # Frontiera della discesa, separata da `scrape_cursor` di proposito:
+    # scrape_cursor significa "Fase Lista interrotta a meta'" e campaign_control lo
+    # legge cosi' per decidere se riprendere la lista o passare alla Fase Bio. La
+    # frontiera invece deve sopravvivere alla FINE di un giro, senza per questo
+    # tenere la campagna eternamente "in lista".
+    op.add_column("campaigns", sa.Column("inbox_deep_cursor", sa.String(255), nullable=True))
 
 
 def downgrade() -> None:
+    op.drop_column("campaigns", "inbox_deep_cursor")
     op.drop_column("campaigns", "inbox_bottom_reached")

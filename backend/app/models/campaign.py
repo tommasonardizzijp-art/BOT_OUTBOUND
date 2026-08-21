@@ -199,6 +199,11 @@ class Campaign(Base):
     inbox_bottom_reached: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # Frontiera della discesa API (oldest_cursor dell'ultima pagina letta). Separata
+    # da `scrape_cursor`, che significa "Fase Lista interrotta a meta'": quella deve
+    # tornare a NULL a fine giro (altrimenti la ripresa non passa mai alla Fase Bio),
+    # questa no. Migration 036.
+    inbox_deep_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # 'completed' | 'partial' | 'rate_limited' — esito ultimo scraping
     scrape_outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)
     scrape_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

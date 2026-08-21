@@ -332,6 +332,7 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
             )
         if engine_switch_resets_cursor(campaign.inbox_engine, data.inbox_engine):
             campaign.scrape_cursor = None  # cursore vecchio non valido per il nuovo engine
+            campaign.inbox_deep_cursor = None
         campaign.inbox_engine = data.inbox_engine
     if data.bio_engine is not None:
         if campaign.status not in (
@@ -883,6 +884,13 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     campaign.auto_generate = False
     campaign.scrape_break_until = None
     campaign.scrape_break_prev_status = None
+    # Stato della Fase Lista inbox API: si riparte dalla cima e si riscende. Senza
+    # questo, una campagna che ha (anche per sbaglio) dichiarato il fondo resterebbe
+    # per sempre in modalita' cima, e il reset non avrebbe modo di rimetterla in
+    # discesa: e' l'unica via d'uscita da un interruttore altrimenti permanente.
+    campaign.inbox_bottom_reached = False
+    campaign.inbox_deep_cursor = None
+    campaign.scrape_cursor = None
     campaign.updated_at = datetime.utcnow()
 
     # BUG-NEW-05: delete old messages so the campaign starts clean

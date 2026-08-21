@@ -29,7 +29,7 @@ def test_username_con_targa_provvisoria_viene_promosso_non_inserito():
         targa_per_username=_targhe([("mario_shop", -8347)]),
     )
     assert esito.nuovi == []
-    assert esito.promozioni == [(555, "mario_shop")]
+    assert esito.promozioni == [(555, "mario_shop", "mario_shop")]
 
 
 def test_username_con_targa_reale_diversa_e_una_persona_diversa():
@@ -53,7 +53,7 @@ def test_confronto_sullo_username_normalizzato():
         existing_ids=set(),
         targa_per_username=_targhe([("mario_shop", -8347)]),
     )
-    assert esito.promozioni == [(555, "mario_shop")]
+    assert esito.promozioni == [(555, "mario_shop", "Mario_Shop")]
     assert esito.nuovi == []
 
 
@@ -65,7 +65,7 @@ def test_stesso_username_due_volte_nella_pagina_promuove_una_volta_sola():
         existing_ids=set(),
         targa_per_username=_targhe([("mario_shop", -8347)]),
     )
-    assert esito.promozioni == [(555, "mario_shop")]
+    assert esito.promozioni == [(555, "mario_shop", "mario_shop")]
     assert esito.nuovi == [(556, "mario_shop")]
 
 
@@ -189,13 +189,51 @@ def test_una_promozione_non_gonfia_il_contatore(monkeypatch):
 
 
 def test_il_fondo_raggiunto_alza_il_flag_e_azzera_il_cursore(monkeypatch):
-    pages = [InboxPage(participants=[(7, "sette")], cursor=None, exhausted=True)]
+    """Il fondo lo dichiara solo has_older=False (bottom_confirmed)."""
+    pages = [InboxPage(participants=[(7, "sette")], cursor=None, exhausted=True,
+                       bottom_confirmed=True)]
     session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, pages)
     try:
         _run_inbox_list(session_factory, campaign_id)
         _, campaign = _leggi_follower(session_factory, campaign_id)
         assert campaign.inbox_bottom_reached is True
+        assert campaign.inbox_deep_cursor is None
         assert campaign.scrape_cursor is None
+    finally:
+        cleanup()
+
+
+def test_una_pagina_senza_cursore_non_dichiara_finito_l_inbox(monkeypatch):
+    """`exhausted` scatta anche solo perche' manca oldest_cursor (payload troncato,
+    blip). Bastava quello per alzare un interruttore PERMANENTE: da li' in poi la
+    campagna non sarebbe piu' scesa e il fondo — la ragione per cui si usa l'API —
+    sarebbe irraggiungibile. Il giro si ferma, il flag non si alza."""
+    pages = [InboxPage(participants=[(7, "sette")], cursor=None, exhausted=True,
+                       bottom_confirmed=False)]
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, pages)
+    try:
+        _run_inbox_list(session_factory, campaign_id)
+        _, campaign = _leggi_follower(session_factory, campaign_id)
+        assert campaign.inbox_bottom_reached is False
+        assert campaign.status == CampaignStatus.ready
+    finally:
+        cleanup()
+
+
+def test_a_giro_chiuso_scrape_cursor_torna_vuoto(monkeypatch):
+    """campaign_control legge scrape_cursor come "Fase Lista interrotta a meta'":
+    lasciandolo valorizzato, una ripresa tornerebbe SEMPRE in lista e la Fase Bio
+    non partirebbe mai. La frontiera della discesa vive in inbox_deep_cursor."""
+    pages = [
+        InboxPage(participants=[(1, "uno")], cursor="c1", exhausted=False),
+        InboxPage(participants=[], cursor=None, exhausted=True, bottom_confirmed=False),
+    ]
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, pages)
+    try:
+        _run_inbox_list(session_factory, campaign_id)
+        _, campaign = _leggi_follower(session_factory, campaign_id)
+        assert campaign.scrape_cursor is None, "il giro e' chiuso: niente lista a meta'"
+        assert campaign.inbox_deep_cursor == "c1", "la frontiera deve sopravvivere"
     finally:
         cleanup()
 
@@ -228,7 +266,8 @@ def test_in_discesa_le_pagine_di_soli_gia_noti_non_fermano_il_giro(monkeypatch):
     def page_fn(n):
         if n <= settings.inbox_empty_page_stop + 2:
             return InboxPage(participants=noti, cursor=f"c{n}", exhausted=False)
-        return InboxPage(participants=[(999, "finalmente_nuovo")], cursor=None, exhausted=True)
+        return InboxPage(participants=[(999, "finalmente_nuovo")], cursor=None,
+                         exhausted=True, bottom_confirmed=True)
 
     session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
     try:
@@ -293,5 +332,35 @@ def test_promuove_anche_la_riga_salvata_con_la_chiocciola(monkeypatch):
         assert len(righe) == 1, f"attesa 1 riga, trovate {[(r.username, r.ig_user_id) for r in righe]}"
         assert righe[0].ig_user_id == 555
         assert campaign.total_followers == 1
+    finally:
+        cleanup()
+
+
+def test_due_pk_sullo_stesso_username_non_fanno_tre_righe(monkeypatch):
+    """Stessa pagina, stesso username, due pk diversi: uno e' la persona gia' in
+    lista (promozione), l'altro e' un'altra persona (inserimento). Devono restare
+    DUE righe.
+
+    Se gli inserimenti girassero prima delle promozioni, l'inserimento toglierebbe
+    di mezzo la riga da promuovere e si finirebbe con tre righe per due persone:
+    la provvisoria mai promossa piu' le due reali — cioe' il doppione che questo
+    codice esiste per chiudere."""
+    pages = [
+        InboxPage(participants=[(555, "mario_shop"), (556, "mario_shop")],
+                  cursor="c1", exhausted=False),
+        InboxPage(participants=[], cursor=None, exhausted=True, bottom_confirmed=True),
+    ]
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, pages)
+    try:
+        _semina_follower(
+            session_factory, campaign_id,
+            ig_user_id=-8347, username="mario_shop", full_name="Mario",
+            status=FollowerStatus.pending, source_channel="browser",
+        )
+        _run_inbox_list(session_factory, campaign_id)
+        righe, campaign = _leggi_follower(session_factory, campaign_id)
+        targhe = sorted(r.ig_user_id for r in righe)
+        assert targhe == [555, 556], f"attese due righe reali, trovate {targhe}"
+        assert campaign.total_followers == 2
     finally:
         cleanup()

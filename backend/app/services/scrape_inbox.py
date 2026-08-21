@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 
 from loguru import logger
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.models.campaign import CampaignStatus
@@ -45,9 +46,12 @@ def inbox_collect(participants, existing_ids) -> list[tuple[int, str]]:
 class EsitoPagina:
     """Come si smista una pagina di partecipanti contro quello che c'e' gia' in DB."""
     nuovi: list[tuple[int, str]] = field(default_factory=list)
-    # (pk_vero, username_normalizzato): righe gia' in DB con targa provvisoria, a cui
-    # l'API puo' finalmente scrivere la targa vera.
-    promozioni: list[tuple[int, str]] = field(default_factory=list)
+    # (pk_vero, username_normalizzato, username_grezzo): righe gia' in DB con targa
+    # provvisoria, a cui l'API puo' finalmente scrivere la targa vera. Lo username
+    # grezzo serve al chiamante se la promozione va a vuoto e deve ripiegare
+    # sull'inserimento: si salva quello che ha detto Instagram, non la sua
+    # normalizzazione (e' cosi' che nascono le coppie "@mario"/"mario").
+    promozioni: list[tuple[int, str, str]] = field(default_factory=list)
     gia_presenti: int = 0
     # username gia' in DB con una targa REALE diversa: username riassegnato dopo un
     # rename, quindi due persone diverse. Si inserisce e si segnala.
@@ -91,11 +95,56 @@ def classifica_pagina(participants, existing_ids, targa_per_username) -> EsitoPa
             esito.nuovi.append((pk, username))
         elif targa < 0:
             promossi_in_pagina.add(u)
-            esito.promozioni.append((pk, u))
+            esito.promozioni.append((pk, u, username))
         else:
             esito.collisioni_username.append(u)
             esito.nuovi.append((pk, username))
     return esito
+
+
+def _avvisa_telegram(testo: str) -> None:
+    """Alert operativo. utils/events.emit manda a Telegram solo scrape_stopped di
+    livello error, quindi un avviso che non ferma la campagna resterebbe nel feed
+    della UI e nessuno lo vedrebbe: una campagna piantata sembrerebbe completata."""
+    try:
+        from app.services import notifier
+        asyncio.create_task(notifier.send_telegram(f"[BOT OUTBOUND] {testo}", level="warn"))
+    except Exception as exc:      # noqa: BLE001 — un alert non deve rompere il giro
+        logger.debug(f"[InboxLista] telegram non inviato: {exc}")
+
+
+async def _stato_campagna(db, campaign_id: str):
+    """Fotografia delle righe della campagna: (quante, targhe, targa_per_username,
+    id_per_username).
+
+    Si rilegge a OGNI pagina, non una volta per sessione: una sessione dura fino a
+    quindici pagine con pause fra l'una e l'altra, e in quei minuti il canale
+    browser (che lavora la stessa campagna) puo' aver creato altre righe a targa
+    provvisoria. Con una fotografia vecchia quelle righe sono invisibili e l'API le
+    reinserisce — cioe' esattamente il doppione che questo codice deve impedire.
+
+    Si tiene anche l'id della riga: la promozione deve colpire QUELLA riga, non
+    ripescarla per username (in DB uno username puo' stare con la chiocciola o in
+    maiuscolo: una WHERE sullo username grezzo non lo troverebbe, la promozione
+    andrebbe a vuoto e il contatto — classificato come promozione, quindi mai
+    inserito — sparirebbe in silenzio).
+    """
+    targa_per_username: dict[str, int] = {}
+    id_per_username: dict[str, str] = {}
+    existing_ids: set[int] = set()
+    righe = (await db.execute(
+        select(Follower.id, Follower.username, Follower.ig_user_id).where(
+            Follower.campaign_id == campaign_id
+        )
+    )).all()
+    for rid, uname, targa in righe:
+        existing_ids.add(targa)
+        u = normalizza_username(uname) if isinstance(uname, str) else ""
+        if not u:
+            continue
+        targa_per_username[u] = targa
+        id_per_username[u] = rid
+    return len(righe), existing_ids, targa_per_username, id_per_username
 
 
 def _sample_page_delay(lo: float, hi: float, sigma: float = 0.9) -> float:
@@ -212,12 +261,16 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
         #  - CIMA (bottom_reached True): il fondo e' gia' stato toccato, quindi ogni
         #    giro riparte dalla cima solo per intercettare i DM nuovi e si ferma
         #    appena vede inbox_empty_page_stop pagine consecutive senza nuovi.
-        modo_cima = bool(getattr(campaign, "inbox_bottom_reached", False))
-        if modo_cima and campaign.scrape_cursor:
-            # Il cursore profondo non serve piu' e non deve far credere a
-            # campaign_control che ci sia una lista interrotta a meta'.
-            campaign.scrape_cursor = None
-            await db.commit()
+        modo_cima = campaign.inbox_bottom_reached
+        # Da dove riparte la sorgente: in discesa dalla frontiera salvata, in cima
+        # sempre dall'alto. `scrape_cursor` non serve piu' a questo (significa
+        # "Fase Lista interrotta a meta'" e lo legge campaign_control), ma le
+        # campagne partite prima della 036 hanno li' l'unica frontiera che esiste:
+        # si travasa una volta e non se ne parla piu'.
+        if not modo_cima and not campaign.inbox_deep_cursor and campaign.scrape_cursor:
+            campaign.inbox_deep_cursor = campaign.scrape_cursor
+        campaign.scrape_cursor = campaign.inbox_deep_cursor if not modo_cima else None
+        await db.commit()
 
         source, own_pk, account, cleanup = await build_inbox_source(db, campaign)
         emit_event(
@@ -226,38 +279,18 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             else "Fase Lista inbox avviata (API, discesa verso i thread piu' vecchi)",
         )
 
-        already = await db.scalar(
-            select(func.count(Follower.id)).where(Follower.campaign_id == campaign_id)
-        ) or 0
-        existing_ids = set((await db.execute(
-            select(Follower.ig_user_id).where(Follower.campaign_id == campaign_id)
-        )).scalars().all())
-        # Seconda rete, sullo USERNAME: i contatti presi dal canale browser hanno una
-        # targa provvisoria negativa, invisibile alla rete sul pk. Vedi classifica_pagina.
-        # Si tiene anche l'id della riga: la promozione deve colpire QUELLA riga, non
-        # ripescarla per username (in DB alcuni username sono salvati con la chiocciola
-        # o in maiuscolo, e una WHERE sullo username grezzo non li troverebbe — la
-        # promozione andrebbe a vuoto e il contatto sparirebbe in silenzio, perche'
-        # classificato come promozione non viene nemmeno inserito).
-        targa_per_username: dict[str, int] = {}
-        id_per_username: dict[str, str] = {}
-        for rid, uname, targa in (await db.execute(
-            select(Follower.id, Follower.username, Follower.ig_user_id).where(
-                Follower.campaign_id == campaign_id
-            )
-        )).all():
-            u = normalizza_username(uname) if isinstance(uname, str) else ""
-            if not u:
-                continue
-            targa_per_username[u] = targa
-            id_per_username[u] = rid
+        already, existing_ids, targa_per_username, id_per_username = await _stato_campagna(
+            db, campaign_id
+        )
         since_break = 0
         pagine_da_pausa = 0   # pagine lette dall'ultima pausa: e' il budget di sessione
-        empty_streak = 0   # pagine consecutive con 0 contatti nuovi -> inbox drenato
+        empty_streak = 0   # pagine consecutive senza contatti nuovi (drain-stop, modo cima)
+        vuote_streak = 0   # pagine consecutive senza NESSUN partecipante (fine discesa)
         nuovi_tot = 0
         promossi_tot = 0
-        cursore_precedente = campaign.scrape_cursor
+        cursore_precedente = campaign.inbox_deep_cursor
         drained = False
+        fine_discesa = False
 
         while True:
             if await is_halted(db):
@@ -272,8 +305,59 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
 
             page = await source.next_page()
             pagine_da_pausa += 1
+            # Fotografia fresca a ogni pagina: vedi _stato_campagna.
+            already, existing_ids, targa_per_username, id_per_username = await _stato_campagna(
+                db, campaign_id
+            )
             esito = classifica_pagina(page.participants, existing_ids, targa_per_username)
-            for pk, username in esito.nuovi:
+
+            # PRIMA le promozioni, POI gli inserimenti. L'ordine conta: se nella
+            # stessa pagina lo stesso username arriva con due pk diversi, uno finisce
+            # in promozioni e l'altro in nuovi; inserendo per primo si toglierebbe di
+            # mezzo la riga da promuovere e si finirebbe con TRE righe per una persona
+            # sola, cioe' il doppione che questo codice deve chiudere.
+            recuperi: list[tuple[int, str]] = []   # promozioni a vuoto: si inseriscono
+            promossi = 0
+            for pk, u, username_grezzo in esito.promozioni:
+                rid = id_per_username.get(u)
+                if pk in existing_ids:
+                    # Quel pk sta gia' su un'altra riga della campagna (l'ha scritto
+                    # la Fase Bio browser, che promuove le stesse targhe). Scriverlo
+                    # qui violerebbe UNIQUE(campaign_id, ig_user_id) e l'IntegrityError
+                    # porterebbe la campagna in 'error', che non e' uno stato
+                    # riprendibile. Stessa scelta di browser_bio.py:578: niente
+                    # fusione indovinata, si segnala e si va avanti.
+                    logger.warning(
+                        f"[InboxLista] @{u}: il pk {pk} e' gia' su un'altra riga "
+                        "della campagna — non promuovo, non inserisco."
+                    )
+                    continue
+                if rid is None:
+                    recuperi.append((pk, username_grezzo))
+                    continue
+                res = await db.execute(
+                    update(Follower)
+                    .where(Follower.id == rid, Follower.ig_user_id < 0)
+                    .values(ig_user_id=pk, updated_at=datetime.utcnow())
+                )
+                if res.rowcount == 0:
+                    # La riga non c'e' piu' o non e' piu' provvisoria (promossa nel
+                    # frattempo dalla Fase Bio, o cancellata). L'UPDATE non solleva
+                    # niente: senza questo ramo il contatto risulterebbe promosso e
+                    # il pk non finirebbe da nessuna parte.
+                    logger.warning(
+                        f"[InboxLista] @{u}: la riga da promuovere non e' piu' "
+                        "provvisoria — inserisco il contatto invece di perderlo."
+                    )
+                    recuperi.append((pk, username_grezzo))
+                    continue
+                promossi += 1
+                existing_ids.add(pk)
+                targa_per_username[u] = pk
+                logger.info(f"[InboxLista] @{u}: targa provvisoria promossa a pk reale {pk}")
+
+            da_inserire = list(esito.nuovi) + recuperi
+            for pk, username in da_inserire:
                 db.add(Follower(
                     campaign_id=campaign_id,
                     ig_user_id=pk,
@@ -288,54 +372,55 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 u = normalizza_username(username) if isinstance(username, str) else ""
                 if u:
                     targa_per_username[u] = pk
-                    id_per_username.pop(u, None)   # la riga nuova non ha ancora un id qui
-            recuperi = 0    # promozioni finite a vuoto e salvate come riga nuova
-            for pk, u in esito.promozioni:
-                # UPDATE mirato sulla riga a targa provvisoria: e' la stessa persona,
-                # presa dal browser senza pk. Non si tocca nient'altro della riga
-                # (full_name, last_message_*, stato: sono dati che l'API non ha).
-                # La guardia `ig_user_id < 0` regge la corsa con un altro worker che
-                # avesse gia' promosso la stessa riga: la seconda UPDATE non passa.
-                rid = id_per_username.get(u)
-                if rid is None:
-                    # Non dovrebbe succedere (la promozione nasce da questa mappa), ma
-                    # se succedesse si perderebbe il contatto: meglio inserirlo.
-                    logger.warning(f"[InboxLista] @{u}: riga da promuovere sparita — inserisco")
-                    db.add(Follower(
-                        campaign_id=campaign_id, ig_user_id=pk, username=u,
-                        full_name=None, is_private=False, is_verified=False,
-                        profile_pic_url=None, status=FollowerStatus.pending,
-                    ))
-                    recuperi += 1
-                else:
-                    await db.execute(
-                        update(Follower)
-                        .where(Follower.id == rid, Follower.ig_user_id < 0)
-                        .values(ig_user_id=pk, updated_at=datetime.utcnow())
-                    )
-                    logger.info(f"[InboxLista] @{u}: targa provvisoria promossa a pk reale {pk}")
-                existing_ids.add(pk)
-                targa_per_username[u] = pk
             for u in esito.collisioni_username:
                 logger.warning(
                     f"[InboxLista] @{u} esiste gia' con una targa REALE diversa: "
                     "username riassegnato dopo un rename, la nuova riga e' un'altra persona."
                 )
-            stored = len(esito.nuovi) + recuperi
-            promossi = len(esito.promozioni) - recuperi
+            stored = len(da_inserire)
             nuovi_tot += stored
             promossi_tot += promossi
             already += stored
             since_break += stored
-            empty_streak = 0 if stored else empty_streak + 1
-            # cursore intra-engine: si salva SOLO in discesa. In modalita' cima e'
-            # una passata corta che riparte sempre dall'alto, e un cursore salvato
-            # li' farebbe credere a campaign_control che la lista sia a meta'.
-            if not modo_cima:
+            # Il drain-stop guarda al LAVORO fatto, non ai soli inserimenti: otto
+            # pagine di sole promozioni sono il primo giro dopo questo fix, non un
+            # inbox drenato.
+            empty_streak = 0 if (stored or promossi) else empty_streak + 1
+            vuote_streak = 0 if page.participants else vuote_streak + 1
+            # In discesa la frontiera va nel suo campo; `scrape_cursor` serve a
+            # campaign_control per sapere che il giro e' a meta', e viene azzerato
+            # quando il giro chiude (vedi in fondo).
+            if not modo_cima and page.cursor:
+                # Solo un cursore VERO fa avanzare la frontiera: una risposta senza
+                # oldest_cursor (payload troncato, blip) la azzererebbe, e il giro
+                # dopo ripartirebbe dalla cima ri-attraversando tutto l'inbox.
+                campaign.inbox_deep_cursor = page.cursor
                 campaign.scrape_cursor = page.cursor
             campaign.total_followers = already
             campaign.updated_at = datetime.utcnow()
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError as exc:
+                # UNIQUE(campaign_id, ig_user_id): un altro motore della stessa
+                # campagna (Fase Bio browser, inbox browser) ha preso quel pk fra la
+                # rilettura e il commit. Senza questo except l'eccezione salirebbe
+                # all'handler generico e porterebbe la campagna in 'error', che NON e'
+                # uno stato riprendibile: si perderebbe il giro per una collisione che
+                # la pagina dopo si risolve da sola rileggendo lo stato.
+                await db.rollback()
+                logger.warning(f"[InboxLista] pagina scartata per collisione di targa: {exc}")
+                emit_event(
+                    campaign_id, "scrape_warning",
+                    "Una pagina inbox e' stata scartata: un altro motore stava scrivendo "
+                    "gli stessi contatti. Il giro prosegue.",
+                    level="warn",
+                )
+                await _inbox_page_delay()
+                continue
+            logger.info(
+                f"[InboxLista] pagina: {len(page.participants)} thread, {stored} nuovi, "
+                f"{promossi} promossi, {esito.gia_presenti} gia' in lista (totale {already})"
+            )
             if stored or promossi:
                 emit_event(
                     campaign_id, "scrape_batch",
@@ -343,12 +428,19 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                     + (f" (+{promossi} gia' presi dal browser, ora con pk reale)" if promossi else ""),
                 )
 
-            if page.exhausted:
+            if page.bottom_confirmed:
+                # Il fondo VERO: IG ha detto has_older=False. Solo qui si alza
+                # l'interruttore permanente.
                 logger.info(f"[InboxLista] Fondo dell'inbox raggiunto ({already})")
-                campaign.scrape_cursor = None
                 campaign.inbox_bottom_reached = True
+                campaign.inbox_deep_cursor = None
                 campaign.updated_at = datetime.utcnow()
                 await db.commit()
+                break
+            if page.exhausted:
+                # Pagina finale senza fondo dichiarato (manca il cursore): ci si
+                # ferma, ma NON si dichiara finito l'inbox.
+                logger.info(f"[InboxLista] Nessun cursore per proseguire — mi fermo ({already})")
                 break
 
             # Cursore che non avanza: IG risponde ma la finestra non si sposta.
@@ -360,28 +452,36 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                     "Fase Lista inbox interrotta: il cursore di Instagram non avanza piu'.",
                     level="warn",
                 )
+                _avvisa_telegram(
+                    f"Fase Lista inbox ferma: il cursore di Instagram non avanza piu' "
+                    f"({already} contatti in lista). La discesa non prosegue da sola."
+                )
                 break
             cursore_precedente = page.cursor
 
-            # Drenaggio: N pagine consecutive con 0 contatti NUOVI = oltre questo
-            # punto l'inbox e' tutta gente gia' in lista. IG puo' tenere has_older
-            # sempre True, quindi 'exhausted' da solo non basta e la lista girerebbe
-            # a vuoto per sempre in silenzio (il bug segnalato). Ci si ferma e si
-            # AVVISA. Cursore azzerato: il prossimo giro riparte dal top e intercetta
-            # eventuali DM nuovi arrivati nel frattempo.
-            #
-            # SOLO in modalita' cima. In discesa una pagina senza nuovi e' la norma
-            # (sono thread gia' raccolti dal browser, o gia' presi in un giro
-            # precedente): fermarsi li' lascerebbe per sempre irraggiunto il fondo.
-            # In discesa il giro e' limitato dal budget pagine qui sotto.
-            if modo_cima and empty_streak >= settings.inbox_empty_page_stop:
+            # Fine della discesa: N pagine consecutive SENZA NESSUN partecipante.
+            # E' il tetto che garantisce la terminazione: has_older puo' restare True
+            # per sempre (IG lo fa), e il budget pagine qui sotto limita il ritmo di
+            # una sessione, non il numero di sessioni. Il segnale e' "pagine vuote",
+            # non "pagine senza contatti nuovi": in discesa attraversare gente gia'
+            # raccolta e' normale e non deve fermare niente.
+            if vuote_streak >= settings.inbox_empty_page_stop:
                 logger.info(
-                    f"[InboxLista] {empty_streak} pagine consecutive senza nuovi "
-                    f"— inbox gia' tutto raccolto ({already})"
+                    f"[InboxLista] {vuote_streak} pagine consecutive vuote — "
+                    f"discesa finita ({already})"
                 )
-                campaign.scrape_cursor = None
+                campaign.inbox_deep_cursor = None
+                campaign.inbox_bottom_reached = True
                 campaign.updated_at = datetime.utcnow()
                 await db.commit()
+                fine_discesa = True
+                break
+
+            if modo_cima and empty_streak >= settings.inbox_empty_page_stop:
+                logger.info(
+                    f"[InboxLista] {empty_streak} pagine consecutive senza lavoro "
+                    f"— inbox gia' tutto raccolto ({already})"
+                )
                 drained = True
                 break
 
@@ -414,6 +514,12 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
         ) or 0
         campaign.total_followers = already
         campaign.status = CampaignStatus.ready
+        # Il giro e' chiuso: `scrape_cursor` deve tornare a NULL. campaign_control lo
+        # legge come "Fase Lista interrotta a meta'" e con quel campo valorizzato una
+        # ripresa tornerebbe SEMPRE in lista, senza passare mai alla Fase Bio. La
+        # frontiera della discesa resta in inbox_deep_cursor, che serve proprio a
+        # sopravvivere alla fine del giro.
+        campaign.scrape_cursor = None
         campaign.updated_at = datetime.utcnow()
         await db.commit()
         coda = (
@@ -422,9 +528,17 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
         if drained:
             emit_event(
                 campaign_id, "scrape_complete",
-                f"Inbox gia' tutto raccolto: 0 nuovi contatti (rilette {empty_streak} pagine di duplicati). "
-                f"{already} in lista — per averne altri servono nuovi DM in entrata o una campagna scrape follower.",
+                f"Inbox gia' tutto raccolto: 0 contatti nuovi{coda} "
+                f"(rilette {empty_streak} pagine di duplicati). {already} in lista — per averne "
+                "altri servono nuovi DM in entrata o una campagna scrape follower.",
                 level="warn",
+            )
+        elif fine_discesa:
+            emit_event(
+                campaign_id, "scrape_complete",
+                f"Discesa finita: {settings.inbox_empty_page_stop} pagine vuote di fila. "
+                f"{nuovi_tot} contatti nuovi{coda} — {already} in lista. I prossimi giri "
+                "leggeranno solo la cima dell'inbox (DM nuovi).",
             )
         else:
             emit_event(

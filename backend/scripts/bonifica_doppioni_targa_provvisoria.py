@@ -19,13 +19,13 @@ GUARDIE (una coppia che non le rispetta tutte viene SALTATA e riportata, mai
   - esattamente 2 righe per username nella campagna;
   - una con targa provvisoria (<0) e una con targa reale (>0);
   - la riga API da cancellare deve essere davvero una scheda vuota: stato
-    `pending`, nessun messaggio collegato, nessun lock, nessun dato di
-    arricchimento (biography/phone/email/whatsapp/bio_links/contact_source).
+    `pending`, nessun messaggio collegato, nessun lock, nessuno dei campi in
+    CAMPI_ARRICCHIMENTO (dati di bio/contatto E i campi del canale browser).
 
-Uso (dal folder backend):
-    ./venv/Scripts/python.exe scripts/bonifica_doppioni_targa_provvisoria.py            # DRY-RUN
-    ./venv/Scripts/python.exe scripts/bonifica_doppioni_targa_provvisoria.py --apply
-    ... [--campaign <campaign_id>]   per limitarsi a una campagna
+Uso (dal folder backend), sempre con --campaign salvo eccezioni dichiarate:
+    ./venv/Scripts/python.exe scripts/bonifica_doppioni_targa_provvisoria.py --campaign <id>
+    ./venv/Scripts/python.exe scripts/bonifica_doppioni_targa_provvisoria.py --campaign <id> --apply
+Stampa in testa il database su cui sta lavorando: leggilo prima di dare --apply.
 
 Senza `--apply` non scrive niente. Con `--apply` scrive PRIMA un backup JSON di
 tutte le righe coinvolte (opzione --backup per il percorso, default
@@ -36,6 +36,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -49,10 +50,24 @@ from app.models.follower import Follower, FollowerStatus
 from app.models.message import Message
 from app.services.inbox_browser.targa import e_provvisoria, normalizza_username
 
+# Campi la cui presenza dice "questa riga ha una storia": se la gemella con targa
+# reale ne ha anche uno solo, non e' la scheda vuota appena creata dall'API e non si
+# cancella. Include i campi del canale browser (full_name, last_message_*,
+# source_channel): sono esattamente quelli per cui la riga browser vince la fusione,
+# quindi trovarli sulla riga da cancellare significa che le due righe non sono
+# quello che questo script crede, e la coppia va guardata a mano.
 CAMPI_ARRICCHIMENTO = (
     "biography", "phone", "email", "whatsapp", "bio_links", "contact_source",
     "external_url", "follower_count",
+    "full_name", "last_message_at", "last_message_from", "last_message_text",
+    "source_channel",
 )
+
+
+def _db_mascherato() -> str:
+    """L'URL del database senza la password."""
+    from app.config import settings
+    return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", settings.database_url or "?")
 
 
 def _riga_dict(f: Follower) -> dict:
@@ -113,12 +128,48 @@ async def _api_e_una_scheda_vuota(db, riga: Follower) -> str | None:
     return None
 
 
+async def fondi_coppia(db, browser_row: Follower, api_row: Follower) -> str:
+    """Fonde UNA coppia. Ritorna 'fusa' oppure il motivo per cui non lo e'.
+
+    Ordine obbligato: prima la DELETE della gemella, poi la UPDATE della riga
+    browser — invertendoli la UPDATE violerebbe UNIQUE(campaign_id, ig_user_id)
+    contro la gemella ancora viva.
+
+    La UPDATE tiene la guardia `ig_user_id < 0` e ne CONTROLLA l'esito: se nel
+    frattempo qualcuno ha promosso o cancellato la riga browser, senza il controllo
+    la DELETE passerebbe lo stesso e il contatto sparirebbe insieme al suo pk.
+    """
+    pk_vero = api_row.ig_user_id
+    await db.execute(delete(Follower).where(Follower.id == api_row.id))
+    res = await db.execute(
+        update(Follower)
+        .where(Follower.id == browser_row.id, Follower.ig_user_id < 0)
+        .values(ig_user_id=pk_vero, updated_at=datetime.utcnow())
+    )
+    if res.rowcount != 1:
+        await db.rollback()
+        return ("la riga da promuovere non e' piu' provvisoria (o non esiste): "
+                "coppia lasciata intatta")
+    await db.commit()
+    return "fusa"
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="scrive davvero (default: dry-run)")
     ap.add_argument("--campaign", default=None, help="limita a una campagna")
     ap.add_argument("--backup", default=None, help="percorso del backup JSON")
+    ap.add_argument("--tutte-le-campagne", action="store_true",
+                    help="senza --campaign, conferma di voler leggere TUTTE le campagne")
     args = ap.parse_args()
+
+    # Su quale database si sta per lavorare: AsyncSessionLocal segue il .env
+    # risolto dalla working directory, e in un worktree e' precisamente il modo
+    # per colpire il DB sbagliato senza accorgersene.
+    print(f"\nDatabase: {_db_mascherato()}")
+    if not args.campaign and not args.tutte_le_campagne:
+        print("Specifica --campaign <id>, oppure --tutte-le-campagne se e' voluto.")
+        return
 
     async with AsyncSessionLocal() as db:
         coppie, scartate = await _coppie(db, args.campaign)
@@ -162,22 +213,17 @@ async def main():
         fatte, errori = 0, []
         campagne_toccate = set()
         for cid, u, browser_row, api_row, _ in fondibili:
-            pk_vero = api_row.ig_user_id
             try:
-                # Prima la DELETE, poi la UPDATE: invertendole la UPDATE
-                # violerebbe UNIQUE(campaign_id, ig_user_id) contro la gemella.
-                await db.execute(delete(Follower).where(Follower.id == api_row.id))
-                await db.execute(
-                    update(Follower)
-                    .where(Follower.id == browser_row.id, Follower.ig_user_id < 0)
-                    .values(ig_user_id=pk_vero, updated_at=datetime.utcnow())
-                )
-                await db.commit()
-                fatte += 1
-                campagne_toccate.add(cid)
+                esito = await fondi_coppia(db, browser_row, api_row)
             except Exception as e:      # noqa: BLE001 — una coppia rotta non ferma le altre
                 await db.rollback()
                 errori.append((u, repr(e)))
+                continue
+            if esito == "fusa":
+                fatte += 1
+                campagne_toccate.add(cid)
+            else:
+                errori.append((u, esito))
 
         for cid in campagne_toccate:
             n = await db.scalar(

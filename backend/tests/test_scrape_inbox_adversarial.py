@@ -521,15 +521,42 @@ def test_discesa_non_gira_all_infinito_ma_si_ferma_al_budget_pagine(monkeypatch)
     from app.config import settings
     session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
     try:
-        src = _CountingSource(lambda n: InboxPage(participants=[], cursor=f"c{n}", exhausted=False))
+        # Pagine PIENE, sempre gli stessi contatti: dopo la prima sono tutti gia' in
+        # lista. E' lo scenario reale della discesa (si attraversa roba gia' raccolta),
+        # e non deve fermarsi da solo — a fermarlo dev'essere il budget pagine.
+        noti = [(i, f"u{i}") for i in range(1, 6)]
+        src = _CountingSource(lambda n: InboxPage(participants=noti, cursor=f"c{n}", exhausted=False))
         _inject_source(monkeypatch, src)
         result = _run_inbox_list(session_factory, campaign_id)
         cnt, status, total = _read_state(session_factory, campaign_id)
         assert isinstance(result, int) and result > 0, f"atteso defer in secondi, ottenuto {result!r}"
         assert status == CampaignStatus.listing_break
-        assert cnt == 0
+        assert cnt == 5, f"i 5 contatti della prima pagina, non di piu': {cnt}"
         assert src.calls == settings.inbox_session_pages, (
             f"atteso stop dopo {settings.inbox_session_pages} pagine, fermato a {src.calls}"
+        )
+    finally:
+        cleanup()
+
+
+def test_discesa_finisce_dopo_le_pagine_vuote(monkeypatch):
+    """L'altro tetto della discesa, quello che garantisce la terminazione FRA le
+    sessioni: N pagine consecutive senza NESSUN thread. has_older puo' restare True
+    per sempre (IG lo fa), e il budget pagine limita il ritmo di una sessione, non
+    il numero di sessioni: senza questo, la discesa ripartirebbe all'infinito 15
+    pagine alla volta senza mai passare alla Fase Bio."""
+    from app.config import settings
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
+    try:
+        src = _CountingSource(lambda n: InboxPage(participants=[], cursor=f"c{n}", exhausted=False))
+        _inject_source(monkeypatch, src)
+        result = _run_inbox_list(session_factory, campaign_id)
+        cnt, status, total = _read_state(session_factory, campaign_id)
+        assert result is None, f"atteso giro chiuso, ottenuto {result!r}"
+        assert status == CampaignStatus.ready
+        assert src.calls == settings.inbox_empty_page_stop, (
+            f"atteso stop dopo {settings.inbox_empty_page_stop} pagine vuote, "
+            f"fermato a {src.calls}"
         )
     finally:
         cleanup()

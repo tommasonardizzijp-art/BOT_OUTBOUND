@@ -94,7 +94,15 @@ class ApiInboxSource:
                 participants.append(p)
         self._cursor = next_cursor
         exhausted = (not has_older) or (not next_cursor)
-        return InboxPage(participants=participants, cursor=next_cursor, exhausted=exhausted)
+        # `exhausted` ferma il giro anche quando manca solo il cursore (payload
+        # troncato, blip): giusto per fermarsi, sbagliato per dichiarare che
+        # l'inbox e' finito. Il fondo lo dichiara SOLO has_older=False, che e'
+        # l'unica cosa che IG dice davvero — vedi inbox_bottom_reached, che e' un
+        # interruttore permanente e non va alzato su un forse.
+        return InboxPage(
+            participants=participants, cursor=next_cursor, exhausted=exhausted,
+            bottom_confirmed=not has_older,
+        )
 
 
 @dataclass
@@ -102,7 +110,8 @@ class InboxPage:
     """Una pagina di partecipanti estratti dall'inbox."""
     participants: list[tuple[int, str]] = field(default_factory=list)
     cursor: str | None = None      # stato di ripresa intra-engine (oldest_cursor o marker)
-    exhausted: bool = False        # True quando l'inbox e' stato raggiunto fino all'inizio
+    exhausted: bool = False        # True quando non si puo' proseguire (fondo O cursore mancante)
+    bottom_confirmed: bool = False  # True SOLO se IG ha detto has_older=False: il fondo vero
 
 
 class InboxListSource(Protocol):
