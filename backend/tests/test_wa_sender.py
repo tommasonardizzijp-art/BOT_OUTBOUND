@@ -442,6 +442,47 @@ class _PomInvio(_PomFinto):
         return self.tick
 
 
+class _PomSenzaCronologia(_PomInvio):
+    """open_chat che segnala SEMPRE 'nessuna chat esistente' -- per
+    verificare il bypass end-to-end senza passare da valuta_apertura
+    direttamente (quello e' gia' coperto sopra). Estende _PomInvio (non
+    _PomFinto) perche' il ramo bypassato prosegue fino a send_text."""
+    async def open_chat(self, e164: str):
+        from app.browser.whatsapp_page import OpenResult
+        return OpenResult(False, 50.0,
+                          "nessuna-cronologia:sezione-chat-vuota:nessuna-conversazione-esistente")
+
+
+@pytest.mark.asyncio
+async def test_skip_history_gate_e_un_campo_della_campagna_non_una_env_var(db_session, monkeypatch):
+    """21/08, richiesta di Tommaso: il bypass del gate 'no cronologia' deve
+    essere un toggle per-campagna impostabile alla creazione dalla UI, non
+    un CSV di campaign_id in .env (wa_skip_history_gate_campaign_ids) che
+    andava editato e ridistribuito a mano ogni volta -- inutilizzabile
+    quando i clienti nuovi arrivano di continuo e OGNI prima campagna e'
+    in questa situazione. Il campo pilota bypassa_gate_cronologia in
+    invia_a_contatto: default False (comportamento invariato), True lo
+    attiva SOLO per quella campagna."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+
+    ctx_off = await _scenario_invio(db_session, e164="+393331110001")
+    esito_off = await wa_sender.invia_a_contatto(
+        db_session, _PomSenzaCronologia([], count=0), campaign=ctx_off["campaign"],
+        step=ctx_off["step"], cc=ctx_off["cc"], contact=ctx_off["contact"],
+        number=ctx_off["number"], browser_avviato_da_s=9999)
+    assert esito_off.stato == "skipped"
+
+    ctx_on = await _scenario_invio(db_session, e164="+393331110002")
+    ctx_on["campaign"].skip_history_gate = True
+    await db_session.commit()
+    esito_on = await wa_sender.invia_a_contatto(
+        db_session, _PomSenzaCronologia([], count=0), campaign=ctx_on["campaign"],
+        step=ctx_on["step"], cc=ctx_on["cc"], contact=ctx_on["contact"],
+        number=ctx_on["number"], browser_avviato_da_s=9999)
+    assert esito_on.stato == "sent"
+
+
 @pytest.mark.asyncio
 async def test_stop_arrivato_nella_finestra_toctou_annulla_l_invio(db_session, monkeypatch):
     """La guardia non aveva visto nulla; nei 20 secondi successivi arriva

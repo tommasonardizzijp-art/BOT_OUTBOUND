@@ -100,6 +100,7 @@ export type WaCampaign = {
   daily_limit: number | null
   optout_enabled: boolean
   optout_cta: string | null
+  skip_history_gate: boolean
   active_hours_start: string | null
   active_hours_end: string | null
   total_contacts: number
@@ -278,6 +279,11 @@ export type WaCampaignCreate = {
   optout_enabled?: boolean
   optout_cta?: string | null
   daily_limit?: number
+  // Deroga alla guardia "no cronologia pregressa" (contratto §3.1/§3.2):
+  // solo per campagne dove e' CERTO che i contatti non hanno mai ricevuto
+  // nulla dal bot prima. Default false = comportamento normale (skippa i
+  // contatti senza chat gia' esistente).
+  skip_history_gate?: boolean
 }
 
 export const waApi = {
@@ -326,6 +332,7 @@ export const waApi = {
     update: (id: string, data: Partial<{
       name: string; daily_limit: number; optout_cta: string | null
       active_hours_start: string; active_hours_end: string; optout_enabled: boolean
+      skip_history_gate: boolean
     }>) => req<WaCampaign>(`/wa/campaigns/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     updateStep0: (id: string, data: {
       template_a: string; template_b?: string | null

@@ -99,6 +99,60 @@ async def test_post_su_numero_di_un_altro_tenant_risponde_422(db_session, client
 
 
 @pytest.mark.asyncio
+async def test_post_skip_history_gate_default_false(db_session, client):
+    """Default invariato quando il payload non lo passa affatto."""
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await db_session.commit()
+
+    r = await client.post("/api/wa/campaigns", json={
+        "tenant_id": tenant.id, "wa_number_id": number.id, "name": "senza-toggle",
+        "campaign_type": "followup", "template_a": "Ciao {nome}.",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["skip_history_gate"] is False
+
+
+@pytest.mark.asyncio
+async def test_post_skip_history_gate_true_si_accetta_dal_payload(db_session, client):
+    """21/08: a differenza di optout_enabled, questo campo si accetta dal
+    payload di creazione -- e' il toggle richiesto da Tommaso per non dover
+    piu' editare un CSV in .env a ogni campagna nuova con contatti mai
+    contattati dal bot."""
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    await db_session.commit()
+
+    r = await client.post("/api/wa/campaigns", json={
+        "tenant_id": tenant.id, "wa_number_id": number.id, "name": "con-toggle",
+        "campaign_type": "followup", "template_a": "Ciao {nome}.",
+        "skip_history_gate": True,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["skip_history_gate"] is True
+
+    riga = await db_session.scalar(select(WaCampaign).where(WaCampaign.id == body["id"]))
+    assert riga.skip_history_gate is True
+
+
+@pytest.mark.asyncio
+async def test_patch_skip_history_gate_modificabile_in_draft(db_session, client):
+    tenant = await make_tenant(db_session)
+    number = await make_number(db_session, tenant)
+    campaign, _ = await make_campaign(db_session, tenant, number,
+                                      tipo=WaCampaignType.followup)
+    await db_session.commit()
+    assert campaign.skip_history_gate is False
+
+    r = await client.patch(f"/api/wa/campaigns/{campaign.id}", json={
+        "skip_history_gate": True,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["skip_history_gate"] is True
+
+
+@pytest.mark.asyncio
 async def test_get_lista_e_dettaglio(db_session, client):
     tenant = await make_tenant(db_session)
     number = await make_number(db_session, tenant)
