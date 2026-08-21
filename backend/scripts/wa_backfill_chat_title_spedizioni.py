@@ -146,6 +146,18 @@ async def _recupera_un_contatto(pom, contact_id: str, *, dry_run: bool) -> dict:
                 if cc_attiva is not None and not gia_optato:
                     await _incrementa_contatore_campagna(db, cc_attiva.campaign_id, "opted_out")
                     await wa_optout.check_optout_circuit_breaker(db, cc_attiva.campaign_id)
+                    # _incrementa_contatore_campagna NON committa da sola (pattern
+                    # UPDATE...SET x=x+1, il commit spetta al chiamante -- vedi il
+                    # suo stesso commento). persist_wa_optout QUI SOPRA fa gia' il
+                    # proprio commit interno, quindi il flag opted_out sul contatto
+                    # e' salvo comunque; ma senza QUESTO commit esplicito
+                    # l'incremento del contatore campagna si perde in un rollback
+                    # implicito alla chiusura di `async with AsyncSessionLocal()`.
+                    # Bug reale 21/08: 10 STOP persistiti correttamente sul
+                    # contatto (compliance intatta), ma il contatore aggregato
+                    # della campagna e' rimasto fermo -- Tommaso se n'e' accorto
+                    # dalla dashboard, non da un test.
+                    await db.commit()
             return esito  # STOP e replied si escludono: uno STOP non e' anche 'ha risposto'
 
         # --- 3b. replied: SOLO risposte genuine entro 48h dal nostro invio -
