@@ -16,6 +16,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from loguru import logger
@@ -187,6 +188,63 @@ _JS_MESSAGE_SIGNALS = """
   });
 }
 """
+
+# Come _JS_MESSAGE_SIGNALS, con in piu' pre_plain_text -- VERIFICATO dal vivo
+# il 21/08 (diag_wa_timestamp.py, su chat reali): l'attributo
+# data-pre-plain-text di '.copyable-text' porta '[HH:MM, DD/MM/YYYY]
+# Mittente: ', presente su ogni bolla-messaggio vera, ASSENTE sulle righe di
+# sistema (es. l'avviso di crittografia end-to-end) che non hanno un
+# mittente. Serve a read_inbound_since, non a read_inbound_tail: quest'
+# ultimo resta invariato apposta (usato dalla guardia STOP, SDD 6.4, che non
+# ha nozione di tempo e deve restare quella).
+_JS_MESSAGE_SIGNALS_TIMESTAMP = """
+(args) => {
+  const rows = Array.from(document.querySelectorAll(args.msgRow));
+  if (rows.length === 0) return null;
+  return rows.map((el) => {
+    let tailIcon = null;
+    if (el.querySelector("[data-icon='tail-out']")) tailIcon = 'tail-out';
+    else if (el.querySelector("[data-icon='tail-in']")) tailIcon = 'tail-in';
+    const copy = el.querySelector('.copyable-text');
+    return {
+      aria_tu: !!el.querySelector("span[aria-label='Tu:']"),
+      tail_icon: tailIcon,
+      data_id: el.getAttribute('data-id') || null,
+      text: (el.innerText || '').slice(0, 300),
+      pre_plain_text: copy ? (copy.getAttribute('data-pre-plain-text') || null) : null,
+    };
+  });
+}
+"""
+
+_RE_TIMESTAMP_WA = re.compile(r"^\[(\d{2}):(\d{2}), (\d{2})/(\d{2})/(\d{4})\]")
+
+
+def parse_wa_timestamp(pre_plain_text):
+    """Timestamp del messaggio dal prefisso data-pre-plain-text di WhatsApp
+    Web, VERIFICATO dal vivo il 21/08 (diag_wa_timestamp.py). Fuso fisso
+    Europe/Rome via zoneinfo (verificato disponibile su questa macchina il
+    21/08 -- niente fallback UTC+1 costante, l'incidente noto di tzdata
+    mancante): il testo che WhatsApp mostra e' sempre l'ora LOCALE del
+    dispositivo, che per questo numero e' sempre l'Italia.
+
+    None se il prefisso manca (righe di sistema come l'avviso di
+    crittografia, che non hanno data-pre-plain-text affatto -- vedi
+    classify_direction, che le conta 'in' per sicurezza sullo STOP: qui
+    invece si scartano, mai una data indovinata) o non combacia col
+    formato atteso."""
+    from zoneinfo import ZoneInfo
+
+    if not pre_plain_text:
+        return None
+    m = _RE_TIMESTAMP_WA.match(pre_plain_text)
+    if not m:
+        return None
+    hh, mm, dd, mo, yyyy = (int(x) for x in m.groups())
+    try:
+        return datetime(yyyy, mo, dd, hh, mm, tzinfo=ZoneInfo("Europe/Rome"))
+    except ValueError:
+        return None
 
 # Scan della lista chat (sidebar). Nessun click su una riga: uno scan che
 # apre una chat per capire qualcosa la marca anche come letta.
@@ -514,6 +572,49 @@ class WhatsAppWebPage:
                 break
         tail.reverse()
         return tail
+
+    async def read_inbound_since(self, dopo: datetime, *, entro: datetime | None = None,
+                                 n: int = 100) -> list[str] | None:
+        """Testi INBOUND con timestamp reale (data-pre-plain-text) rigorosamente
+        DOPO `dopo`, e se `entro` e' dato non oltre `entro`. A differenza di
+        read_inbound_tail (SDD 6.4, guardia pre-invio STOP) questo metodo ha
+        nozione di TEMPO -- serve a un compito diverso: distinguere una
+        risposta VERA a un nostro invio da corrispondenza organica
+        precedente sullo stesso numero (il canale e' condiviso con
+        l'assistenza clienti umana, non nasce con la campagna) o da righe
+        di sistema senza mittente riconoscibile.
+
+        L'avviso 'i messaggi sono crittografati end-to-end' non ha
+        data-pre-plain-text (nessun mittente): classify_direction lo conta
+        'in' per sicurezza sullo STOP (corretto li', quella funzione non
+        deve MAI perdere un vero STOP), ma userebbe qui a produrre un falso
+        'ha risposto' -- misurato dal vivo il 21/08 nel backfill del bug
+        chat_title: 3 falsi positivi su 4 nel pilota, proprio per questo.
+        Qui si scarta ogni riga senza timestamp leggibile, non si indovina.
+
+        None = cecita' (nessuna bolla agganciata), stessa sentinella di
+        read_inbound_tail. [] = nessuna risposta genuina nella finestra --
+        silenzio vero e rumore-senza-timestamp sono indistinguibili qui di
+        proposito, per questo scopo hanno lo stesso esito."""
+        rows = await self._page.evaluate(_JS_MESSAGE_SIGNALS_TIMESTAMP, {"msgRow": sel.MSG_ROW})
+        if not rows or not _righe_ben_formate(rows):
+            return None
+
+        testi: list[str] = []
+        for row in rows:
+            direzione = classify_direction(
+                aria_tu=row["aria_tu"], tail_icon=row["tail_icon"], data_id=row["data_id"])
+            if direzione == "out":
+                continue
+            ts = parse_wa_timestamp(row.get("pre_plain_text"))
+            if ts is None or ts <= dopo:
+                continue
+            if entro is not None and ts > entro:
+                continue
+            testi.append(row["text"])
+            if len(testi) >= n:
+                break
+        return testi
 
     async def sync_state(self) -> Literal["synced", "syncing", "unknown"]:
         """A9/FM16: su una chat non ancora sincronizzata la guardia non

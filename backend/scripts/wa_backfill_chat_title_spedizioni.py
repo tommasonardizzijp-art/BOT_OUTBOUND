@@ -17,12 +17,15 @@ Per ogni contatto:
      si indovina qui su chat vere);
   2. legge il titolo vero dall'header (read_open_chat_title) e lo
      sovrascrive -- da solo riabilita il matching futuro del reply-watcher;
-  3. carica la cronologia e rilegge la coda inbound intera (non solo la
-     preview della sidebar, che il reply-watcher normale usa): se c'e' uno
-     STOP lo persiste come opt-out, altrimenti se c'e' QUALSIASI messaggio
-     in arrivo dopo il nostro invio marca la riga campagna 'replied' -- con
-     lo STESSO giudizio del reply-watcher (import diretto delle sue
-     funzioni, logica non duplicata).
+  3. carica la cronologia e cerca uno STOP nella coda intera (nessuna
+     scadenza, read_inbound_tail) -- se trovato, persiste l'opt-out con lo
+     STESSO giudizio del reply-watcher (import diretto delle sue funzioni,
+     logica non duplicata) e si ferma li' (uno STOP non e' anche 'ha
+     risposto'). Altrimenti cerca una risposta GENUINA entro 48h dal nostro
+     invio (read_inbound_since, timestamp reale via data-pre-plain-text --
+     fix 21/08: read_inbound_tail da solo non ha nozione di tempo e
+     produceva falsi 'ha risposto' su corrispondenza organica precedente o
+     sull'avviso di crittografia, misurato 3/4 nel primo pilota).
 
 SOLA LETTURA per il composer: nessun send_text, mai, in nessun ramo.
 
@@ -39,13 +42,14 @@ import argparse
 import asyncio
 import random
 import unicodedata
+from datetime import timedelta
 
 from loguru import logger
 from sqlalchemy import select
 
 from app.browser.whatsapp_page import WhatsAppWebPage, title_is_number
 from app.database import AsyncSessionLocal
-from app.models.wa import WaContact, WaContactStatus
+from app.models.wa import WaContact, WaContactStatus, WaMessage, WaMessageStatus
 from app.services import wa_optout, wa_profile_lock
 from app.services.wa_reply_watcher import (_campagna_attiva_del_contatto,
                                             _incrementa_contatore_campagna,
@@ -120,7 +124,10 @@ async def _recupera_un_contatto(pom, contact_id: str, *, dry_run: bool) -> dict:
                 contact.chat_title = None
                 await db.commit()
 
-        # --- 3. cronologia intera, non solo la preview della sidebar ------
+        # --- 3a. STOP: nessuna scadenza, si legge SEMPRE tutta la coda ------
+        # (SDD 6.4/7.5: un opt-out vale in qualunque momento arrivi, non solo
+        # nei giorni subito dopo la campagna -- read_inbound_tail resta lo
+        # stesso metodo della guardia pre-invio, invariato).
         await pom.load_history(minimo=300)
         coda = await pom.read_inbound_tail(n=100)
         if coda is None:
@@ -139,7 +146,33 @@ async def _recupera_un_contatto(pom, contact_id: str, *, dry_run: bool) -> dict:
                 if cc_attiva is not None and not gia_optato:
                     await _incrementa_contatore_campagna(db, cc_attiva.campaign_id, "opted_out")
                     await wa_optout.check_optout_circuit_breaker(db, cc_attiva.campaign_id)
-        elif coda:
+            return esito  # STOP e replied si escludono: uno STOP non e' anche 'ha risposto'
+
+        # --- 3b. replied: SOLO risposte genuine entro 48h dal nostro invio -
+        # Bug reale 21/08: read_inbound_tail (usato qui nella prima versione
+        # dello script) non ha nozione di tempo -- su chat con
+        # corrispondenza organica precedente (il numero e' condiviso con
+        # l'assistenza clienti umana) o con l'avviso di crittografia (nessun
+        # mittente, classify_direction lo conta 'in' per sicurezza sullo
+        # STOP) produceva un falso 'ha risposto'. Misurato: 3 falsi positivi
+        # su 4 nel pilota. read_inbound_since legge il timestamp REALE
+        # (data-pre-plain-text) e scarta tutto cio' che non e' strettamente
+        # dopo il nostro invio ed entro 48h.
+        msg = await db.scalar(
+            select(WaMessage).where(WaMessage.contact_id == contact.id,
+                                    WaMessage.status == WaMessageStatus.sent)
+            .order_by(WaMessage.sent_at.desc()))
+        if msg is None or msg.sent_at is None:
+            esito["errore"] = (esito["errore"] or "") + ";nessun_invio_confermato_a_db"
+            return esito
+
+        entro = msg.sent_at + timedelta(hours=48)
+        risposte = await pom.read_inbound_since(msg.sent_at, entro=entro, n=20)
+        if risposte is None:
+            esito["errore"] = (esito["errore"] or "") + ";cecita_timestamp"
+            return esito
+
+        if risposte:
             esito["trovato_replied"] = True
             if not dry_run:
                 cc = await _riga_da_marcare_replied(db, contact.id)
