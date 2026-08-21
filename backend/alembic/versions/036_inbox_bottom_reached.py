@@ -41,8 +41,13 @@ def upgrade() -> None:
     # frontiera invece deve sopravvivere alla FINE di un giro, senza per questo
     # tenere la campagna eternamente "in lista".
     op.add_column("campaigns", sa.Column("inbox_deep_cursor", sa.String(255), nullable=True))
+    op.add_column(
+        "campaigns",
+        sa.Column("inbox_deep_pages", sa.Integer(), nullable=False, server_default="0"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_column("campaigns", "inbox_deep_pages")
     op.drop_column("campaigns", "inbox_deep_cursor")
     op.drop_column("campaigns", "inbox_bottom_reached")

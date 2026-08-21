@@ -140,7 +140,28 @@ async def fondi_coppia(db, browser_row: Follower, api_row: Follower) -> str:
     la DELETE passerebbe lo stesso e il contatto sparirebbe insieme al suo pk.
     """
     pk_vero = api_row.ig_user_id
-    await db.execute(delete(Follower).where(Follower.id == api_row.id))
+    # Le guardie del controllo si ripetono QUI, dentro la stessa transazione: fra la
+    # lettura e la cancellazione un worker puo' aver portato la riga a 'sent', averla
+    # lockata o averle collegato un Message — e messages.follower_id e' ON DELETE
+    # CASCADE, quindi quel messaggio sparirebbe senza nemmeno finire nel backup.
+    n_msg = await db.scalar(
+        select(func.count(Message.id)).where(Message.follower_id == api_row.id)
+    ) or 0
+    if n_msg:
+        await db.rollback()
+        return f"la riga da cancellare ha {n_msg} messaggi collegati: coppia lasciata intatta"
+    cancellata = await db.execute(
+        delete(Follower).where(
+            Follower.id == api_row.id,
+            Follower.ig_user_id == pk_vero,
+            Follower.status == FollowerStatus.pending,
+            Follower.locked_by_account_id.is_(None),
+        )
+    )
+    if cancellata.rowcount != 1:
+        await db.rollback()
+        return ("la riga da cancellare e' cambiata sotto (stato, lock o targa): "
+                "coppia lasciata intatta")
     res = await db.execute(
         update(Follower)
         .where(Follower.id == browser_row.id, Follower.ig_user_id < 0)

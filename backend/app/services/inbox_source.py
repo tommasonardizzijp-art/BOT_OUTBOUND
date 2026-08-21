@@ -44,8 +44,10 @@ def _as_users(raw_thread) -> list:
     return getattr(raw_thread, "users", []) or []
 
 
-def fetch_inbox_page(client, cursor: str | None) -> tuple[list, str | None, bool]:
-    """Una pagina dell'inbox via private API. Ritorna (threads, next_cursor, has_older).
+def fetch_inbox_page(client, cursor: str | None) -> tuple[list, str | None, bool, bool]:
+    """Una pagina dell'inbox via private API.
+
+    Ritorna (threads, next_cursor, has_older, fondo_dichiarato).
 
     I parametri replicano ESATTAMENTE quelli che l'app mobile invia (verificati sul
     sorgente instagrapi, mixins/direct.py::direct_threads_chunk, il riferimento di
@@ -71,8 +73,15 @@ def fetch_inbox_page(client, cursor: str | None) -> tuple[list, str | None, bool
     _threads = inbox.get("threads")
     threads = _threads if isinstance(_threads, list) else []
     next_cursor = inbox.get("oldest_cursor")
-    has_older = bool(inbox.get("has_older"))
-    return threads, next_cursor, has_older
+    _has_older = inbox.get("has_older")
+    has_older = bool(_has_older)
+    # `fondo_dichiarato` NON e' `not has_older`: una risposta degradata (chiave
+    # assente, corpo parziale, soft-block) darebbe has_older=None e quindi "fondo
+    # raggiunto" — e il fondo alza un interruttore PERMANENTE sulla campagna. Serve
+    # che IG lo dica: has_older esattamente False, e un corpo che contenga davvero
+    # la lista threads (stessa difesa di `_threads` qui sopra).
+    fondo_dichiarato = (_has_older is False) and isinstance(_threads, list)
+    return threads, next_cursor, has_older, fondo_dichiarato
 
 
 class ApiInboxSource:
@@ -84,7 +93,7 @@ class ApiInboxSource:
         self._cursor = cursor
 
     async def next_page(self) -> InboxPage:
-        threads, next_cursor, has_older = await asyncio.to_thread(
+        threads, next_cursor, has_older, fondo_dichiarato = await asyncio.to_thread(
             fetch_inbox_page, self._client, self._cursor
         )
         participants: list[tuple[int, str]] = []
@@ -101,7 +110,7 @@ class ApiInboxSource:
         # interruttore permanente e non va alzato su un forse.
         return InboxPage(
             participants=participants, cursor=next_cursor, exhausted=exhausted,
-            bottom_confirmed=not has_older,
+            bottom_confirmed=fondo_dichiarato, threads_letti=len(threads),
         )
 
 
@@ -112,6 +121,10 @@ class InboxPage:
     cursor: str | None = None      # stato di ripresa intra-engine (oldest_cursor o marker)
     exhausted: bool = False        # True quando non si puo' proseguire (fondo O cursore mancante)
     bottom_confirmed: bool = False  # True SOLO se IG ha detto has_older=False: il fondo vero
+    # Thread GREZZI nella pagina, prima del filtro 1-a-1: un tratto di soli gruppi
+    # da' zero partecipanti ma non e' una pagina vuota, e non deve far credere che
+    # la discesa sia finita.
+    threads_letti: int = 0
 
 
 class InboxListSource(Protocol):

@@ -204,6 +204,12 @@ class Campaign(Base):
     # tornare a NULL a fine giro (altrimenti la ripresa non passa mai alla Fase Bio),
     # questa no. Migration 036.
     inbox_deep_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Pagine lette in questa discesa (azzerate quando il fondo arriva davvero). Il
+    # budget di sessione chiude un giro e ne fa ripartire un altro: da solo non
+    # garantisce che la discesa finisca. Migration 036.
+    inbox_deep_pages: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     # 'completed' | 'partial' | 'rate_limited' — esito ultimo scraping
     scrape_outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)
     scrape_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

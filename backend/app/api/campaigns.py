@@ -890,6 +890,7 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     # discesa: e' l'unica via d'uscita da un interruttore altrimenti permanente.
     campaign.inbox_bottom_reached = False
     campaign.inbox_deep_cursor = None
+    campaign.inbox_deep_pages = 0
     campaign.scrape_cursor = None
     campaign.updated_at = datetime.utcnow()
 

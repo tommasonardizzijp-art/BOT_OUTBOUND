@@ -364,3 +364,127 @@ def test_due_pk_sullo_stesso_username_non_fanno_tre_righe(monkeypatch):
         assert campaign.total_followers == 2
     finally:
         cleanup()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Il fondo dell'inbox: quando si puo' dichiarare (e quando no)
+# ═══════════════════════════════════════════════════════════════════
+from app.services.inbox_source import fetch_inbox_page
+
+
+class _ClientFinto:
+    def __init__(self, resp):
+        self._resp = resp
+
+    def private_request(self, *a, **k):
+        return self._resp
+
+
+def _fondo(resp) -> bool:
+    return fetch_inbox_page(_ClientFinto(resp), cursor=None)[3]
+
+
+def test_il_fondo_si_dichiara_solo_se_ig_lo_dice():
+    assert _fondo({"inbox": {"threads": [], "has_older": False}}) is True
+    assert _fondo({"inbox": {"threads": [], "has_older": True}}) is False
+
+
+@pytest.mark.parametrize("resp", [
+    {"inbox": {"threads": []}},              # has_older assente
+    {"inbox": {"threads": [], "has_older": None}},
+    {"inbox": {"has_older": False}},         # nessuna lista threads: corpo parziale
+    {"inbox": None},
+    {},
+    None,
+])
+def test_una_risposta_degradata_non_dichiara_il_fondo(resp):
+    """`not has_older` era vero anche quando IG non aveva detto niente: una risposta
+    parziale (soft-block, corpo troncato) avrebbe alzato un interruttore PERMANENTE
+    e la campagna non sarebbe piu' scesa."""
+    assert _fondo(resp) is False
+
+
+def test_le_pagine_vuote_fermano_il_giro_ma_non_dichiarano_il_fondo(monkeypatch):
+    """Pagine vuote sono anche il sintomo di un soft-block o di un payload
+    degradato. Ci si ferma, ma senza latchare il fondo e senza buttare la frontiera:
+    altrimenti l'unica via d'uscita sarebbe il reset della campagna."""
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
+    try:
+        src = _CountingSource(lambda n: InboxPage(
+            participants=[], cursor=f"c{n}", exhausted=False, threads_letti=0,
+        ))
+        _inject_source(monkeypatch, src)
+        _run_inbox_list(session_factory, campaign_id)
+        _, campaign = _leggi_follower(session_factory, campaign_id)
+        assert src.calls == settings.inbox_empty_page_stop
+        assert campaign.inbox_bottom_reached is False, "il fondo non e' stato dichiarato da IG"
+        assert campaign.inbox_deep_cursor is not None, "la frontiera deve restare"
+    finally:
+        cleanup()
+
+
+def test_un_tratto_di_soli_gruppi_non_conta_come_pagina_vuota(monkeypatch):
+    """I thread di gruppo non danno partecipanti (li scarta extract_thread_participant)
+    ma la pagina NON e' vuota: contare i partecipanti invece dei thread grezzi
+    fermerebbe la discesa in mezzo a un tratto di gruppi."""
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
+    try:
+        def page_fn(n):
+            if n <= settings.inbox_empty_page_stop + 2:
+                return InboxPage(participants=[], cursor=f"c{n}", exhausted=False,
+                                 threads_letti=20)
+            return InboxPage(participants=[(9, "nove")], cursor=None, exhausted=True,
+                             bottom_confirmed=True, threads_letti=1)
+        src = _CountingSource(page_fn)
+        _inject_source(monkeypatch, src)
+        _run_inbox_list(session_factory, campaign_id)
+        righe, campaign = _leggi_follower(session_factory, campaign_id)
+        assert [r.ig_user_id for r in righe] == [9], "la discesa si e' fermata sui gruppi"
+        assert campaign.inbox_bottom_reached is True
+    finally:
+        cleanup()
+
+
+def test_la_discesa_ha_un_tetto_di_pagine_oltre_la_singola_sessione(monkeypatch):
+    """Il budget di sessione chiude un giro e ne fa ripartire un altro: da solo non
+    garantisce che la discesa finisca. Con pagine sempre piene e cursori sempre
+    diversi (inbox che cicla) si scenderebbe per sessioni all'infinito."""
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
+    try:
+        async def _porta_al_limite():
+            async with session_factory() as db:
+                c = await db.get(Campaign, campaign_id)
+                c.inbox_deep_pages = settings.inbox_deep_max_pages - 1
+                await db.commit()
+        asyncio.run(_porta_al_limite())
+
+        noti = [(1, "uno")]
+        src = _CountingSource(lambda n: InboxPage(
+            participants=noti, cursor=f"c{n}", exhausted=False, threads_letti=1,
+        ))
+        _inject_source(monkeypatch, src)
+        result = _run_inbox_list(session_factory, campaign_id)
+        _, campaign = _leggi_follower(session_factory, campaign_id)
+        assert result is None, "il giro deve chiudersi, non deferire"
+        assert src.calls == 1
+        assert campaign.inbox_deep_cursor is not None, "la frontiera resta: si riprende da li'"
+    finally:
+        cleanup()
+
+
+def test_fermarsi_senza_cursore_non_si_annuncia_come_completata(monkeypatch):
+    """Una discesa interrotta da un payload senza cursore non deve essere
+    indistinguibile da una finita bene: chi guarda il feed deve vedere un warning."""
+    eventi = []
+    pages = [InboxPage(participants=[(3, "tre")], cursor=None, exhausted=True,
+                       bottom_confirmed=False, threads_letti=1)]
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, pages)
+    # DOPO _setup_inbox_db, che a sua volta zittisce emit: l'ultimo patch vince.
+    monkeypatch.setattr("app.utils.events.emit",
+                        lambda cid, action, msg, level="info", **k: eventi.append((action, level)))
+    try:
+        _run_inbox_list(session_factory, campaign_id)
+        completi = [lv for az, lv in eventi if az == "scrape_complete"]
+        assert completi == ["warn"], f"atteso un scrape_complete di livello warn, visti {eventi}"
+    finally:
+        cleanup()
