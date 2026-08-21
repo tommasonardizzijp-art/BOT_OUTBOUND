@@ -50,6 +50,23 @@ def test_chat_inesistente_e_colpa_del_contatto_non_nostra(signal, atteso):
 
 
 @pytest.mark.parametrize("signal", [
+    "nessuna-cronologia:sezione-chat-vuota:nessuna-conversazione-esistente",
+    "nessuna-cronologia:nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione",
+    "nessuna-cronologia:nessun-messaggio-nel-pannello",
+])
+def test_bypass_gate_cronologia_invia_comunque(signal):
+    """Deroga scoped per campagna (19/08): con bypassa_gate_cronologia=True
+    un 'no_existing_chat' diventa inviabile, non skipped. Il default resta
+    invariato per ogni altro chiamante (vedi test sopra, bypass non passato)."""
+    esito = wa_sender.valuta_apertura(OpenResult(False, 1.0, signal),
+                                      bypassa_gate_cronologia=True)
+    assert esito.puo_inviare is True
+    assert esito.esito_contatto is None
+    assert esito.motivo == f"no_existing_chat_bypass:{signal}"
+    assert esito.colpa_nostra is False
+
+
+@pytest.mark.parametrize("signal", [
     "nessuna-cronologia:casella-ricerca-non-trovata",
     "nessuna-cronologia:ricerca-non-svuotata",
     "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio",
@@ -131,6 +148,34 @@ async def test_guardia_blocca_su_stop_seguito_da_altri_messaggi():
 async def test_guardia_blocca_su_cecita_del_dom():
     """None = nessuna bolla agganciata. NON e' 'nessuno STOP'."""
     pom = _PomFinto(None)
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is False
+    assert esito.motivo == "coda_non_agganciata"
+
+
+@pytest.mark.asyncio
+async def test_guardia_passa_su_chat_confermata_vuota_da_load_history():
+    """Bug reale del 19/08: primo giro col bypass gate cronologia, chat MAI
+    avuta prima. load_history scrolla, non trova nulla, after=0 (chat
+    confermata vuota). read_inbound_tail promette null anche per 'zero bolle',
+    identico al segnale di cecita' -- ma qui non e' lettura rotta, e'
+    esattamente cosa ci si aspetta da una chat vuota. Prima di questo fix
+    finiva in 'coda_non_agganciata', arma_fm2=True, bruciava 3 contatti e
+    fermava il numero al primo giro utile del bypass."""
+    pom = _PomFinto(None, count=0)
+    esito = await wa_sender.guardia_pre_invio(
+        pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
+    assert esito.puo_inviare is True
+    assert esito.motivo == "silenzio"
+
+
+@pytest.mark.asyncio
+async def test_guardia_blocca_su_cecita_vera_anche_con_storico_non_vuoto():
+    """Contro-prova del fix sopra: se load_history HA trovato messaggi
+    (after>0) e read_inbound_tail torna comunque None, resta cecita' vera --
+    non si trasforma mai in silenzio."""
+    pom = _PomFinto(None, count=5)
     esito = await wa_sender.guardia_pre_invio(
         pom, gia_scritto_prima=False, browser_avviato_da_s=9999)
     assert esito.puo_inviare is False
@@ -454,6 +499,50 @@ async def test_invio_riuscito_scrive_messaggio_stato_e_contatori(db_session, mon
     assert ctx["campaign"].sent == 1
     await db_session.refresh(ctx["number"])
     assert ctx["number"].sent_today == 1
+
+
+@pytest.mark.asyncio
+async def test_toctou_su_chat_confermata_vuota_non_blocca_il_secondo_giro(db_session, monkeypatch):
+    """Bug reale in produzione (19/08), SECONDO punto con lo stesso difetto
+    del fix di guardia_pre_invio: la rilettura TOCTOU subito prima
+    dell'invio chiama di nuovo read_inbound_tail, che promette null anche
+    per 'zero bolle' -- su una chat che guardia_pre_invio ha GIA' confermato
+    vuota (load_history, after=0), quel secondo null e' ancora silenzio, non
+    una cecita' nuova. Prima di questo fix: 'queued'/'cecita_toctou',
+    arma_fm2=True di default -- misurato, 3 contatti bypassati di fila
+    fermavano il numero anche DOPO il primo fix (wa_messages.error=
+    'coda_non_agganciata_seconda_lettura' su tre righe consecutive)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    pom = _PomInvio(None, count=0, tail_seconda_lettura=None)
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert esito.stato == "sent"
+    assert pom.inviato is not None
+
+
+@pytest.mark.asyncio
+async def test_toctou_su_cecita_vera_dopo_storico_pieno_blocca_ancora(db_session, monkeypatch):
+    """Contro-prova: se la guardia aveva visto una chat CON messaggi
+    (chat_confermata_vuota=False) e la rilettura TOCTOU torna None, resta
+    cecita' vera e blocca come prima -- il fix sopra non si applica a un
+    DOM che ha davvero smesso di rispondere a meta' invio."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
+    ctx = await _scenario_invio(db_session)
+    pom = _PomInvio([], count=30, tail_seconda_lettura=None)
+
+    esito = await wa_sender.invia_a_contatto(
+        db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
+        contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
+
+    assert esito.stato == "queued"
+    assert esito.motivo == "cecita_toctou"
+    assert pom.inviato is None
 
 
 @pytest.mark.asyncio

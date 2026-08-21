@@ -431,8 +431,13 @@ class Settings(BaseSettings):
     # corso sugli stessi file la lascia libera (non toccato qui apposta).
     wa_send_delay_median_s: int = 15
     wa_send_delay_sigma: float = 0.7            # SDD 10.3
-    wa_session_min_msg: int = 8                 # SDD 10.3
-    wa_session_max_msg: int = 15                # SDD 10.3
+    # +20% su richiesta di Tommaso (19/08) rispetto alla proposta iniziale
+    # SDD 10.3 (8-15, "da tarare sulla rampa M5" -- mai un limite misurato).
+    # Tocca solo la lunghezza della sessione (quanti messaggi prima della
+    # pausa lunga), non il cap giornaliero ne' il delay fra un messaggio e
+    # l'altro: quelli restano dove sono in SDD 10.3.
+    wa_session_min_msg: int = 10                # era 8
+    wa_session_max_msg: int = 18                # era 15
     wa_break_min_min: int = 20                  # SDD 10.3
     wa_break_max_min: int = 40                  # SDD 10.3
     # Deciso con Tommaso 07/08 sera per l'uso quotidiano reale (Primero): il
@@ -461,6 +466,15 @@ class Settings(BaseSettings):
     # Stesso valore di campaign_orchestrator.LOCK_TIMEOUT_MINUTES.
     wa_lock_timeout_min: int = 20
     wa_max_failures_per_contact: int = 3        # SDD 8.2
+    # Deroga temporanea alla guardia V2 (contratto §3.1/§3.2), scoped per
+    # campagna: decisione di Tommaso 19/08 sulle campagne PRIMERO che sono la
+    # prima comunicazione mai mandata a quei contatti (impossibile un opt-out
+    # pregresso). CSV di campaign_id: SOLO le campagne qui elencate mandano
+    # anche senza cronologia pregressa; tutte le altre restano fail-closed
+    # come sempre. La guardia STOP (guardia_pre_invio) NON e' toccata da
+    # questo flag e resta attiva su ogni invio. Vuoto = comportamento
+    # invariato (default).
+    wa_skip_history_gate_campaign_ids: str = ""
     # Parole DURE: opt-out immediato, nessun caso ambiguo in italiano comune
     # (review G6, 07/08). "basta" spostata sotto: e' comunissima in frasi che
     # non sono un opt-out ("mi basta sapere se siete aperti").

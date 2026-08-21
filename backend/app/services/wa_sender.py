@@ -64,13 +64,19 @@ class EsitoApertura:
     colpa_nostra: bool           # True -> conta verso l'escalation FM2 del numero
 
 
-def valuta_apertura(res: OpenResult) -> EsitoApertura:
+def valuta_apertura(res: OpenResult, *, bypassa_gate_cronologia: bool = False) -> EsitoApertura:
     """Traduce (ok, signal) del POM nella decisione. Contratto sez. 3.1-3.2.
 
     Fail-closed su tutto cio' che non e' riconosciuto: un segnale nuovo
     (POM aggiornato, WhatsApp cambiato) non deve mai finire nel ramo che
     marca il contatto, perche' quello e' irreversibile per il contatto e
     invisibile a chi guarda i log.
+
+    `bypassa_gate_cronologia` (default False, decisione 19/08, vedi
+    config.wa_skip_history_gate_campaign_ids): quando True, un contatto senza
+    chat pregressa NON viene skippato -- si prova comunque l'invio. Non tocca
+    nessun altro ramo: la guardia STOP (guardia_pre_invio) gira comunque dopo
+    l'apertura e resta l'unica difesa contro un opt-out gia' scritto.
     """
     signal = res.signal or ""
 
@@ -86,6 +92,10 @@ def valuta_apertura(res: OpenResult) -> EsitoApertura:
         return EsitoApertura(False, None, "cronologia_vuota", True)
 
     if signal in _SEGNALI_CHAT_INESISTENTE:
+        if bypassa_gate_cronologia:
+            logger.info(f"valuta_apertura: {signal!r} senza cronologia, ma "
+                        "gate bypassato per questa campagna -- si prova comunque")
+            return EsitoApertura(True, None, f"no_existing_chat_bypass:{signal}", False)
         return EsitoApertura(False, "skipped", "no_existing_chat", False)
 
     if signal in _SEGNALI_COLPA_NOSTRA:
@@ -105,6 +115,13 @@ class EsitoGuardia:
     puo_inviare: bool
     motivo: str
     prova: str | None = None      # il testo dell'inbound che ha bloccato
+    # True se load_history (punto 3) ha confermato zero messaggi in questa
+    # chat, scrollando fino a esaurimento. Serve al chiamante (invia_a_
+    # contatto) per la RILETTURA TOCTOU subito prima dell'invio: quella
+    # rilettura interpella di nuovo read_inbound_tail, che promette null
+    # anche per "zero bolle nel DOM" -- sulla stessa chat confermata vuota
+    # qui, quel null e' ancora silenzio vero, non cecita' nuova (19/08).
+    chat_confermata_vuota: bool = False
 
 
 async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
@@ -159,9 +176,28 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
 
     # 5. Coda inbound. None = CECITA' (nessuna bolla agganciata, o righe
     #    malformate): non e' silenzio, e non si invia. [] = silenzio vero.
+    #
+    #    ECCEZIONE (19/08, nata dal bypass gate cronologia sopra): il JS di
+    #    read_inbound_tail promette null anche per "zero bolle nel DOM", che
+    #    e' esattamente cosa succede su una chat CONFERMATA vuota da
+    #    load_history (punto 3, info.after == 0 dopo aver scrollato fino a
+    #    esaurimento). Prima di oggi non poteva mai succedere: la guardia V2
+    #    a monte garantiva sempre cronologia >= 1 prima di arrivare qui, quindi
+    #    un None era sempre e solo lettura rotta. Con contatti senza cronologia
+    #    ora ammessi, quello stesso None e' la norma per ogni chat davvero
+    #    vuota -- trattarlo come cecita' armava FM2 al primo giro su OGNI
+    #    contatto bypassato (misurato in produzione: 3 di fila, numero fermato
+    #    dopo un solo invio). Qui si distingue coi dati che load_history ha
+    #    gia' raccolto: after == 0 e' "confermato vuoto", non "letto male".
+    #    NON indebolisce la guardia STOP in nessun caso con messaggi veri:
+    #    se ne esistesse anche uno, load_history lo avrebbe gia' contato in
+    #    info.after, e si cadrebbe comunque nel ramo cecita' sotto.
     coda = await pom.read_inbound_tail(n=int(settings.wa_guard_tail_n))
     if coda is None:
-        return EsitoGuardia(False, "coda_non_agganciata")
+        if info.after == 0:
+            coda = []
+        else:
+            return EsitoGuardia(False, "coda_non_agganciata")
 
     for testo in coda:
         if wa_optout.looks_like_stop(testo):
@@ -217,7 +253,7 @@ async def guardia_pre_invio(pom, *, gia_scritto_prima: bool,
     if coda and gia_scritto_prima:
         return EsitoGuardia(False, "ha_risposto", prova=coda[-1][:300])
 
-    return EsitoGuardia(True, "silenzio")
+    return EsitoGuardia(True, "silenzio", chat_confermata_vuota=(info.after == 0))
 
 
 def prepara_testo(step, contact, campaign) -> tuple[str, str]:
@@ -307,7 +343,10 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
     masked = mask_phone(e164)
 
     # --- apertura chat -----------------------------------------------------
-    apertura = valuta_apertura(await pom.open_chat(e164))
+    bypass_ids = {s.strip() for s in settings.wa_skip_history_gate_campaign_ids.split(",") if s.strip()}
+    bypassa_gate = str(campaign.id) in bypass_ids
+    apertura = valuta_apertura(await pom.open_chat(e164),
+                               bypassa_gate_cronologia=bypassa_gate)
     if not apertura.puo_inviare:
         logger.info(f"[WA] {masked}: apertura -> {apertura.motivo} "
                     f"(colpa_nostra={apertura.colpa_nostra})")
@@ -403,12 +442,26 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
     # --- RILETTURA TOCTOU: fra guardia e invio passano ~20s misurati -------
     # Non si ricarica la cronologia (gia' fatta dalla guardia): costa poco ed
     # e' l'unica difesa contro uno STOP arrivato nel frattempo.
+    #
+    # Stessa eccezione del punto 5 della guardia (19/08, bug reale in
+    # produzione: 3 contatti bypassati di fila su chat vuote sono bastati a
+    # fermare il numero anche DOPO il fix di guardia_pre_invio, perche'
+    # questa e' una SECONDA chiamata indipendente a read_inbound_tail e
+    # aveva lo stesso 'None per zero bolle = cecita'' non corretto). Se
+    # guardia_pre_invio ha gia' confermato la chat vuota (dati di
+    # load_history, non un'assunzione nuova), un None qui e' ancora
+    # silenzio vero -- non e' cambiato nulla nel frattempo che potremmo
+    # vedere comunque, dato che una chat senza bolle non ha un posto dove
+    # nascondere uno STOP.
     coda2 = await pom.read_inbound_tail(n=int(settings.wa_guard_tail_n))
     if coda2 is None:
-        msg.status = WaMessageStatus.skipped
-        msg.error = "coda_non_agganciata_seconda_lettura"
-        await db.commit()
-        return EsitoInvio("queued", "cecita_toctou")
+        if guardia.chat_confermata_vuota:
+            coda2 = []
+        else:
+            msg.status = WaMessageStatus.skipped
+            msg.error = "coda_non_agganciata_seconda_lettura"
+            await db.commit()
+            return EsitoInvio("queued", "cecita_toctou")
     for testo_in in coda2:
         if wa_optout.looks_like_stop(testo_in):
             msg.status = WaMessageStatus.skipped
