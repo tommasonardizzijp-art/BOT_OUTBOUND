@@ -63,7 +63,9 @@ class SyncClient:
 
 def _fetch(resp):
     """Call fetch_inbox_page with a one-shot SyncClient."""
-    return fetch_inbox_page(SyncClient(resp), cursor=None)
+    # I primi tre valori: il quarto (fondo_dichiarato) ha i suoi test dedicati
+    # in test_inbox_api_dedup_username.py.
+    return fetch_inbox_page(SyncClient(resp), cursor=None)[:3]
 
 
 def test_fetch_returns_none():

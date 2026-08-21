@@ -51,10 +51,15 @@ def compute_phase_progress(counts: dict, list_target: int | None, bio_target: in
     )
 
 
-def list_start_blocked(scrape_cursor, existing_count: int, list_target: int | None) -> bool:
+def list_start_blocked(scrape_cursor, existing_count: int, list_target: int | None,
+                       inbox_deep_cursor=None) -> bool:
     """True se la Fase Lista e' gia' satura per il target richiesto e non c'e' modo di prenderne altri.
 
-    - cursore presente => si puo' sempre riprendere dalla posizione IG => NON bloccare.
+    - cursore presente (di giro O frontiera di discesa) => si puo' sempre riprendere
+      dalla posizione IG => NON bloccare. La frontiera va guardata perche' a giro
+      chiuso `scrape_cursor` torna sempre NULL (lo legge campaign_control come
+      "lista interrotta a meta'"): senza, una discesa interrotta prima del fondo
+      resterebbe non rilanciabile, proprio mentre il messaggio dice di rilanciarla.
     - cursore None + nessun follower => prima esecuzione => NON bloccare.
     - cursore None + follower presenti:
         * target None (lista intera gia' drenata) => bloccare.
@@ -62,7 +67,7 @@ def list_start_blocked(scrape_cursor, existing_count: int, list_target: int | No
         * target set ed existing < target => l'utente vuole piu' follower => PERMETTERE
           (ripartira' in rescan-dedup dall'inizio: il cursore e' andato perso).
     """
-    if scrape_cursor:
+    if scrape_cursor or inbox_deep_cursor:
         return False
     if existing_count <= 0:
         return False
@@ -332,6 +337,7 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
             )
         if engine_switch_resets_cursor(campaign.inbox_engine, data.inbox_engine):
             campaign.scrape_cursor = None  # cursore vecchio non valido per il nuovo engine
+            campaign.inbox_deep_cursor = None
         campaign.inbox_engine = data.inbox_engine
     if data.bio_engine is not None:
         if campaign.status not in (
@@ -631,7 +637,8 @@ async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: A
     existing_count = await db.scalar(
         select(func.count(Follower.id)).where(Follower.campaign_id == campaign.id)
     ) or 0
-    if list_start_blocked(campaign.scrape_cursor, existing_count, campaign.list_target):
+    if list_start_blocked(campaign.scrape_cursor, existing_count, campaign.list_target,
+                          inbox_deep_cursor=campaign.inbox_deep_cursor):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -641,6 +648,11 @@ async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: A
             ),
         )
     campaign.status = CampaignStatus.listing
+    # Il tetto delle pagine di discesa e' una protezione contro il giro che non
+    # finisce da solo, non una condanna: un avvio manuale lo ricarica. Le sessioni
+    # automatiche riprendono via Retry(defer) senza passare di qui, quindi la
+    # garanzia fra una sessione e l'altra resta intatta.
+    campaign.inbox_deep_pages = 0
     campaign.updated_at = datetime.utcnow()
     db.add(ActivityLog(campaign_id=campaign.id, action="list_started"))
     await db.commit()
@@ -883,6 +895,14 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     campaign.auto_generate = False
     campaign.scrape_break_until = None
     campaign.scrape_break_prev_status = None
+    # Stato della Fase Lista inbox API: si riparte dalla cima e si riscende. Senza
+    # questo, una campagna che ha (anche per sbaglio) dichiarato il fondo resterebbe
+    # per sempre in modalita' cima, e il reset non avrebbe modo di rimetterla in
+    # discesa: e' l'unica via d'uscita da un interruttore altrimenti permanente.
+    campaign.inbox_bottom_reached = False
+    campaign.inbox_deep_cursor = None
+    campaign.inbox_deep_pages = 0
+    campaign.scrape_cursor = None
     campaign.updated_at = datetime.utcnow()
 
     # BUG-NEW-05: delete old messages so the campaign starts clean

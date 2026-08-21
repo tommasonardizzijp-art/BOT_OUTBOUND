@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Integer, Float, Boolean, Text, DateTime, BigInteger, Enum as SAEnum
+from sqlalchemy import String, Integer, Float, Boolean, Text, DateTime, BigInteger, Enum as SAEnum, text
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 import enum
@@ -191,6 +191,25 @@ class Campaign(Base):
     # risalirebbe in cima e il riferimento sparirebbe. Migration 033.
     inbox_cursor_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     inbox_cursor_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Fase Lista inbox via API: il fondo dell'inbox e' gia' stato raggiunto almeno
+    # una volta? Finche' e' False si SCENDE (pagine di soli gia' noti sono normali:
+    # fermarsi li' renderebbe irraggiungibili i thread piu' vecchi, che sono il
+    # motivo per cui si usa l'API). Quando diventa True ogni giro riparte dalla
+    # cima solo per intercettare i DM nuovi. Migration 036.
+    inbox_bottom_reached: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Frontiera della discesa API (oldest_cursor dell'ultima pagina letta). Separata
+    # da `scrape_cursor`, che significa "Fase Lista interrotta a meta'": quella deve
+    # tornare a NULL a fine giro (altrimenti la ripresa non passa mai alla Fase Bio),
+    # questa no. Migration 036.
+    inbox_deep_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Pagine lette in questa discesa (azzerate quando il fondo arriva davvero). Il
+    # budget di sessione chiude un giro e ne fa ripartire un altro: da solo non
+    # garantisce che la discesa finisca. Migration 036.
+    inbox_deep_pages: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     # 'completed' | 'partial' | 'rate_limited' — esito ultimo scraping
     scrape_outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)
     scrape_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

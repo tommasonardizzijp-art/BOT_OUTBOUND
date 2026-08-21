@@ -168,6 +168,16 @@ class Settings(BaseSettings):
     # oltre questo punto l'inbox e' gente gia' in lista (IG puo' tenere has_older
     # sempre True, quindi la lista girerebbe a vuoto all'infinito in silenzio).
     inbox_empty_page_stop: int = 8
+    # Pagine lette per sessione prima della pausa lunga. In discesa verso i thread
+    # vecchi una pagina puo' non portare nessun contatto nuovo per decine di giri:
+    # senza questo tetto il giro sarebbe una raffica ininterrotta di richieste.
+    # 15 pagine x 20 thread = 300 = lo stesso ritmo di inbox_session_size quando
+    # l'inbox e' vergine e ogni pagina porta solo contatti nuovi.
+    inbox_session_pages: int = 15
+    # Tetto della DISCESA intera (non della singola sessione): oltre questo numero
+    # di pagine senza aver mai raggiunto il fondo, il giro si ferma e avvisa. 500
+    # pagine = 10.000 thread, molto oltre qualunque inbox reale.
+    inbox_deep_max_pages: int = 500
     # Batch invio DM: quanti DM consecutivi (random tra min e max) prima di fare
     # il feed browse/riposo. Dentro il batch nessuna attesa aggiunta tra i DM (il
     # browse del profilo target fa gia' da gap). Riduce la frequenza dello scroll.
