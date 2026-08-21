@@ -234,15 +234,23 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
         )).scalars().all())
         # Seconda rete, sullo USERNAME: i contatti presi dal canale browser hanno una
         # targa provvisoria negativa, invisibile alla rete sul pk. Vedi classifica_pagina.
-        targa_per_username = {
-            normalizza_username(u): t
-            for u, t in (await db.execute(
-                select(Follower.username, Follower.ig_user_id).where(
-                    Follower.campaign_id == campaign_id
-                )
-            )).all()
-            if isinstance(u, str) and normalizza_username(u)
-        }
+        # Si tiene anche l'id della riga: la promozione deve colpire QUELLA riga, non
+        # ripescarla per username (in DB alcuni username sono salvati con la chiocciola
+        # o in maiuscolo, e una WHERE sullo username grezzo non li troverebbe — la
+        # promozione andrebbe a vuoto e il contatto sparirebbe in silenzio, perche'
+        # classificato come promozione non viene nemmeno inserito).
+        targa_per_username: dict[str, int] = {}
+        id_per_username: dict[str, str] = {}
+        for rid, uname, targa in (await db.execute(
+            select(Follower.id, Follower.username, Follower.ig_user_id).where(
+                Follower.campaign_id == campaign_id
+            )
+        )).all():
+            u = normalizza_username(uname) if isinstance(uname, str) else ""
+            if not u:
+                continue
+            targa_per_username[u] = targa
+            id_per_username[u] = rid
         since_break = 0
         pagine_da_pausa = 0   # pagine lette dall'ultima pausa: e' il budget di sessione
         empty_streak = 0   # pagine consecutive con 0 contatti nuovi -> inbox drenato
@@ -280,29 +288,41 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 u = normalizza_username(username) if isinstance(username, str) else ""
                 if u:
                     targa_per_username[u] = pk
+                    id_per_username.pop(u, None)   # la riga nuova non ha ancora un id qui
+            recuperi = 0    # promozioni finite a vuoto e salvate come riga nuova
             for pk, u in esito.promozioni:
                 # UPDATE mirato sulla riga a targa provvisoria: e' la stessa persona,
                 # presa dal browser senza pk. Non si tocca nient'altro della riga
                 # (full_name, last_message_*, stato: sono dati che l'API non ha).
-                await db.execute(
-                    update(Follower)
-                    .where(
-                        Follower.campaign_id == campaign_id,
-                        func.lower(Follower.username) == u,
-                        Follower.ig_user_id < 0,
+                # La guardia `ig_user_id < 0` regge la corsa con un altro worker che
+                # avesse gia' promosso la stessa riga: la seconda UPDATE non passa.
+                rid = id_per_username.get(u)
+                if rid is None:
+                    # Non dovrebbe succedere (la promozione nasce da questa mappa), ma
+                    # se succedesse si perderebbe il contatto: meglio inserirlo.
+                    logger.warning(f"[InboxLista] @{u}: riga da promuovere sparita — inserisco")
+                    db.add(Follower(
+                        campaign_id=campaign_id, ig_user_id=pk, username=u,
+                        full_name=None, is_private=False, is_verified=False,
+                        profile_pic_url=None, status=FollowerStatus.pending,
+                    ))
+                    recuperi += 1
+                else:
+                    await db.execute(
+                        update(Follower)
+                        .where(Follower.id == rid, Follower.ig_user_id < 0)
+                        .values(ig_user_id=pk, updated_at=datetime.utcnow())
                     )
-                    .values(ig_user_id=pk, updated_at=datetime.utcnow())
-                )
+                    logger.info(f"[InboxLista] @{u}: targa provvisoria promossa a pk reale {pk}")
                 existing_ids.add(pk)
                 targa_per_username[u] = pk
-                logger.info(f"[InboxLista] @{u}: targa provvisoria promossa a pk reale {pk}")
             for u in esito.collisioni_username:
                 logger.warning(
                     f"[InboxLista] @{u} esiste gia' con una targa REALE diversa: "
                     "username riassegnato dopo un rename, la nuova riga e' un'altra persona."
                 )
-            stored = len(esito.nuovi)
-            promossi = len(esito.promozioni)
+            stored = len(esito.nuovi) + recuperi
+            promossi = len(esito.promozioni) - recuperi
             nuovi_tot += stored
             promossi_tot += promossi
             already += stored

@@ -270,3 +270,28 @@ def test_la_campagna_ricorda_di_aver_toccato_il_fondo():
     None qui renderebbe ambiguo 'non lo so' contro 'non ancora'."""
     assert Campaign.__table__.c.inbox_bottom_reached.nullable is False
     assert Campaign.__table__.c.inbox_bottom_reached.server_default is not None
+
+
+def test_promuove_anche_la_riga_salvata_con_la_chiocciola(monkeypatch):
+    """In DB certi username stanno con la chiocciola o in maiuscolo (lo dice
+    targa.normalizza_username). La promozione deve colpire QUELLA riga: cercarla
+    con una WHERE sullo username grezzo non la troverebbe, e il contatto —
+    classificato come promozione, quindi mai inserito — sparirebbe in silenzio."""
+    pages = [
+        InboxPage(participants=[(555, "mario_shop")], cursor="c1", exhausted=False),
+        InboxPage(participants=[], cursor=None, exhausted=True),
+    ]
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, pages)
+    try:
+        _semina_follower(
+            session_factory, campaign_id,
+            ig_user_id=-8347, username="@Mario_Shop", full_name="Mario",
+            status=FollowerStatus.pending, source_channel="browser",
+        )
+        _run_inbox_list(session_factory, campaign_id)
+        righe, campaign = _leggi_follower(session_factory, campaign_id)
+        assert len(righe) == 1, f"attesa 1 riga, trovate {[(r.username, r.ig_user_id) for r in righe]}"
+        assert righe[0].ig_user_id == 555
+        assert campaign.total_followers == 1
+    finally:
+        cleanup()
