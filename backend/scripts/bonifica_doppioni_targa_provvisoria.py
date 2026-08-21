@@ -43,6 +43,8 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import InvalidRequestError
+from sqlalchemy.orm.exc import ObjectDeletedError
 
 from app.database import AsyncSessionLocal
 from app.models.campaign import Campaign
@@ -150,7 +152,10 @@ async def fondi_coppia(db, browser_row: Follower, api_row: Follower) -> str:
         # refresh, non expire: in contesto async un attributo scaduto non si puo'
         # ricaricare da solo (servirebbe IO sincrono dentro il greenlet sbagliato).
         await db.refresh(api_row)
-    except Exception:      # noqa: BLE001 — riga sparita sotto: niente da cancellare
+    except (ObjectDeletedError, InvalidRequestError):
+        # Solo "la riga non c'e' piu'": un errore di connessione non deve essere
+        # riportato come riga sparita, su uno script che cancella. Se la rete cade,
+        # l'eccezione sale e il chiamante la registra come errore vero.
         await db.rollback()
         return "la riga da cancellare non esiste piu': coppia lasciata intatta"
     motivo = await _api_e_una_scheda_vuota(db, api_row)
@@ -257,10 +262,15 @@ async def main():
             n = await db.scalar(
                 select(func.count(Follower.id)).where(Follower.campaign_id == cid)
             ) or 0
-            campaign = await db.get(Campaign, cid)
-            if campaign is not None:
-                campaign.total_followers = n
-                campaign.updated_at = datetime.utcnow()
+            # UPDATE mirato, non ORM: `db.get(Campaign, ...)` emetterebbe una SELECT
+            # con TUTTE le colonne mappate, comprese quelle della migration 036 —
+            # e questo script deve poter girare anche su un DB che non l'ha ancora,
+            # senza morire proprio qui, dopo aver gia' fuso le coppie.
+            await db.execute(
+                update(Campaign)
+                .where(Campaign.id == cid)
+                .values(total_followers=n, updated_at=datetime.utcnow())
+            )
         await db.commit()
 
         print(f"\nFuse {fatte} coppie. Contatore riallineato su {len(campagne_toccate)} campagne.")

@@ -299,3 +299,14 @@ def test_no_warning_when_batch_at_count(monkeypatch):
         assert warns == [], "nessun warning quando batch == count richiesto"
     finally:
         cleanup()
+
+
+def test_la_frontiera_della_discesa_sblocca_il_rilancio():
+    """Sull'inbox API la posizione della discesa vive in `inbox_deep_cursor`, e
+    `scrape_cursor` torna sempre NULL a giro chiuso. Guardando solo quello, una
+    discesa interrotta prima del fondo non si potrebbe piu' rilanciare — proprio
+    mentre il messaggio dice "la posizione e' salva, rilancia la lista"."""
+    assert list_start_blocked(None, existing_count=1000, list_target=None) is True
+    assert list_start_blocked(
+        None, existing_count=1000, list_target=None, inbox_deep_cursor="c1"
+    ) is False
