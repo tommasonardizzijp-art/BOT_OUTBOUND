@@ -258,7 +258,8 @@ class _ScriptedSource:
         return page
 
 
-def _setup_inbox_db(monkeypatch, pages: list[InboxPage], *, list_target=None):
+def _setup_inbox_db(monkeypatch, pages: list[InboxPage], *, list_target=None,
+                    bottom_reached=False):
     """Create a throw-away SQLite DB with one campaign in listing state.
 
     Patches scrape_inbox.build_inbox_source to return a _ScriptedSource.
@@ -290,6 +291,7 @@ def _setup_inbox_db(monkeypatch, pages: list[InboxPage], *, list_target=None):
                 status=CampaignStatus.listing,
                 messaging_enabled=False,
                 list_target=list_target,
+                inbox_bottom_reached=bottom_reached,
                 scrape_session_size=100_000,  # no session break in tests
                 scrape_break_minutes_min=30,
                 scrape_break_minutes_max=45,
@@ -481,11 +483,19 @@ def _inject_source(monkeypatch, src):
     monkeypatch.setattr(scrape_inbox, "build_inbox_source", _fake_build)
 
 
-def test_drain_stop_ferma_loop_infinito_di_duplicati(monkeypatch):
-    """Pagine vuote/non-esaurite all'infinito: il loop si ferma dopo esattamente
-    inbox_empty_page_stop pagine (non gira a vuoto per sempre) e va in ready."""
+def test_drain_stop_in_cima_ferma_loop_infinito_di_duplicati(monkeypatch):
+    """Pagine vuote/non-esaurite all'infinito, a fondo gia' raggiunto: il loop si
+    ferma dopo esattamente inbox_empty_page_stop pagine (non gira a vuoto per
+    sempre) e va in ready.
+
+    Vale in modalita' CIMA. In discesa lo stesso segnale ("0 nuovi") significa solo
+    che si sta attraversando roba gia' raccolta, e fermarsi li' terrebbe il fondo
+    dell'inbox irraggiungibile per sempre: li' il tetto e' il budget pagine, provato
+    dal test qui sotto."""
     from app.config import settings
-    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
+    session_factory, campaign_id, cleanup = _setup_inbox_db(
+        monkeypatch, [], bottom_reached=True
+    )
     try:
         src = _CountingSource(lambda n: InboxPage(participants=[], cursor=f"c{n}", exhausted=False))
         _inject_source(monkeypatch, src)
@@ -501,9 +511,35 @@ def test_drain_stop_ferma_loop_infinito_di_duplicati(monkeypatch):
         cleanup()
 
 
+def test_discesa_non_gira_all_infinito_ma_si_ferma_al_budget_pagine(monkeypatch):
+    """Stesso scenario patologico, ma in DISCESA: qui "0 nuovi" non ferma niente,
+    quindi la garanzia di terminazione la deve dare il budget pagine.
+
+    Il loop deve chiudere la sessione con un defer (pausa lunga) dopo esattamente
+    inbox_session_pages pagine, non andare avanti per sempre — se la guardia non
+    ci fosse, _run_inbox_list andrebbe in timeout (wait_for=10s)."""
+    from app.config import settings
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
+    try:
+        src = _CountingSource(lambda n: InboxPage(participants=[], cursor=f"c{n}", exhausted=False))
+        _inject_source(monkeypatch, src)
+        result = _run_inbox_list(session_factory, campaign_id)
+        cnt, status, total = _read_state(session_factory, campaign_id)
+        assert isinstance(result, int) and result > 0, f"atteso defer in secondi, ottenuto {result!r}"
+        assert status == CampaignStatus.listing_break
+        assert cnt == 0
+        assert src.calls == settings.inbox_session_pages, (
+            f"atteso stop dopo {settings.inbox_session_pages} pagine, fermato a {src.calls}"
+        )
+    finally:
+        cleanup()
+
+
 def test_un_nuovo_contatto_resetta_lo_streak(monkeypatch):
     """Uno streak di vuoti interrotto da 1 nuovo NON deve fermare: lo streak riparte
-    da zero, e il drain-stop scatta solo dopo inbox_empty_page_stop CONSECUTIVI."""
+    da zero, e il drain-stop scatta solo dopo inbox_empty_page_stop CONSECUTIVI.
+
+    Modalita' cima: e' l'unica in cui il drain-stop e' in vigore."""
     from app.config import settings
 
     def page_fn(n):
@@ -512,7 +548,9 @@ def test_un_nuovo_contatto_resetta_lo_streak(monkeypatch):
             return InboxPage(participants=[(100, "nuovo")], cursor=f"c{n}", exhausted=False)
         return InboxPage(participants=[], cursor=f"c{n}", exhausted=False)
 
-    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
+    session_factory, campaign_id, cleanup = _setup_inbox_db(
+        monkeypatch, [], bottom_reached=True
+    )
     try:
         src = _CountingSource(page_fn)
         _inject_source(monkeypatch, src)

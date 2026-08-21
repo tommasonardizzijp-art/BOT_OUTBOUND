@@ -142,6 +142,9 @@ class CampaignResponse(BaseModel):
     bio_target: int | None = None
     list_progress: dict | None = None
     inbox_cursor_at: datetime | None = None
+    # True = la discesa API ha gia' toccato il fondo dell'inbox: da li' in poi ogni
+    # giro e' solo una passata di cima per i DM nuovi.
+    inbox_bottom_reached: bool = False
     bio_progress: dict | None = None
 
     model_config = {"from_attributes": True}
