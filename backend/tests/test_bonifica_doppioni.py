@@ -191,3 +191,46 @@ def test_tre_righe_sullo_stesso_username_non_sono_una_coppia(db_factory):
     coppie, scartate = asyncio.run(_go())
     assert coppie == []
     assert len(scartate) == 1 and "non e' la coppia attesa" in scartate[0][2]
+
+
+def test_non_cancella_se_la_gemella_cambia_fra_il_controllo_e_la_cancellazione(db_factory):
+    """Le guardie del pre-check si ripetono DENTRO la transazione: fra la lettura e
+    la DELETE un worker puo' portare la riga a 'sent' o scriverle un dato, e a quel
+    punto non e' piu' la scheda vuota che lo script credeva di cancellare."""
+    cid, ids = _campagna_con_coppia(db_factory)
+
+    async def _go():
+        async with db_factory() as db:
+            coppie, _ = await bonifica._coppie(db, cid)
+            _, _, browser_row, api_row = coppie[0]
+            async with db_factory() as altra:      # un worker, nel frattempo
+                riga = await altra.get(Follower, ids["api"])
+                riga.status = FollowerStatus.sent
+                await altra.commit()
+            return await bonifica.fondi_coppia(db, browser_row, api_row)
+
+    esito = asyncio.run(_go())
+    assert esito != "fusa" and "cambiata sotto" in esito
+    righe = _righe(db_factory, cid)
+    assert len(righe) == 2, "nessuna delle due righe deve sparire"
+    assert sorted(r.ig_user_id for r in righe) == [-8347, 555], "e nessuna deve cambiare targa"
+
+
+def test_non_cancella_se_nel_frattempo_arriva_un_messaggio(db_factory):
+    """messages.follower_id e' ON DELETE CASCADE e il backup contiene solo i
+    Follower: un messaggio arrivato dopo il controllo sparirebbe senza copia."""
+    cid, ids = _campagna_con_coppia(db_factory)
+
+    async def _go():
+        async with db_factory() as db:
+            coppie, _ = await bonifica._coppie(db, cid)
+            _, _, browser_row, api_row = coppie[0]
+            async with db_factory() as altra:
+                altra.add(Message(campaign_id=cid, follower_id=ids["api"],
+                                  generated_text="ciao"))
+                await altra.commit()
+            return await bonifica.fondi_coppia(db, browser_row, api_row)
+
+    esito = asyncio.run(_go())
+    assert esito != "fusa"
+    assert len(_righe(db_factory, cid)) == 2

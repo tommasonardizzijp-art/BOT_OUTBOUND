@@ -488,3 +488,89 @@ def test_fermarsi_senza_cursore_non_si_annuncia_come_completata(monkeypatch):
         assert completi == ["warn"], f"atteso un scrape_complete di livello warn, visti {eventi}"
     finally:
         cleanup()
+
+
+def test_il_contatore_della_discesa_avanza_a_ogni_pagina(monkeypatch):
+    """Il contatore va scritto insieme al commit della pagina: scrivendolo dopo, il
+    `db.refresh(campaign)` in testa al giro successivo lo butta (refresh non fa
+    autoflush) e sopravvive solo l'ultimo incremento di ogni sessione — un tetto di
+    500 pagine diventerebbe un tetto di 500 SESSIONI."""
+    pages = [
+        InboxPage(participants=[(1, "uno")], cursor="c1", exhausted=False, threads_letti=1),
+        InboxPage(participants=[(2, "due")], cursor="c2", exhausted=False, threads_letti=1),
+        InboxPage(participants=[(3, "tre")], cursor="c3", exhausted=False, threads_letti=1),
+        InboxPage(participants=[], cursor=None, exhausted=True, bottom_confirmed=False),
+    ]
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, pages)
+    try:
+        _run_inbox_list(session_factory, campaign_id)
+        _, campaign = _leggi_follower(session_factory, campaign_id)
+        assert campaign.inbox_deep_pages == 4, (
+            f"attese 4 pagine contate, il contatore dice {campaign.inbox_deep_pages}"
+        )
+    finally:
+        cleanup()
+
+
+def test_le_passate_di_cima_non_consumano_il_budget_della_discesa(monkeypatch):
+    """Una campagna che ha toccato il fondo non sta scendendo: le sue passate non
+    devono consumare il tetto, altrimenti prima o poi ogni giro si fermerebbe dopo
+    una pagina annunciando una discesa che non sta avvenendo."""
+    session_factory, campaign_id, cleanup = _setup_inbox_db(
+        monkeypatch, [], bottom_reached=True
+    )
+    try:
+        src = _CountingSource(lambda n: InboxPage(
+            participants=[], cursor=f"c{n}", exhausted=False, threads_letti=5,
+        ))
+        _inject_source(monkeypatch, src)
+        _run_inbox_list(session_factory, campaign_id)
+        _, campaign = _leggi_follower(session_factory, campaign_id)
+        assert campaign.inbox_deep_pages == 0
+    finally:
+        cleanup()
+
+
+def test_una_collisione_di_targa_non_porta_via_la_pagina(monkeypatch):
+    """La corsa vera: un altro motore scrive una riga con lo stesso pk DOPO che il
+    giro ha riletto lo stato della campagna e PRIMA che scriva. E' l'unica finestra
+    rimasta (lo stato si rilegge a ogni pagina), ed e' quella che i savepoint devono
+    coprire: senza, l'IntegrityError arriva al commit e porta via la pagina intera —
+    e la frontiera ci salta sopra, quindi quei thread non li rilegge piu' nessuno.
+
+    La riga in conflitto la scrive un wrapper su _stato_campagna, da una SECONDA
+    sessione: e' il modo di piazzarsi esattamente dentro quella finestra."""
+    pages = [
+        InboxPage(participants=[(10, "dieci"), (20, "venti"), (30, "trenta")],
+                  cursor="c1", exhausted=False, threads_letti=3),
+        InboxPage(participants=[], cursor=None, exhausted=True, bottom_confirmed=True),
+    ]
+    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, pages)
+
+    from app.services import scrape_inbox as modulo
+    originale = modulo._stato_campagna
+    letture = {"n": 0}
+
+    async def _stato_e_intrusione(db, cid):
+        stato = await originale(db, cid)
+        letture["n"] += 1
+        # La seconda lettura e' quella della prima PAGINA (la prima e' l'apertura del
+        # giro): e' li' che si apre la finestra fra rilettura e scrittura.
+        if letture["n"] == 2:
+            async with session_factory() as altra:
+                altra.add(Follower(
+                    campaign_id=cid, ig_user_id=20, username="venti",
+                    status=FollowerStatus.pending,
+                ))
+                await altra.commit()
+        return stato
+
+    monkeypatch.setattr(modulo, "_stato_campagna", _stato_e_intrusione)
+    try:
+        _run_inbox_list(session_factory, campaign_id)
+        righe, campaign = _leggi_follower(session_factory, campaign_id)
+        targhe = sorted(r.ig_user_id for r in righe)
+        assert targhe == [10, 20, 30], f"la pagina doveva sopravvivere alla collisione: {targhe}"
+        assert campaign.inbox_bottom_reached is True, "i controlli di fine giro devono girare"
+    finally:
+        cleanup()

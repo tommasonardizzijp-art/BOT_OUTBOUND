@@ -140,16 +140,23 @@ async def fondi_coppia(db, browser_row: Follower, api_row: Follower) -> str:
     la DELETE passerebbe lo stesso e il contatto sparirebbe insieme al suo pk.
     """
     pk_vero = api_row.ig_user_id
-    # Le guardie del controllo si ripetono QUI, dentro la stessa transazione: fra la
-    # lettura e la cancellazione un worker puo' aver portato la riga a 'sent', averla
-    # lockata o averle collegato un Message — e messages.follower_id e' ON DELETE
-    # CASCADE, quindi quel messaggio sparirebbe senza nemmeno finire nel backup.
-    n_msg = await db.scalar(
-        select(func.count(Message.id)).where(Message.follower_id == api_row.id)
-    ) or 0
-    if n_msg:
+    # Le guardie del controllo si ripetono QUI, dentro la stessa transazione, e sono
+    # le STESSE (non un sottoinsieme): fra la lettura e la cancellazione un worker
+    # puo' aver portato la riga a 'sent', averla lockata, averle scritto un dato o
+    # collegato un Message — e messages.follower_id e' ON DELETE CASCADE, quindi quel
+    # messaggio sparirebbe senza nemmeno finire nel backup (il backup contiene solo
+    # i Follower).
+    try:
+        # refresh, non expire: in contesto async un attributo scaduto non si puo'
+        # ricaricare da solo (servirebbe IO sincrono dentro il greenlet sbagliato).
+        await db.refresh(api_row)
+    except Exception:      # noqa: BLE001 — riga sparita sotto: niente da cancellare
         await db.rollback()
-        return f"la riga da cancellare ha {n_msg} messaggi collegati: coppia lasciata intatta"
+        return "la riga da cancellare non esiste piu': coppia lasciata intatta"
+    motivo = await _api_e_una_scheda_vuota(db, api_row)
+    if motivo:
+        await db.rollback()
+        return f"la riga da cancellare e' cambiata sotto ({motivo}): coppia lasciata intatta"
     cancellata = await db.execute(
         delete(Follower).where(
             Follower.id == api_row.id,

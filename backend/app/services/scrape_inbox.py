@@ -339,6 +339,7 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 if rid is None:
                     recuperi.append((pk, username_grezzo))
                     continue
+                righe_toccate = 0
                 try:
                     async with db.begin_nested():
                         res = await db.execute(
@@ -346,6 +347,7 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                             .where(Follower.id == rid, Follower.ig_user_id < 0)
                             .values(ig_user_id=pk, updated_at=datetime.utcnow())
                         )
+                        righe_toccate = res.rowcount
                 except IntegrityError:
                     # UNIQUE(campaign_id, ig_user_id): quel pk l'ha appena preso
                     # un'altra riga (Fase Bio browser, inbox browser). Il savepoint
@@ -358,7 +360,7 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                     )
                     scartati += 1
                     continue
-                if res.rowcount == 0:
+                if righe_toccate == 0:
                     # La riga non c'e' piu' o non e' piu' provvisoria (promossa nel
                     # frattempo dalla Fase Bio, o cancellata). L'UPDATE non solleva
                     # niente: senza questo ramo il contatto risulterebbe promosso e
@@ -422,6 +424,15 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             # In discesa la frontiera va nel suo campo; `scrape_cursor` serve a
             # campaign_control per sapere che il giro e' a meta', e viene azzerato
             # quando il giro chiude (vedi in fondo).
+            if not modo_cima:
+                # Il contatore delle pagine di discesa si incrementa QUI, insieme al
+                # commit della pagina: scrivendolo dopo, il `db.refresh(campaign)` in
+                # testa al giro successivo lo butterebbe via (refresh non fa
+                # autoflush) e sopravviverebbe solo l'ultimo incremento di ogni
+                # sessione — un tetto di 500 pagine diventerebbe un tetto di 500
+                # sessioni, cioe' mesi. E solo in discesa: le passate di cima non
+                # scendono, non devono consumare quel budget.
+                campaign.inbox_deep_pages = (campaign.inbox_deep_pages or 0) + 1
             if not modo_cima and page.cursor:
                 # Solo un cursore VERO fa avanzare la frontiera: una risposta senza
                 # oldest_cursor (payload troncato, blip) la azzererebbe, e il giro
@@ -436,6 +447,13 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 f"{promossi} promossi, {esito.gia_presenti} gia' in lista, "
                 f"{scartati} saltati per collisione (totale {already})"
             )
+            if scartati:
+                emit_event(
+                    campaign_id, "scrape_warning",
+                    f"{scartati} contatti saltati: un altro motore aveva gia' scritto "
+                    "quelle stesse persone.",
+                    level="warn",
+                )
             if stored or promossi:
                 emit_event(
                     campaign_id, "scrape_batch",
@@ -499,8 +517,7 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             # garantisce che la discesa finisca. Se IG continua a servire pagine
             # piene con cursori sempre diversi (inbox che cicla), senza questo si
             # scenderebbe per sempre, sessione dopo sessione.
-            campaign.inbox_deep_pages = (campaign.inbox_deep_pages or 0) + 1
-            if campaign.inbox_deep_pages >= settings.inbox_deep_max_pages:
+            if not modo_cima and campaign.inbox_deep_pages >= settings.inbox_deep_max_pages:
                 logger.warning(
                     f"[InboxLista] {campaign.inbox_deep_pages} pagine di discesa senza "
                     f"raggiungere il fondo — mi fermo ({already})"
