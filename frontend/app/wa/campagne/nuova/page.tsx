@@ -124,6 +124,7 @@ export default function NuovaCampagnaPage() {
   const [name, setName] = useState('')
   const [tipo, setTipo] = useState<WaCampaignType>('marketing')
   const [optoutCta, setOptoutCta] = useState(CTA_DEFAULT_MARKETING)
+  const [skipHistoryGate, setSkipHistoryGate] = useState(false)
   const [creandoCampagna, setCreandoCampagna] = useState(false)
   const [erroreCampagna, setErroreCampagna] = useState<string | null>(null)
 
@@ -165,6 +166,7 @@ export default function NuovaCampagnaPage() {
         template_a: TEMPLATE_SEGNAPOSTO_INIZIALE,
         // optout_enabled: MAI qui. Solo optout_cta, e solo per marketing.
         optout_cta: tipo === 'marketing' ? optoutCta.trim() : undefined,
+        skip_history_gate: skipHistoryGate,
       })
       setCampaignId(creata.id)
       setPasso(2)
@@ -380,6 +382,8 @@ export default function NuovaCampagnaPage() {
           setTipo={setTipo}
           optoutCta={optoutCta}
           setOptoutCta={setOptoutCta}
+          skipHistoryGate={skipHistoryGate}
+          setSkipHistoryGate={setSkipHistoryGate}
           erroreCampagna={erroreCampagna}
           creandoCampagna={creandoCampagna}
           onSubmit={handleCreaCampagna}
@@ -516,6 +520,8 @@ function PassoCampagna(props: {
   setTipo: (v: WaCampaignType) => void
   optoutCta: string
   setOptoutCta: (v: string) => void
+  skipHistoryGate: boolean
+  setSkipHistoryGate: (v: boolean) => void
   erroreCampagna: string | null
   creandoCampagna: boolean
   onSubmit: (e: React.FormEvent) => void
@@ -523,6 +529,7 @@ function PassoCampagna(props: {
   const {
     tenants, numeriAttivi, tenantId, setTenantId, numberId, setNumberId,
     name, setName, tipo, setTipo, optoutCta, setOptoutCta,
+    skipHistoryGate, setSkipHistoryGate,
     erroreCampagna, creandoCampagna, onSubmit,
   } = props
 
@@ -610,6 +617,29 @@ function PassoCampagna(props: {
             />
           </Campo>
         )}
+
+        <div
+          className="space-y-2 rounded-lg border px-3 py-3"
+          style={{ borderColor: skipHistoryGate ? '#e0b83c' : 'var(--wa-border)' }}
+        >
+          <label className="flex items-start gap-2.5 text-sm">
+            <input
+              type="checkbox"
+              checked={skipHistoryGate}
+              onChange={(e) => setSkipHistoryGate(e.target.checked)}
+              className="mt-0.5 h-4 w-4"
+            />
+            <span className="font-medium" style={{ color: '#e7f3ef' }}>
+              Scrivi anche a chi non ha mai avuto una chat con questo numero
+            </span>
+          </label>
+          <p className="pl-6 text-xs" style={{ color: 'var(--wa-muted)' }}>
+            Normalmente un contatto senza cronologia pregressa viene saltato (non si puo&apos;
+            escludere un opt-out gia&apos; scritto altrove). Attiva SOLO se sei certo che questa
+            e&apos; la primissima comunicazione mai mandata a questi contatti: la guardia STOP
+            resta comunque attiva su ogni invio.
+          </p>
+        </div>
 
         <div className="flex justify-end">
           <Button type="submit" disabled={creandoCampagna} style={{ backgroundColor: 'var(--wa-accent)', color: '#04120e' }}>

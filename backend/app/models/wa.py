@@ -220,6 +220,19 @@ class WaCampaign(Base):
     daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     optout_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     optout_cta: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Deroga alla guardia V2 (contratto §3.1/§3.2): quando True, un contatto
+    # senza chat pregressa NON viene skippato -- si prova comunque l'invio.
+    # A differenza di optout_enabled, QUESTO campo si accetta dal payload di
+    # creazione: e' un giudizio che solo chi crea la campagna puo' dare ("so
+    # per certo che e' la prima volta che scriviamo a questa gente"), non
+    # calcolabile da campaign_type. Sostituisce da 21/08 il CSV in .env
+    # (wa_skip_history_gate_campaign_ids) -- inutilizzabile quando ogni
+    # cliente nuovo arriva con contatti mai contattati e serve un toggle
+    # per campagna, non un file da editare a mano ogni volta. La guardia
+    # STOP (guardia_pre_invio) non e' toccata da questo campo e resta
+    # l'unica difesa contro un opt-out gia' scritto. Default False =
+    # comportamento originale (skip se manca la cronologia).
+    skip_history_gate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     active_hours_start: Mapped[str | None] = mapped_column(String(5), nullable=True)
     active_hours_end: Mapped[str | None] = mapped_column(String(5), nullable=True)
     session_min_messages: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -466,15 +466,11 @@ class Settings(BaseSettings):
     # Stesso valore di campaign_orchestrator.LOCK_TIMEOUT_MINUTES.
     wa_lock_timeout_min: int = 20
     wa_max_failures_per_contact: int = 3        # SDD 8.2
-    # Deroga temporanea alla guardia V2 (contratto §3.1/§3.2), scoped per
-    # campagna: decisione di Tommaso 19/08 sulle campagne PRIMERO che sono la
-    # prima comunicazione mai mandata a quei contatti (impossibile un opt-out
-    # pregresso). CSV di campaign_id: SOLO le campagne qui elencate mandano
-    # anche senza cronologia pregressa; tutte le altre restano fail-closed
-    # come sempre. La guardia STOP (guardia_pre_invio) NON e' toccata da
-    # questo flag e resta attiva su ogni invio. Vuoto = comportamento
-    # invariato (default).
-    wa_skip_history_gate_campaign_ids: str = ""
+    # La deroga alla guardia V2 (contratto §3.1/§3.2, decisione 19/08) e' da
+    # 21/08 WaCampaign.skip_history_gate -- toggle per-campagna impostabile
+    # dalla UI alla creazione, non piu' un CSV qui (wa_skip_history_gate_
+    # campaign_ids, PR #101): editare .env per ogni campagna nuova non
+    # scala quando ogni cliente arriva con contatti mai contattati dal bot.
     # Parole DURE: opt-out immediato, nessun caso ambiguo in italiano comune
     # (review G6, 07/08). "basta" spostata sotto: e' comunissima in frasi che
     # non sono un opt-out ("mi basta sapere se siete aperti").

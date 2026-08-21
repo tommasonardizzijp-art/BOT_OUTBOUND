@@ -71,6 +71,10 @@ async def crea_campagna(db, dati: dict) -> WaCampaign:
         daily_limit=dati.get("daily_limit"),
         active_hours_start=dati.get("active_hours_start"),
         active_hours_end=dati.get("active_hours_end"),
+        # A differenza di optout_enabled, questo SI accetta dal payload:
+        # e' un giudizio di chi crea la campagna ("prima volta che scriviamo
+        # a questa gente"), non calcolabile da campaign_type (21/08).
+        skip_history_gate=bool(dati.get("skip_history_gate", False)),
         created_at=adesso_utc(),
     )
     db.add(campagna)

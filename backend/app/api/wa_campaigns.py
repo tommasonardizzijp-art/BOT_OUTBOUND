@@ -27,7 +27,7 @@ router = APIRouter(prefix="/wa/campaigns", tags=["wa-campaigns"])
 # o dagli endpoint di ciclo vita (Task 7). Un PATCH che li accettasse
 # creerebbe due padroni per la stessa colonna.
 CAMPI_MODIFICABILI = {"name", "daily_limit", "optout_cta", "active_hours_start",
-                      "active_hours_end", "optout_enabled"}
+                      "active_hours_end", "optout_enabled", "skip_history_gate"}
 
 # Gli stati in cui una campagna si puo' ancora toccare. 'paused' e' incluso, e
 # non e' un allargamento disinvolto: e' la strada che il messaggio d'errore
@@ -64,6 +64,7 @@ def _serializza(c: WaCampaign) -> dict:
         "daily_limit": c.daily_limit,
         "optout_enabled": c.optout_enabled,
         "optout_cta": c.optout_cta,
+        "skip_history_gate": c.skip_history_gate,
         "active_hours_start": c.active_hours_start,
         "active_hours_end": c.active_hours_end,
         "total_contacts": c.total_contacts,

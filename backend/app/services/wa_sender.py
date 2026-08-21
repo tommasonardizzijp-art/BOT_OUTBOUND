@@ -72,11 +72,12 @@ def valuta_apertura(res: OpenResult, *, bypassa_gate_cronologia: bool = False) -
     marca il contatto, perche' quello e' irreversibile per il contatto e
     invisibile a chi guarda i log.
 
-    `bypassa_gate_cronologia` (default False, decisione 19/08, vedi
-    config.wa_skip_history_gate_campaign_ids): quando True, un contatto senza
-    chat pregressa NON viene skippato -- si prova comunque l'invio. Non tocca
-    nessun altro ramo: la guardia STOP (guardia_pre_invio) gira comunque dopo
-    l'apertura e resta l'unica difesa contro un opt-out gia' scritto.
+    `bypassa_gate_cronologia` (default False, decisione 19/08; da 21/08 e'
+    WaCampaign.skip_history_gate, non piu' un CSV in .env): quando True, un
+    contatto senza chat pregressa NON viene skippato -- si prova comunque
+    l'invio. Non tocca nessun altro ramo: la guardia STOP (guardia_pre_invio)
+    gira comunque dopo l'apertura e resta l'unica difesa contro un opt-out
+    gia' scritto.
     """
     signal = res.signal or ""
 
@@ -343,10 +344,8 @@ async def invia_a_contatto(db, pom, *, campaign, step, cc, contact, number,
     masked = mask_phone(e164)
 
     # --- apertura chat -----------------------------------------------------
-    bypass_ids = {s.strip() for s in settings.wa_skip_history_gate_campaign_ids.split(",") if s.strip()}
-    bypassa_gate = str(campaign.id) in bypass_ids
     apertura = valuta_apertura(await pom.open_chat(e164),
-                               bypassa_gate_cronologia=bypassa_gate)
+                               bypassa_gate_cronologia=bool(campaign.skip_history_gate))
     if not apertura.puo_inviare:
         logger.info(f"[WA] {masked}: apertura -> {apertura.motivo} "
                     f"(colpa_nostra={apertura.colpa_nostra})")
