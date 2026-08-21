@@ -47,6 +47,16 @@ COMPOSER = ["[contenteditable='true'][data-lexical-editor='true']",
 # con una conversazione caricata.
 MAIN = "#main"
 
+# Header della conversazione aperta (nome/numero del contatto o gruppo).
+# VERIFICATO 09-10/08 (poc4_info_panel.py, sul numero vero di Primero):
+# 20/20 chat aperte hanno agganciato uno dei due candidati. Serve a leggere
+# il titolo della chat GIA' APERTA senza ripassare dalla sidebar -- fix
+# 21/08 di un bug diverso: _impara_chat_title prendeva la prima riga della
+# sidebar assumendo fosse il contatto appena scritto, falso ogni volta che
+# un'altra chat molto attiva (o pinnata) la scavalcava (283 contatti
+# corrotti su una campagna sola, chat_title tutti uguali a una chat terza).
+HEADER = ["header[data-testid='conversation-header']", "#main header"]
+
 # Nodo canonico di un messaggio nel pannello conversazione. VERIFICATO 35/35
 # su una chat reale (27/07).
 # ATTENZIONE -- trappola gia' presa (wa-dom-catalog.md): "#main

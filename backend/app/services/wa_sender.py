@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from loguru import logger
 
-from app.browser.whatsapp_page import OpenResult
+from app.browser.whatsapp_page import OpenResult, title_is_number
 from app.utils.tempo import adesso_utc
 
 # Segnali del POM che significano "la chat 1:1 non esiste": colpa del dato,
@@ -479,31 +479,39 @@ async def _impara_chat_title(db, pom, contact) -> None:
     """Il titolo serve al watcher di M4 per agganciare le risposte. Si
     salva SOLO se e' un nome: title_is_number distingue i contatti non in
     rubrica (8 su 68 misurati in M0), e per quelli il matching usa gia'
-    phone_hmac."""
+    phone_hmac.
+
+    Legge l'header della chat GIA' APERTA (read_open_chat_title, fix 21/08),
+    non piu' la sidebar: rileggere la sidebar dopo l'invio e prendere la
+    prima riga assumendo fosse il contatto appena scritto era
+    un'assunzione di POSIZIONE, non di identita' -- falsa ogni volta che
+    un'altra chat (molto attiva o pinnata) scavalcava quella giusta nella
+    finestra fra l'invio e questo rescan. Misurato dal vivo: 283 contatti
+    di una sola campagna con lo stesso chat_title sbagliato (quello della
+    chat che scavalcava), che rendeva il matching del reply-watcher
+    permanentemente ambiguo per tutti loro -- ogni STOP o risposta vera
+    arrivava col nome VERO nel DOM, che non combaciava piu' con nulla a DB,
+    e spariva prima di essere letto. Leggere l'header della chat aperta
+    non ha questa ambiguita': non c'e' una posizione da indovinare, la
+    chat aperta e' quella che abbiamo appena cercato ed e' l'unica."""
     if contact.chat_title:
         return
     try:
-        righe = await pom.scan_chat_list()
+        titolo = await pom.read_open_chat_title()
     except Exception as exc:
         logger.debug(f"chat_title non appreso ({type(exc).__name__}): non e' un errore")
         return
-    # La riga "messaggi a te stesso" e' inclusa nello scan apposta (altri
-    # chiamanti la usano), ma il suo titolo e' il nome del TITOLARE del
-    # numero mittente, non del contatto appena scritto -- se resta in testa
-    # (es. pinnata) righe[0] la prende per buona (bug trovato dal vivo 08/08,
-    # riprodotto 4/4 su un invio reale: chat_title salvato = nome di Tommaso
-    # per ogni contatto appena contattato).
-    righe = [r for r in righe if not r.is_yourself]
-    if righe and not righe[0].title_is_number and righe[0].title:
-        # NFC prima del troncamento: il DOM di WhatsApp puo' restituire un
-        # nome accentato in NFC o NFD a seconda del sistema che l'ha
-        # originato, e il matching del reply-watcher confronta con '=='
-        # (bug silenzioso senza normalizzazione, backlog M4). Normalizzare
-        # DOPO aver troncato a meta' di un carattere combinante darebbe un
-        # risultato diverso: si normalizza la stringa intera, poi si tronca.
-        titolo_nfc = unicodedata.normalize("NFC", righe[0].title)
-        contact.chat_title = titolo_nfc[:200]
-        await db.commit()
+    if not titolo or title_is_number(titolo):
+        return
+    # NFC prima del troncamento: il DOM di WhatsApp puo' restituire un
+    # nome accentato in NFC o NFD a seconda del sistema che l'ha
+    # originato, e il matching del reply-watcher confronta con '=='
+    # (bug silenzioso senza normalizzazione, backlog M4). Normalizzare
+    # DOPO aver troncato a meta' di un carattere combinante darebbe un
+    # risultato diverso: si normalizza la stringa intera, poi si tronca.
+    titolo_nfc = unicodedata.normalize("NFC", titolo)
+    contact.chat_title = titolo_nfc[:200]
+    await db.commit()
 
 
 async def _incrementa_contatore_campagna(db, campaign_id: str, campo: str) -> None:

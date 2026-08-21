@@ -16,6 +16,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from loguru import logger
@@ -30,6 +31,16 @@ class OpenResult:
     ok: bool
     ms: float
     signal: str
+    # Badge "non letto" della riga nei risultati di ricerca, letto PRIMA del
+    # click che apre la chat (e la marca letta). Serve a chi deve aprire una
+    # chat per un'operazione una tantum (es. backfill 21/08) e vuole poter
+    # dire quali erano davvero da leggere, senza dover indovinare un
+    # selettore nuovo per il "segna come da leggere" del menu contestuale
+    # (mai verificato dal vivo, troppo vicino a 'Elimina'/'Archivia' per
+    # rischiarlo su chat vere senza una POC dedicata prima). Default False:
+    # ogni chiamante esistente che non legge questo campo non cambia
+    # comportamento.
+    era_non_letto: bool = False
 
 
 @dataclass
@@ -47,6 +58,15 @@ class HistoryInfo:
 # non deve comunque leggere un numero come se fosse un nome -- e' il segnale
 # che impedisce a M2/M3 di salvare un numero in chiaro in chat_title (P12).
 _BIDI_MARKERS = re.compile("[" + chr(0x202a) + "-" + chr(0x202e) + chr(0x2066) + "-" + chr(0x2069) + "]")
+
+
+def title_is_number(title: str) -> bool:
+    """True se `title` e' un numero puro (contatto non in rubrica) e non un
+    nome. Pubblica (non solo per ChatRow, vedi scan_chat_list) perche' serve
+    anche a chi legge il titolo dall'header della chat aperta
+    (read_open_chat_title) con lo stesso identico giudizio P12: mai salvare
+    un numero in chiaro come se fosse un nome."""
+    return _BIDI_MARKERS.sub("", title or "").replace(" ", "").replace("+", "").isdigit()
 
 
 @dataclass
@@ -169,6 +189,63 @@ _JS_MESSAGE_SIGNALS = """
 }
 """
 
+# Come _JS_MESSAGE_SIGNALS, con in piu' pre_plain_text -- VERIFICATO dal vivo
+# il 21/08 (diag_wa_timestamp.py, su chat reali): l'attributo
+# data-pre-plain-text di '.copyable-text' porta '[HH:MM, DD/MM/YYYY]
+# Mittente: ', presente su ogni bolla-messaggio vera, ASSENTE sulle righe di
+# sistema (es. l'avviso di crittografia end-to-end) che non hanno un
+# mittente. Serve a read_inbound_since, non a read_inbound_tail: quest'
+# ultimo resta invariato apposta (usato dalla guardia STOP, SDD 6.4, che non
+# ha nozione di tempo e deve restare quella).
+_JS_MESSAGE_SIGNALS_TIMESTAMP = """
+(args) => {
+  const rows = Array.from(document.querySelectorAll(args.msgRow));
+  if (rows.length === 0) return null;
+  return rows.map((el) => {
+    let tailIcon = null;
+    if (el.querySelector("[data-icon='tail-out']")) tailIcon = 'tail-out';
+    else if (el.querySelector("[data-icon='tail-in']")) tailIcon = 'tail-in';
+    const copy = el.querySelector('.copyable-text');
+    return {
+      aria_tu: !!el.querySelector("span[aria-label='Tu:']"),
+      tail_icon: tailIcon,
+      data_id: el.getAttribute('data-id') || null,
+      text: (el.innerText || '').slice(0, 300),
+      pre_plain_text: copy ? (copy.getAttribute('data-pre-plain-text') || null) : null,
+    };
+  });
+}
+"""
+
+_RE_TIMESTAMP_WA = re.compile(r"^\[(\d{2}):(\d{2}), (\d{2})/(\d{2})/(\d{4})\]")
+
+
+def parse_wa_timestamp(pre_plain_text):
+    """Timestamp del messaggio dal prefisso data-pre-plain-text di WhatsApp
+    Web, VERIFICATO dal vivo il 21/08 (diag_wa_timestamp.py). Fuso fisso
+    Europe/Rome via zoneinfo (verificato disponibile su questa macchina il
+    21/08 -- niente fallback UTC+1 costante, l'incidente noto di tzdata
+    mancante): il testo che WhatsApp mostra e' sempre l'ora LOCALE del
+    dispositivo, che per questo numero e' sempre l'Italia.
+
+    None se il prefisso manca (righe di sistema come l'avviso di
+    crittografia, che non hanno data-pre-plain-text affatto -- vedi
+    classify_direction, che le conta 'in' per sicurezza sullo STOP: qui
+    invece si scartano, mai una data indovinata) o non combacia col
+    formato atteso."""
+    from zoneinfo import ZoneInfo
+
+    if not pre_plain_text:
+        return None
+    m = _RE_TIMESTAMP_WA.match(pre_plain_text)
+    if not m:
+        return None
+    hh, mm, dd, mo, yyyy = (int(x) for x in m.groups())
+    try:
+        return datetime(yyyy, mo, dd, hh, mm, tzinfo=ZoneInfo("Europe/Rome"))
+    except ValueError:
+        return None
+
 # Scan della lista chat (sidebar). Nessun click su una riga: uno scan che
 # apre una chat per capire qualcosa la marca anche come letta.
 _JS_SCAN_CHAT_LIST = """
@@ -286,18 +363,24 @@ class WhatsAppWebPage:
                 residuo = ""
         return residuo == ""
 
-    async def _apri_chat_da_risultati(self, timeout_ms: int = 8000) -> tuple[bool, str]:
+    async def _apri_chat_da_risultati(self, timeout_ms: int = 8000) -> tuple[bool, str, bool]:
         """Apre la chat 1:1 dai risultati di ricerca, navigando PER SEZIONE.
 
         Ne' Enter ne' 'la prima riga': la riga 0 e' l'intestazione 'Chat', e
         sotto 'Gruppi in comune' ci sono GRUPPI, fuori perimetro -- aprirli
         per sbaglio li marca anche come letti.
-        """
+
+        Terzo valore di ritorno: True se la riga aveva il badge 'non letto'
+        PRIMA del click che la apre (e la marca letta) -- letto con lo
+        stesso UNREAD_BADGE gia' verificato per la sidebar, solo scoped alla
+        riga di risultato invece che alla lista chat (stessa componente
+        DOM). Serve a chi apre una chat per un'operazione una tantum e deve
+        poter dire dopo quali erano davvero da leggere."""
         righe = self._page.locator(sel.ROW)
         try:
             await righe.first.wait_for(state="visible", timeout=timeout_ms)
         except Exception:
-            return False, "nessun-risultato-di-ricerca"
+            return False, "nessun-risultato-di-ricerca", False
 
         n = await righe.count()
         testi = []
@@ -309,12 +392,17 @@ class WhatsAppWebPage:
 
         idx = next((i for i, t in enumerate(testi) if t.lower() in ("chat", "chats")), None)
         if idx is None:
-            return False, "nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione"
+            return False, "nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione", False
         if idx + 1 >= n or testi[idx + 1].lower() in sel.SEARCH_RESULT_HEADERS:
-            return False, "sezione-chat-vuota:nessuna-conversazione-esistente"
+            return False, "sezione-chat-vuota:nessuna-conversazione-esistente", False
 
-        await righe.nth(idx + 1).click()
-        return True, f"aperta-riga-{idx + 1}"
+        riga_target = righe.nth(idx + 1)
+        try:
+            era_non_letto = await riga_target.locator(sel.UNREAD_BADGE).count() > 0
+        except Exception:
+            era_non_letto = False
+        await riga_target.click()
+        return True, f"aperta-riga-{idx + 1}", era_non_letto
 
     async def _history_signal(self) -> str:
         try:
@@ -360,7 +448,7 @@ class WhatsAppWebPage:
             logger.warning(f"open_chat({masked}): focus perso prima della selezione")
             return OpenResult(False, _elapsed_ms(t0), "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio")
 
-        aperto, nota = await self._apri_chat_da_risultati()
+        aperto, nota, era_non_letto = await self._apri_chat_da_risultati()
         if not aperto:
             return OpenResult(False, _elapsed_ms(t0), f"nessuna-cronologia:{nota}")
 
@@ -369,7 +457,34 @@ class WhatsAppWebPage:
         ms = _elapsed_ms(t0)
         ok = bool(composer)
         logger.info(f"open_chat({masked}): ok={ok} ms={round(ms)} signal={signal}")
-        return OpenResult(ok, ms, signal)
+        return OpenResult(ok, ms, signal, era_non_letto=era_non_letto)
+
+    async def read_open_chat_title(self) -> str | None:
+        """Titolo (nome o numero) della chat GIA' APERTA, letto direttamente
+        dal suo header -- MAI dalla sidebar (fix 21/08: leggere la sidebar
+        dopo l'invio per dedurre 'la prima riga e' il contatto appena
+        scritto' e' un'assunzione di posizione, falsa ogni volta che
+        un'altra chat molto attiva o pinnata scavalca quella giusta --
+        misurato dal vivo: 283 contatti di una sola campagna con lo stesso
+        chat_title sbagliato, quello della chat che stava scavalcando).
+
+        None se l'header non si trova o e' vuoto: chi chiama rinuncia a
+        imparare il titolo per questa volta, non inventa nulla.
+
+        L'header porta anche sottotitoli (stato online, 'sta scrivendo...',
+        n. partecipanti per i gruppi): si prende solo la prima riga di
+        inner_text, che nella struttura osservata (poc4_info_panel.py,
+        09-10/08, 20/20 chat reali) e' sempre il nome/numero."""
+        found = await self._first_locator(sel.HEADER, timeout_ms=4000)
+        if not found:
+            return None
+        header, _ = found
+        try:
+            testo = await header.inner_text()
+        except Exception:
+            return None
+        prima_riga = (testo or "").split("\n")[0].strip()
+        return prima_riga or None
 
     async def load_history(self, minimo: int = 80) -> HistoryInfo:
         """Scrolla la conversazione verso l'alto finche' non ha caricato
@@ -458,6 +573,49 @@ class WhatsAppWebPage:
         tail.reverse()
         return tail
 
+    async def read_inbound_since(self, dopo: datetime, *, entro: datetime | None = None,
+                                 n: int = 100) -> list[str] | None:
+        """Testi INBOUND con timestamp reale (data-pre-plain-text) rigorosamente
+        DOPO `dopo`, e se `entro` e' dato non oltre `entro`. A differenza di
+        read_inbound_tail (SDD 6.4, guardia pre-invio STOP) questo metodo ha
+        nozione di TEMPO -- serve a un compito diverso: distinguere una
+        risposta VERA a un nostro invio da corrispondenza organica
+        precedente sullo stesso numero (il canale e' condiviso con
+        l'assistenza clienti umana, non nasce con la campagna) o da righe
+        di sistema senza mittente riconoscibile.
+
+        L'avviso 'i messaggi sono crittografati end-to-end' non ha
+        data-pre-plain-text (nessun mittente): classify_direction lo conta
+        'in' per sicurezza sullo STOP (corretto li', quella funzione non
+        deve MAI perdere un vero STOP), ma userebbe qui a produrre un falso
+        'ha risposto' -- misurato dal vivo il 21/08 nel backfill del bug
+        chat_title: 3 falsi positivi su 4 nel pilota, proprio per questo.
+        Qui si scarta ogni riga senza timestamp leggibile, non si indovina.
+
+        None = cecita' (nessuna bolla agganciata), stessa sentinella di
+        read_inbound_tail. [] = nessuna risposta genuina nella finestra --
+        silenzio vero e rumore-senza-timestamp sono indistinguibili qui di
+        proposito, per questo scopo hanno lo stesso esito."""
+        rows = await self._page.evaluate(_JS_MESSAGE_SIGNALS_TIMESTAMP, {"msgRow": sel.MSG_ROW})
+        if not rows or not _righe_ben_formate(rows):
+            return None
+
+        testi: list[str] = []
+        for row in rows:
+            direzione = classify_direction(
+                aria_tu=row["aria_tu"], tail_icon=row["tail_icon"], data_id=row["data_id"])
+            if direzione == "out":
+                continue
+            ts = parse_wa_timestamp(row.get("pre_plain_text"))
+            if ts is None or ts <= dopo:
+                continue
+            if entro is not None and ts > entro:
+                continue
+            testi.append(row["text"])
+            if len(testi) >= n:
+                break
+        return testi
+
     async def sync_state(self) -> Literal["synced", "syncing", "unknown"]:
         """A9/FM16: su una chat non ancora sincronizzata la guardia non
         legge un silenzio, legge il VUOTO. Il selettore dell'indicatore non
@@ -515,8 +673,7 @@ class WhatsAppWebPage:
                 rows.append(ChatRow(
                     position=r["position"],
                     title=title,
-                    title_is_number=_BIDI_MARKERS.sub("", title)
-                                                  .replace(" ", "").replace("+", "").isdigit(),
+                    title_is_number=title_is_number(title),
                     unread_count=_parse_unread(r["unread_raw"]),
                     preview=r["preview"],
                     last_is_outbound=r["last_is_outbound"],

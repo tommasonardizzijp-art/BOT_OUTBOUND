@@ -655,16 +655,16 @@ async def test_i34_rendered_text_non_contiene_mai_il_numero(db_session, monkeypa
 
 @pytest.mark.asyncio
 async def test_i35_chat_title_mai_salvato_come_numero(db_session, monkeypatch):
-    """Adversarial #35: title_is_number=True -> chat_title resta NULL."""
-    from app.browser.whatsapp_page import ChatRow
+    """Adversarial #35: header che mostra un numero puro -> chat_title
+    resta NULL (P12, mai un numero in chiaro salvato come se fosse un
+    nome)."""
     from app.config import settings
     monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
     ctx = await _scenario_invio(db_session)
 
     class _PomNumero(_PomInvio):
-        async def scan_chat_list(self):
-            return [ChatRow(position=0, title="+391234567890", title_is_number=True,
-                            unread_count=0, preview="", last_is_outbound=False)]
+        async def read_open_chat_title(self):
+            return "+391234567890"
 
     pom = _PomNumero([])
     await wa_sender.invia_a_contatto(
@@ -675,31 +675,40 @@ async def test_i35_chat_title_mai_salvato_come_numero(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_impara_chat_title_esclude_riga_te_stesso(db_session, monkeypatch):
-    """Bug trovato dal vivo 08/08: la riga 'messaggi a te stesso' e' inclusa
-    apposta nello scan (altri chiamanti la usano) ma il suo titolo e' il
-    nome del TITOLARE del numero mittente, non del contatto appena scritto.
-    Se resta in testa alla sidebar (es. pinnata), righe[0] la prendeva per
-    buona -- riprodotto 4/4 su un invio reale in un test manuale lo stesso
-    giorno. PASS = la riga is_yourself viene saltata, si impara la riga
-    successiva vera."""
-    from app.browser.whatsapp_page import ChatRow
+async def test_impara_chat_title_legge_header_non_sidebar(db_session, monkeypatch):
+    """Bug reale in produzione (21/08): _impara_chat_title rileggeva la
+    SIDEBAR dopo l'invio e prendeva la prima riga assumendo fosse il
+    contatto appena scritto -- un'assunzione di POSIZIONE, non di identita'.
+    Falsa ogni volta che un'altra chat molto attiva (o pinnata) scavalcava
+    quella giusta nella finestra fra invio e rescan: misurato dal vivo, 283
+    contatti di una sola campagna con lo stesso chat_title sbagliato (quello
+    della chat che scavalcava, non il loro), che rendeva il matching del
+    reply-watcher permanentemente ambiguo per tutti loro.
+
+    Fix: il titolo si legge dall'header della chat GIA' APERTA
+    (read_open_chat_title), mai piu' dalla sidebar. PASS = il titolo
+    imparato e' quello dell'header, anche quando la sidebar (riprodotta qui
+    identica all'incidente reale) mostrerebbe un'altra chat in cima."""
     from app.config import settings
     monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
     ctx = await _scenario_invio(db_session)
 
-    class _PomTeStesso(_PomInvio):
-        async def scan_chat_list(self):
-            return [
-                ChatRow(position=0, title="Tommaso Nardizzi", title_is_number=False,
-                        unread_count=0, preview="", last_is_outbound=True,
-                        outgoing_state="wds-ic-sent", muted=False, is_yourself=True),
-                ChatRow(position=1, title="James", title_is_number=False,
-                        unread_count=0, preview="", last_is_outbound=True,
-                        outgoing_state="wds-ic-sent", muted=False, is_yourself=False),
-            ]
+    class _PomScavalcata(_PomInvio):
+        async def read_open_chat_title(self):
+            return "James"
 
-    pom = _PomTeStesso([])
+        async def scan_chat_list(self):
+            # Se il codice tornasse (per regressione) a consultare la
+            # sidebar, questa riga -- un'altra chat, non il contatto appena
+            # scritto -- verrebbe presa per buona: e' la riproduzione esatta
+            # dell'incidente del 21/08 (li' la chat scavalcante era
+            # 'SPEDIZIONI').
+            from app.browser.whatsapp_page import ChatRow
+            return [ChatRow(position=0, title="SPEDIZIONI", title_is_number=False,
+                            unread_count=0, preview="", last_is_outbound=True,
+                            outgoing_state="wds-ic-sent", muted=False, is_yourself=False)]
+
+    pom = _PomScavalcata([])
     await wa_sender.invia_a_contatto(
         db_session, pom, campaign=ctx["campaign"], step=ctx["step"], cc=ctx["cc"],
         contact=ctx["contact"], number=ctx["number"], browser_avviato_da_s=9999)
@@ -715,7 +724,6 @@ async def test_impara_chat_title_normalizza_sempre_in_nfc(db_session, monkeypatc
     contatto scritto oggi non verra' mai agganciato a una risposta futura
     (bug silenzioso, non un crash)."""
     import unicodedata
-    from app.browser.whatsapp_page import ChatRow
     from app.config import settings
     monkeypatch.setattr(settings, "wa_resync_quarantine_min", 0)
     ctx = await _scenario_invio(db_session)
@@ -723,10 +731,8 @@ async def test_impara_chat_title_normalizza_sempre_in_nfc(db_session, monkeypatc
     titolo_nfd = unicodedata.normalize("NFD", "Città Bella")
 
     class _PomAccentato(_PomInvio):
-        async def scan_chat_list(self):
-            return [ChatRow(position=0, title=titolo_nfd, title_is_number=False,
-                            unread_count=0, preview="", last_is_outbound=False,
-                            outgoing_state=None, muted=False)]
+        async def read_open_chat_title(self):
+            return titolo_nfd
 
     pom = _PomAccentato([])
     await wa_sender.invia_a_contatto(
