@@ -435,8 +435,9 @@ class _FakeKeyboardOpenChat:
 class _RigaRisultato:
     """Una riga [role='row'] nei risultati di ricerca: fa sia da .first
     (per il controllo 'ci sono risultati') sia da elemento .nth(i)."""
-    def __init__(self, testo: str):
+    def __init__(self, testo: str, non_letto: bool = False):
         self._testo = testo
+        self._non_letto = non_letto
         self.clicked = False
 
     async def wait_for(self, state="visible", timeout=4000):
@@ -447,6 +448,11 @@ class _RigaRisultato:
 
     async def click(self):
         self.clicked = True
+
+    def locator(self, selettore: str):
+        if selettore == sel.UNREAD_BADGE:
+            return _FakeSimpleLocator(esiste=self._non_letto, count=1 if self._non_letto else 0)
+        raise AssertionError(f"selettore non atteso sulla riga finta: {selettore}")
 
 
 class _FakeRowsLocator:
@@ -510,10 +516,12 @@ class FakeOpenChatPage:
     nemmeno come fallback) il test fallisce con un errore diagnostico
     invece di passare per sbaglio."""
 
-    def __init__(self, righe_ricerca: list[str], composer_esiste: bool, msg_row_count: int = 0):
+    def __init__(self, righe_ricerca: list[str], composer_esiste: bool, msg_row_count: int = 0,
+                 non_letti: set[int] = frozenset()):
         self.keyboard = _FakeKeyboardOpenChat()
         self._search_box = _FakeSearchBox()
-        self._rows = _FakeRowsLocator([_RigaRisultato(t) for t in righe_ricerca])
+        self._rows = _FakeRowsLocator([_RigaRisultato(t, non_letto=i in non_letti)
+                                       for i, t in enumerate(righe_ricerca)])
         self._composer = _FakeSimpleLocator(esiste=composer_esiste)
         self._msgrow = _FakeSimpleLocator(esiste=msg_row_count > 0, count=msg_row_count)
 
@@ -575,6 +583,37 @@ async def test_open_chat_cerca_non_deep_linka_e_apre_la_riga_sotto_chat(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_open_chat_riporta_non_letto_se_il_badge_cera_prima_del_click(monkeypatch):
+    """Backfill 21/08: chi apre una chat per un'operazione una tantum vuole
+    sapere se era da leggere PRIMA di aprirla (che la marca letta). Il badge
+    si legge sulla riga di risultato PRIMA del click, non dopo."""
+    from app.browser.whatsapp_page import WhatsAppWebPage
+
+    _sleep_reale = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: _sleep_reale(0))
+
+    page = FakeOpenChatPage(
+        righe_ricerca=["Chat", "Mario Rossi"], composer_esiste=True, non_letti={1})
+    risultato = await WhatsAppWebPage(page).open_chat("393421460077")
+
+    assert risultato.era_non_letto is True
+
+
+@pytest.mark.asyncio
+async def test_open_chat_non_letto_falso_se_il_badge_non_cera(monkeypatch):
+    from app.browser.whatsapp_page import WhatsAppWebPage
+
+    _sleep_reale = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda *_a, **_k: _sleep_reale(0))
+
+    page = FakeOpenChatPage(
+        righe_ricerca=["Chat", "Mario Rossi"], composer_esiste=True)
+    risultato = await WhatsAppWebPage(page).open_chat("393421460077")
+
+    assert risultato.era_non_letto is False
+
+
+@pytest.mark.asyncio
 async def test_apri_chat_da_risultati_senza_sezione_chat_non_clicca_un_gruppo():
     """Funzionale 17 (parte 'mai un gruppo'). Sotto 'Gruppi in comune' ci
     sono GRUPPI, fuori perimetro: se la sezione 'Chat' non c'e' proprio, il
@@ -583,10 +622,11 @@ async def test_apri_chat_da_risultati_senza_sezione_chat_non_clicca_un_gruppo():
 
     page = FakeOpenChatPage(righe_ricerca=["Gruppi in comune", "Gruppo Famiglia"],
                              composer_esiste=True)
-    aperto, nota = await WhatsAppWebPage(page)._apri_chat_da_risultati()
+    aperto, nota, era_non_letto = await WhatsAppWebPage(page)._apri_chat_da_risultati()
 
     assert aperto is False
     assert "nessuna-sezione-chat" in nota
+    assert era_non_letto is False
     assert all(r.clicked is False for r in page.rows)
 
 

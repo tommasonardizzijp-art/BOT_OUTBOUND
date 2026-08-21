@@ -30,6 +30,16 @@ class OpenResult:
     ok: bool
     ms: float
     signal: str
+    # Badge "non letto" della riga nei risultati di ricerca, letto PRIMA del
+    # click che apre la chat (e la marca letta). Serve a chi deve aprire una
+    # chat per un'operazione una tantum (es. backfill 21/08) e vuole poter
+    # dire quali erano davvero da leggere, senza dover indovinare un
+    # selettore nuovo per il "segna come da leggere" del menu contestuale
+    # (mai verificato dal vivo, troppo vicino a 'Elimina'/'Archivia' per
+    # rischiarlo su chat vere senza una POC dedicata prima). Default False:
+    # ogni chiamante esistente che non legge questo campo non cambia
+    # comportamento.
+    era_non_letto: bool = False
 
 
 @dataclass
@@ -47,6 +57,15 @@ class HistoryInfo:
 # non deve comunque leggere un numero come se fosse un nome -- e' il segnale
 # che impedisce a M2/M3 di salvare un numero in chiaro in chat_title (P12).
 _BIDI_MARKERS = re.compile("[" + chr(0x202a) + "-" + chr(0x202e) + chr(0x2066) + "-" + chr(0x2069) + "]")
+
+
+def title_is_number(title: str) -> bool:
+    """True se `title` e' un numero puro (contatto non in rubrica) e non un
+    nome. Pubblica (non solo per ChatRow, vedi scan_chat_list) perche' serve
+    anche a chi legge il titolo dall'header della chat aperta
+    (read_open_chat_title) con lo stesso identico giudizio P12: mai salvare
+    un numero in chiaro come se fosse un nome."""
+    return _BIDI_MARKERS.sub("", title or "").replace(" ", "").replace("+", "").isdigit()
 
 
 @dataclass
@@ -286,18 +305,24 @@ class WhatsAppWebPage:
                 residuo = ""
         return residuo == ""
 
-    async def _apri_chat_da_risultati(self, timeout_ms: int = 8000) -> tuple[bool, str]:
+    async def _apri_chat_da_risultati(self, timeout_ms: int = 8000) -> tuple[bool, str, bool]:
         """Apre la chat 1:1 dai risultati di ricerca, navigando PER SEZIONE.
 
         Ne' Enter ne' 'la prima riga': la riga 0 e' l'intestazione 'Chat', e
         sotto 'Gruppi in comune' ci sono GRUPPI, fuori perimetro -- aprirli
         per sbaglio li marca anche come letti.
-        """
+
+        Terzo valore di ritorno: True se la riga aveva il badge 'non letto'
+        PRIMA del click che la apre (e la marca letta) -- letto con lo
+        stesso UNREAD_BADGE gia' verificato per la sidebar, solo scoped alla
+        riga di risultato invece che alla lista chat (stessa componente
+        DOM). Serve a chi apre una chat per un'operazione una tantum e deve
+        poter dire dopo quali erano davvero da leggere."""
         righe = self._page.locator(sel.ROW)
         try:
             await righe.first.wait_for(state="visible", timeout=timeout_ms)
         except Exception:
-            return False, "nessun-risultato-di-ricerca"
+            return False, "nessun-risultato-di-ricerca", False
 
         n = await righe.count()
         testi = []
@@ -309,12 +334,17 @@ class WhatsAppWebPage:
 
         idx = next((i for i, t in enumerate(testi) if t.lower() in ("chat", "chats")), None)
         if idx is None:
-            return False, "nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione"
+            return False, "nessuna-sezione-chat:solo-gruppi-o-contatti-senza-conversazione", False
         if idx + 1 >= n or testi[idx + 1].lower() in sel.SEARCH_RESULT_HEADERS:
-            return False, "sezione-chat-vuota:nessuna-conversazione-esistente"
+            return False, "sezione-chat-vuota:nessuna-conversazione-esistente", False
 
-        await righe.nth(idx + 1).click()
-        return True, f"aperta-riga-{idx + 1}"
+        riga_target = righe.nth(idx + 1)
+        try:
+            era_non_letto = await riga_target.locator(sel.UNREAD_BADGE).count() > 0
+        except Exception:
+            era_non_letto = False
+        await riga_target.click()
+        return True, f"aperta-riga-{idx + 1}", era_non_letto
 
     async def _history_signal(self) -> str:
         try:
@@ -360,7 +390,7 @@ class WhatsAppWebPage:
             logger.warning(f"open_chat({masked}): focus perso prima della selezione")
             return OpenResult(False, _elapsed_ms(t0), "nessuna-cronologia:focus-non-sulla-ricerca-pre-invio")
 
-        aperto, nota = await self._apri_chat_da_risultati()
+        aperto, nota, era_non_letto = await self._apri_chat_da_risultati()
         if not aperto:
             return OpenResult(False, _elapsed_ms(t0), f"nessuna-cronologia:{nota}")
 
@@ -369,7 +399,34 @@ class WhatsAppWebPage:
         ms = _elapsed_ms(t0)
         ok = bool(composer)
         logger.info(f"open_chat({masked}): ok={ok} ms={round(ms)} signal={signal}")
-        return OpenResult(ok, ms, signal)
+        return OpenResult(ok, ms, signal, era_non_letto=era_non_letto)
+
+    async def read_open_chat_title(self) -> str | None:
+        """Titolo (nome o numero) della chat GIA' APERTA, letto direttamente
+        dal suo header -- MAI dalla sidebar (fix 21/08: leggere la sidebar
+        dopo l'invio per dedurre 'la prima riga e' il contatto appena
+        scritto' e' un'assunzione di posizione, falsa ogni volta che
+        un'altra chat molto attiva o pinnata scavalca quella giusta --
+        misurato dal vivo: 283 contatti di una sola campagna con lo stesso
+        chat_title sbagliato, quello della chat che stava scavalcando).
+
+        None se l'header non si trova o e' vuoto: chi chiama rinuncia a
+        imparare il titolo per questa volta, non inventa nulla.
+
+        L'header porta anche sottotitoli (stato online, 'sta scrivendo...',
+        n. partecipanti per i gruppi): si prende solo la prima riga di
+        inner_text, che nella struttura osservata (poc4_info_panel.py,
+        09-10/08, 20/20 chat reali) e' sempre il nome/numero."""
+        found = await self._first_locator(sel.HEADER, timeout_ms=4000)
+        if not found:
+            return None
+        header, _ = found
+        try:
+            testo = await header.inner_text()
+        except Exception:
+            return None
+        prima_riga = (testo or "").split("\n")[0].strip()
+        return prima_riga or None
 
     async def load_history(self, minimo: int = 80) -> HistoryInfo:
         """Scrolla la conversazione verso l'alto finche' non ha caricato
@@ -515,8 +572,7 @@ class WhatsAppWebPage:
                 rows.append(ChatRow(
                     position=r["position"],
                     title=title,
-                    title_is_number=_BIDI_MARKERS.sub("", title)
-                                                  .replace(" ", "").replace("+", "").isdigit(),
+                    title_is_number=title_is_number(title),
                     unread_count=_parse_unread(r["unread_raw"]),
                     preview=r["preview"],
                     last_is_outbound=r["last_is_outbound"],
