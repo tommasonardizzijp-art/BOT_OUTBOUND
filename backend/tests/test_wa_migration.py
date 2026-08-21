@@ -64,8 +64,8 @@ POST_024_COLUMNS = {
     "bot_state": ["wa_halted", "wa_halted_reason", "wa_halted_at", "wa_halted_by"],  # 027
     "campaigns": ["enrichment_level",                                    # 029
                   "inbox_cursor_at", "inbox_cursor_updated_at",          # 033
-                  "inbox_bottom_reached", "inbox_deep_cursor",           # 036
-                  "inbox_deep_pages"],                                   # 036
+                  "inbox_bottom_reached", "inbox_deep_cursor",           # 037
+                  "inbox_deep_pages"],                                   # 037
     "instagram_accounts": ["daily_likes_today", "daily_likes_date"],  # 030
     "followers": ["last_message_at", "last_message_from",             # 031
                   "last_message_text", "source_channel"],

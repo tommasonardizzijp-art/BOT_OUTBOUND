@@ -1,8 +1,16 @@
 """inbox_bottom_reached: la Fase Lista inbox API sa se ha gia' toccato il fondo
 
-Revision ID: 036
-Revises: 035
+Revision ID: 037
+Revises: 036
 Create Date: 2026-08-21
+
+NUMERO DI REVISIONE: nata come "036", ma quel numero l'aveva gia' preso un'altra
+sessione (036_wa_campaign_skip_history_gate.py) che l'ha anche gia' applicata a
+produzione. Due file con lo stesso `revision` sono, per alembic, la STESSA
+migration: `upgrade head` da questo branch dichiarava "gia' applicata" e non
+eseguiva nessun DDL, in silenzio. Rinumerata la propria, non quella dell'altro —
+stessa lezione della 033. Dopo un upgrade su un DB condiviso si verificano le
+COLONNE, non `alembic current`.
 
 Serve a distinguere le due modalita' della Fase Lista inbox via API:
 
@@ -19,8 +27,8 @@ Additiva, NOT NULL con server_default: le campagne esistenti nascono a False
 import sqlalchemy as sa
 from alembic import op
 
-revision = "036"
-down_revision = "035"
+revision = "037"
+down_revision = "036"
 branch_labels = None
 depends_on = None
 
