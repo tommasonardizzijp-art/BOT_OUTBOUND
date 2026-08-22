@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { api } from '@/lib/api'
 import { renderPreview, findUnknownPlaceholders } from '@/lib/spintax'
+import { soloDmVietato, MOTIVO_SOLO_DM_VIETATO } from '@/lib/arricchimento'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -414,7 +415,17 @@ export default function NewCampaignPage() {
               </div>
               <button
                 type="button"
-                onClick={() => setForm(f => ({ ...f, ai_enabled: !f.ai_enabled }))}
+                onClick={() => {
+                  const acceso = !form.ai_enabled
+                  // Accendere l'AI mentre il livello e' 'none' porterebbe il form dritto
+                  // in un 400: si alza il livello qui, invece di far fallire l'invio.
+                  // Fuori dall'updater di setForm, che deve restare puro: React lo
+                  // esegue due volte in StrictMode.
+                  if (soloDmVietato(acceso) && enrichmentLevel === 'none') {
+                    setEnrichmentLevel('bio')
+                  }
+                  setForm(f => ({ ...f, ai_enabled: acceso }))
+                }}
                 className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full transition-colors ${form.ai_enabled ? 'bg-purple-600' : 'bg-gray-600'}`}
               >
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform mt-0.5 ${form.ai_enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
@@ -509,13 +520,19 @@ export default function NewCampaignPage() {
                   { v: 'none', t: '✉️ Solo DM', d: 'Non apre i profili' },
                   { v: 'bio', t: '📄 Bio', d: 'Apre i profili; email e telefono solo se già scritti nel testo' },
                   { v: 'contacts', t: '📇 Bio + contatti', d: 'Aggiunge anche email e telefono dichiarati come contatto business' },
-                ] as const).map(({ v, t, d }) => (
+                ] as const).map(({ v, t, d }) => {
+                  const vietato = v === 'none' && soloDmVietato(form.ai_enabled)
+                  return (
                   <button
                     key={v}
                     type="button"
-                    onClick={() => setEnrichmentLevel(v)}
+                    disabled={vietato}
+                    title={vietato ? MOTIVO_SOLO_DM_VIETATO : d}
+                    onClick={() => { if (!vietato) setEnrichmentLevel(v) }}
                     className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${
-                      enrichmentLevel === v
+                      vietato
+                        ? 'bg-gray-800/40 border-gray-800 text-gray-600 cursor-not-allowed'
+                        : enrichmentLevel === v
                         ? 'bg-purple-600/20 border-purple-500 text-purple-300'
                         : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
                     }`}
@@ -523,8 +540,12 @@ export default function NewCampaignPage() {
                     {t}
                     <span className="block text-xs font-normal mt-0.5 opacity-70">{d}</span>
                   </button>
-                ))}
+                  )
+                })}
               </div>
+              {soloDmVietato(form.ai_enabled) && (
+                <p className="text-xs text-gray-500">{MOTIVO_SOLO_DM_VIETATO}</p>
+              )}
               {enrichmentLevel === 'none' && (
                 <p className="text-xs text-amber-400/80">
                   Circa un contatto su quattro non ha il nome nella lista: in quei DM

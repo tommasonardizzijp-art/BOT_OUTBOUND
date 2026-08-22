@@ -927,6 +927,23 @@ SELECT campaign_id, username, ig_user_id FROM followers
 WHERE skip_reason IN ('handle_riassegnato', 'targa_gia_presente_su_altra_riga');
 ```
 
+- [ ] **Step 3b: Il testo nella UI che questo cantiere rende falso**
+
+In `frontend/app/campaigns/[id]/page.tsx` (~riga 1188-1194) c'è un avviso ambra che
+compare sulle campagne **import** con livello «Solo DM»:
+
+> *«Su una lista importata questo livello spegne solo la raccolta di email e telefono:
+> la risoluzione apre comunque un profilo per riga, perché serve l'ID Instagram per
+> creare il contatto.»*
+
+Era vero, ed è il motivo per cui la sessione del 22/08 è partita. **Smette di esserlo
+con la Task 5**: il pk arriva dal DM, non da una visita dedicata, quindi la passata di
+risoluzione cade. Riscriverlo o toglierlo — è testo che il cliente legge, e un avviso
+che descrive un comportamento non più esistente è peggio di nessun avviso.
+
+Verificato il 22/08 (Task 7): **oggi è ancora accurato**, quindi non va toccato prima
+che la Task 5 sia dentro.
+
 - [ ] **Step 4: Doc**
 
 Riallinea `docs/architecture/DATABASE.md` (colonna nuova + indice), `docs/architecture/SCALA_E_PARALLELISMO.md` (il dedup cross-campagna **non esiste** ed è una scelta, non una dimenticanza), `INDEX.md` e `PROGRESS.md`.

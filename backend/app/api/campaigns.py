@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, func
 from app.database import get_db
 from app.models.account import AccountStatus, InstagramAccount
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, valida_ai_senza_bio
 from app.models.campaign_account import CampaignAccount
 from app.models.follower import Follower, FollowerStatus
 from app.models.message import Message, MessageStatus
@@ -219,6 +219,9 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
     )
     if errore_motori:
         raise HTTPException(status_code=400, detail=errore_motori)
+    errore_ai = valida_ai_senza_bio(campaign.ai_enabled, campaign.enrichment_level)
+    if errore_ai:
+        raise HTTPException(status_code=400, detail=errore_ai)
     db.add(campaign)
 
     log = ActivityLog(campaign_id=campaign.id, action="campaign_created", details=json.dumps({"name": data.name}))
@@ -385,6 +388,13 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
     )
     if errore_motori:
         raise HTTPException(status_code=400, detail=errore_motori)
+    # Stessa logica del gate motori sopra: sta a valle di entrambi i campi
+    # applicati (ai_enabled sopra, enrichment_level appena sopra), quindi copre
+    # sia chi accende l'AI su una campagna gia' 'none' sia chi abbassa il
+    # livello su una campagna che ha gia' l'AI accesa.
+    errore_ai = valida_ai_senza_bio(campaign.ai_enabled, campaign.enrichment_level)
+    if errore_ai:
+        raise HTTPException(status_code=400, detail=errore_ai)
 
     if data.scrape_session_size is not None:
         campaign.scrape_session_size = data.scrape_session_size

@@ -6,6 +6,7 @@ import useSWR from 'swr'
 import Link from 'next/link'
 import { api } from '@/lib/api'
 import { renderPreview, findUnknownPlaceholders } from '@/lib/spintax'
+import { soloDmVietato, MOTIVO_SOLO_DM_VIETATO } from '@/lib/arricchimento'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -1154,14 +1155,19 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               { v: 'none', t: '✉️ Solo DM', d: 'Non apre i profili' },
               { v: 'bio', t: '📄 Bio', d: 'Apre i profili; email e telefono solo se già scritti nel testo' },
               { v: 'contacts', t: '📇 Bio + contatti', d: 'Aggiunge anche email e telefono dichiarati come contatto business' },
-            ] as const).map(({ v, t, d }) => (
+            ] as const).map(({ v, t, d }) => {
+              const vietato = v === 'none' && soloDmVietato(campaign.ai_enabled ?? false)
+              return (
               <button
                 key={v}
                 type="button"
-                disabled={switchingEnrichment}
-                onClick={() => handleEnrichmentSwitch(v)}
+                disabled={switchingEnrichment || vietato}
+                title={vietato ? MOTIVO_SOLO_DM_VIETATO : d}
+                onClick={() => { if (!vietato) handleEnrichmentSwitch(v) }}
                 className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
-                  (campaign.enrichment_level ?? 'none') === v
+                  vietato
+                    ? 'bg-gray-800/40 border-gray-800 text-gray-600 cursor-not-allowed'
+                    : (campaign.enrichment_level ?? 'none') === v
                     ? 'bg-purple-600/20 border-purple-500 text-purple-300'
                     : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
                 }`}
@@ -1169,8 +1175,12 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 {t}
                 <span className="block text-xs font-normal mt-0.5 opacity-70">{d}</span>
               </button>
-            ))}
+              )
+            })}
           </div>
+          {soloDmVietato(campaign.ai_enabled ?? false) && (
+            <p className="text-xs text-gray-500">{MOTIVO_SOLO_DM_VIETATO}</p>
+          )}
           {/* La nota sui nomi mancanti vale solo per le campagne scrape, dove i dati
               arrivano dalla Fase Lista. Su import la risoluzione apre il profilo e il
               nome ce l'ha sempre — lì il livello 'none' ha un limite diverso, e va
