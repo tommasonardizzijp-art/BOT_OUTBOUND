@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.account import AccountStatus, InstagramAccount
 from app.models.activity_log import ActivityLog
-from app.models.campaign import Campaign, CampaignStatus
+from app.models.campaign import Campaign, CampaignStatus, valida_ai_senza_bio
 from app.models.campaign_account import CampaignAccount
 from app.models.follower import Follower, FollowerStatus
 from app.utils.roles import SCRAPE_ROLES, DM_ROLES, INBOX_ROLES
@@ -53,6 +53,17 @@ def ensure_campaign_can_send_messages(campaign: Campaign) -> None:
             "Template messaggio mancante o troppo corto. "
             "Imposta un messaggio base di almeno 10 caratteri prima di inviare DM."
         )
+    # La stessa regola che POST /campaigns e PUT /campaigns/{id} applicano alla
+    # configurazione, applicata qui all'AVVIO. Serve perche' i due gate HTTP
+    # impediscono di CREARE la combinazione vietata, non di USARLA se esiste gia':
+    # una campagna nata prima della guardia partiva lo stesso, e in produzione ce
+    # n'e' una (misurata il 22/08). Questo e' il punto giusto perche' e' il gate
+    # condiviso da tutti i percorsi di avvio — /start, /start-dm-auto, resume — e
+    # dal worker stesso (campaign_orchestrator), che si ferma pulito con un evento
+    # invece di generare DM senza bio.
+    errore_ai = valida_ai_senza_bio(campaign.ai_enabled, campaign.enrichment_level)
+    if errore_ai:
+        raise CampaignControlError(errore_ai)
 
 
 async def ensure_bot_accepts_work(db: AsyncSession) -> None:

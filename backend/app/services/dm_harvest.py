@@ -10,6 +10,7 @@ Regole non negoziabili (vedi spec 2026-08-07, S4.2):
 from datetime import datetime
 
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 # Campi che l'harvest puo' riempire, con il nome corrispondente sullo shim.
 _CAMPI = (
@@ -25,12 +26,77 @@ async def harvest_profile_into_follower(db, follower, payload: dict | None) -> b
     # 'pending rollback' e rileggere un attributo ORM del follower (es. .username,
     # per il log stesso) puo' far risalire PendingRollbackError -- esattamente
     # l'eccezione che questa funzione promette di non far mai risalire.
-    username = getattr(follower, "username", "?")
+    #
+    # `getattr(obj, name, default)` sopprime SOLO AttributeError. Se il follower
+    # arriva qui su una sessione GIA' in pending-rollback — per un guasto
+    # precedente nella stessa richiesta, non causato da questa funzione — la
+    # lettura dell'attributo solleva PendingRollbackError, che non eredita da
+    # AttributeError e attraversa il getattr indisturbata: l'eccezione uscirebbe
+    # PRIMA ancora di entrare nel try, cioe' proprio dove il contratto promette
+    # che non succeda. E gira dopo che il DM e' partito.
+    try:
+        username = getattr(follower, "username", "?")
+    except Exception:
+        username = "?"
     try:
         from app.services.browser_bio import graphql_user_to_web_shape, web_user_to_shim
 
         shim = web_user_to_shim(graphql_user_to_web_shape(payload))
-        scritto = False
+
+        # Ancoraggio della targa. La visita l'abbiamo gia' pagata per mandare il DM e
+        # il pk e' dentro il payload catturato: prima di questo blocco veniva buttato,
+        # e una targa provvisoria restava provvisoria per sempre.
+        from app.services.browser_bio import decidi_sostituzione_targa
+
+        esito_targa = decidi_sostituzione_targa(follower.ig_user_id, getattr(shim, "pk", None))
+
+        if esito_targa == "identita_cambiata":
+            # Lo username ha cambiato proprietario: il profilo appena visitato e'
+            # di un'altra persona. Il DM e' gia' partito (scelta esplicita: si
+            # accetta il caso raro invece di bloccare gli invii), ma i dati dello
+            # sconosciuto NON vanno sulla scheda del contatto del cliente: e' la
+            # scheda che poi usa lui, e un dato sbagliato li' non si nota mai piu'.
+            logger.error(
+                f"[Harvest] @{username}: pk diverso da quello registrato "
+                f"({follower.ig_user_id} -> {shim.pk}). Handle riassegnato: "
+                "non scrivo nulla, il contatto va ri-arricchito prima di ricontattarlo."
+            )
+            follower.skip_reason = "handle_riassegnato"
+            follower.updated_at = datetime.utcnow()
+            await db.commit()
+            return False
+
+        if esito_targa == "sostituisci":
+            # UniqueConstraint(campaign_id, ig_user_id): se un'altra riga della
+            # stessa campagna porta gia' il pk vero, scrivere qui solleverebbe.
+            # Stessa scelta di browser_bio.py:570-598 — skip e segnalazione, mai
+            # un merge indovinato.
+            from sqlalchemy import select
+            from app.models.follower import Follower
+
+            bersaglio = (await db.execute(
+                select(Follower).where(
+                    Follower.campaign_id == follower.campaign_id,
+                    Follower.ig_user_id == int(shim.pk),
+                    Follower.id != follower.id,
+                )
+            )).scalar_one_or_none()
+            if bersaglio is not None:
+                logger.error(
+                    f"[Harvest] @{username}: la targa vera {shim.pk} e' gia' su "
+                    "un'altra riga della campagna. Non fondo automaticamente: "
+                    "segnalo e lascio."
+                )
+                follower.skip_reason = "targa_gia_presente_su_altra_riga"
+                follower.updated_at = datetime.utcnow()
+                await db.commit()
+                return False
+            follower.ig_user_id = int(shim.pk)
+            scritto_targa = True
+        else:
+            scritto_targa = False
+
+        scritto = scritto_targa
         for campo in _CAMPI:
             nuovo = getattr(shim, campo, None)
             if nuovo in (None, ""):
@@ -60,6 +126,32 @@ async def harvest_profile_into_follower(db, follower, payload: dict | None) -> b
         follower.updated_at = datetime.utcnow()
         await db.commit()
         return True
+    except IntegrityError as e:
+        # La SELECT preventiva qui sopra esclude la collisione al momento in cui
+        # guarda, ma fra quella lettura e il commit un altro worker puo' scrivere
+        # la stessa targa: la finestra e' reale e resta aperta. Non la chiudiamo
+        # con un savepoint perche' il rollback del savepoint scadrebbe gli
+        # attributi ORM di `follower`, e rileggerli qui significherebbe un lazy
+        # load dentro il gestore d'errore di una funzione che promette di non
+        # sollevare mai — si comprerebbe una corsa rara al prezzo di un guasto
+        # peggiore.
+        #
+        # La si rende invece LEGGIBILE. Senza questo ramo il messaggio sarebbe
+        # "scrittura saltata", identico a quello di un DB irraggiungibile: la
+        # causa vera non si distinguerebbe mai dai log. Conseguenza dell'evento:
+        # la targa resta provvisoria su questa riga (l'harvest non viene
+        # richiamato per lo stesso DM). Non si perde nessun contatto e non si
+        # corrompe niente — dopo questo cantiere una targa provvisoria e' una
+        # chiave legittima, non una riga di serie B.
+        logger.error(
+            f"[Harvest] @{username}: targa non ancorata, un'altra riga ha preso "
+            f"lo stesso pk fra la verifica e il commit. Resta provvisoria: {e}"
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return False
     except Exception as e:
         # warning e non debug: un guasto qui gira DOPO che il DM e' partito e non
         # tocca la contabilita' dell'invio, ma se resta a debug nessuno lo vede mai

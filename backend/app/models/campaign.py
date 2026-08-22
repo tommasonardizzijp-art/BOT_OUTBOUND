@@ -111,6 +111,38 @@ def contatti_richiesti_dal_livello(campaign) -> bool:
     return livello is None or livello == ENRICHMENT_CONTACTS
 
 
+def valida_ai_senza_bio(ai_enabled: bool, enrichment_level: str) -> str | None:
+    """Messaggio d'errore se l'AI dovrebbe personalizzare senza avere la bio, altrimenti None.
+
+    Stessa forma di `valida_combinazione_motori` (services/inbox_browser/gate.py):
+    ritorna la stringa da mettere nel 400, non solleva.
+
+    Una sola condizione, senza eccezioni per sorgente: con l'AI accesa, il livello
+    'none' ("Solo DM") non apre mai il profilo, quindi la bio non arriva a
+    prescindere da come e' nata la riga. Fino a questo cantiere la calibratura
+    era piu' stretta (permetteva la combinazione su 'import', perche' la vecchia
+    passata di risoluzione salvava comunque la bio). Quella passata cade con lo
+    username come chiave d'identita' di prima classe (username-chiave-di-prima-
+    classe.md, Task 3-5): su import il pk arriva ora dal primo DM, non da una
+    visita dedicata, quindi la bio su 'none' non arriva piu' neanche li'. La
+    regola torna a essere quella letterale, su tutte le sorgenti.
+
+    Perche' un divieto e non un avviso: il DM esce plausibile, quindi il difetto
+    non si vede ne' nei log ne' nel messaggio inviato. Si nota solo dal conto
+    delle chiamate AI.
+    """
+    if not ai_enabled:
+        return None
+    if enrichment_level != ENRICHMENT_NONE:
+        return None
+    return (
+        "Con la personalizzazione AI attiva il livello «Solo DM» non ha dati su cui lavorare: "
+        "la bio del destinatario arriva solo aprendo il profilo prima di scrivere, e questo "
+        "livello non lo apre. Alza il livello a «Bio» o «Bio + contatti», oppure spegni la "
+        "personalizzazione AI e usa i template."
+    )
+
+
 class Campaign(Base):
     __tablename__ = "campaigns"
 

@@ -10,9 +10,10 @@ import json
 from datetime import datetime
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.models.global_contact import GlobalContact
+from app.services.inbox_browser.targa import e_provvisoria, handle_valido, normalizza_username
 from app.utils.contact_extract import ContactData, SOURCE_PRIORITY
 
 
@@ -59,17 +60,24 @@ def _load_json(raw, default):
 
 
 def targa_ammessa_in_anagrafica(ig_user_id: int | None) -> bool:
-    """L'anagrafica globale accetta solo pk Instagram reali.
+    """L'anagrafica accetta sia i pk reali sia le targhe derivate dallo username.
 
-    Le targhe provvisorie del motore inbox browser (negative) non devono entrare:
-    la stessa persona raccolta via API avrebbe una chiave diversa, e la protezione
-    contro il doppio DM cross-campagna non la riconoscerebbe.
+    Storia di questa funzione, perche' il ribaltamento sia leggibile: rifiutava le
+    targhe negative (provvisorie) per non far entrare in anagrafica una chiave che
+    la stessa persona vista dal canale API non avrebbe riconosciuto. Il costo era
+    che `reservation.try_reserve` ritornava False e il contatto finiva `skipped`
+    con motivo "already_contacted_globally": non una protezione contro il doppio
+    DM, ma un DM che non partiva mai.
 
-    Difesa in profondita': il gate di configurazione (inbox_browser/gate.py) gia'
-    impedisce che un contatto arrivi qui senza arricchimento, ma quel presidio e'
-    gia' saltato una volta in revisione perche' era ancorato al campo sbagliato.
+    Oggi il ponte fra le due rappresentazioni e' `global_contacts.username_norm`
+    (UNIQUE, migration 039): la stessa persona converge su una riga sola
+    qualunque canale l'abbia vista, quindi la targa negativa non spacca piu'
+    nulla. Resta escluso solo cio' che non e' una targa: None e zero.
+
+    I segnaposto dei profili chiusi non arrivano fin qui: li ferma `handle_valido`
+    in ingresso (inbox_browser/targa.py, applicato in scrape_inbox.py).
     """
-    return ig_user_id is not None and ig_user_id > 0
+    return ig_user_id is not None and ig_user_id != 0
 
 
 async def upsert_lead(
@@ -85,9 +93,13 @@ async def upsert_lead(
 ) -> None:
     """Insert/merge a scraped profile as a lead. Best-effort; never raises fatally."""
     if not targa_ammessa_in_anagrafica(ig_user_id):
+        # Da Task 5 le targhe provvisorie sono ammesse: qui ci finisce solo cio'
+        # che non e' una targa (None o zero). Il messaggio vecchio parlava di
+        # "identificativo provvisorio ... non ancora arricchito" e da oggi
+        # descriverebbe una causa che non esiste piu'.
         logger.warning(
-            f"[GlobalContact] @{username}: identificativo provvisorio ({ig_user_id}), "
-            "lead non registrato in anagrafica — il contatto non e' ancora stato arricchito"
+            f"[GlobalContact] @{username}: identificativo assente o nullo "
+            f"({ig_user_id}), lead non registrato in anagrafica"
         )
         return
     try:
@@ -99,14 +111,24 @@ async def upsert_lead(
             "scraping_account_username": account.username if account else None,
             "scraped_at": now.isoformat(),
         }
+        # Ponte fra le due rappresentazioni della stessa persona (migration 039):
+        # pk reale (canale API) e targa provvisoria (canale browser). I segnaposto
+        # dei profili chiusi non hanno la forma di un handle (handle_valido) e
+        # restano fuori dalla chiave: username_norm resta NULL per loro.
+        username_norm = normalizza_username(username) if handle_valido(username) else None
+
+        conditions = [GlobalContact.ig_user_id == ig_user_id]
+        if username_norm:
+            conditions.append(GlobalContact.username_norm == username_norm)
         contact = (await db.execute(
-            select(GlobalContact).where(GlobalContact.ig_user_id == ig_user_id)
-        )).scalar_one_or_none()
+            select(GlobalContact).where(or_(*conditions))
+        )).scalars().first()
 
         if contact is None:
             db.add(GlobalContact(
                 ig_user_id=ig_user_id,
                 username=username,
+                username_norm=username_norm,
                 full_name=full_name,
                 biography=biography,
                 phone=contacts.phone,
@@ -123,6 +145,19 @@ async def upsert_lead(
             ))
             await db.commit()
             return
+
+        # La riga trovata via username_norm porta ancora la targa provvisoria
+        # del canale browser, e adesso arriva un pk reale (canale API, o
+        # l'harvest post-invio che l'ha appena ancorata): promuove la riga
+        # invece di lasciarne nascere una seconda con la stessa persona.
+        if e_provvisoria(contact.ig_user_id) and not e_provvisoria(ig_user_id):
+            logger.info(
+                f"[GlobalContact] @{username}: promuovo la targa provvisoria "
+                f"({contact.ig_user_id}) al pk reale ({ig_user_id})"
+            )
+            contact.ig_user_id = ig_user_id
+        if username_norm:
+            contact.username_norm = username_norm
 
         # Merge into existing
         prev_src = _load_json(contact.contact_source, {})

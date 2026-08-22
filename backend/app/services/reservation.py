@@ -22,10 +22,12 @@ RESERVATION_TTL_MINUTES = 30
 
 async def try_reserve(ig_user_id: int, owner_job: str, campaign_id: str, db: AsyncSession) -> bool:
     if not targa_ammessa_in_anagrafica(ig_user_id):
-        # I1: stesso presidio di upsert_lead (global_contact_service), ma qui sul
-        # percorso di invio — una targa provvisoria del motore inbox browser non
-        # deve mai prenotare una chiave nell'anagrafica cross-campagna.
-        logger.warning(f"[Reservation] ig_user_id {ig_user_id}: targa non ammessa in anagrafica — nessuna prenotazione")
+        # I1: stesso presidio di upsert_lead (global_contact_service). Da qui in
+        # avanti le targhe provvisorie (negative) sono ammesse — il ponte e'
+        # username_norm (migration 039), non il segno del pk — quindi questo
+        # scatta solo su None o zero, cioe' un identificativo che non e' affatto
+        # una targa.
+        logger.warning(f"[Reservation] ig_user_id {ig_user_id}: nessun identificativo valido — nessuna prenotazione")
         return False
     now = datetime.utcnow()
     await db.execute(delete(ContactReservation).where(ContactReservation.expires_at < now))

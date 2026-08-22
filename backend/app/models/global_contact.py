@@ -11,6 +11,10 @@ class GlobalContact(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     ig_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Ponte fra le due rappresentazioni della stessa persona: pk reale (canale API)
+    # e targa provvisoria (canale browser, = hash dello username). UNIQUE parziale:
+    # un handle = un contatto, ma NULL ammesso per le righe senza handle valido.
+    username_norm: Mapped[str | None] = mapped_column(Text, nullable=True)
     full_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     biography: Mapped[str | None] = mapped_column(Text, nullable=True)
     phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
