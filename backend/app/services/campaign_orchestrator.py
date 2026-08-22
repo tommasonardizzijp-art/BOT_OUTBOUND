@@ -67,11 +67,22 @@ from app.utils.timing import (
 # Production max_delay = 480s (8 min) → 20 min gives plenty of buffer.
 LOCK_TIMEOUT_MINUTES = 20
 
+# Prenotazione persa (reservation.try_reserve → False): un altro worker sta
+# lavorando DAVVERO quel contatto in questo momento (contact_reservations,
+# TTL 30 min — vedi reservation.RESERVATION_TTL_MINUTES). Backoff breve prima
+# di riprovare a claimare un altro follower; dopo LEASE_LOST_DEFER_THRESHOLD
+# perdite di fila (il pool residuo e' quasi tutto conteso) si rimanda l'intero
+# batch invece di continuare a spendere round-trip DB a vuoto.
+LEASE_LOST_BACKOFF_BASE_SECONDS = 5
+LEASE_LOST_BACKOFF_CAP_SECONDS = 60
+LEASE_LOST_DEFER_THRESHOLD = 3
+
 
 def _gen_backoff_seconds(attempt: int, base: int, cap: int) -> int:
-    """Backoff esponenziale per i fallimenti transient di generazione AI.
-    attempt 1 → base, 2 → base*2, 3 → base*4 ... con tetto `cap`. Rompe l'hot-loop
-    che riclaimava gli stessi follower a delay zero amplificando il 429."""
+    """Backoff esponenziale generico. attempt 1 → base, 2 → base*2, 3 → base*4
+    ... con tetto `cap`. Rompe l'hot-loop che riclaimava subito lo stesso (o un
+    altro) follower a delay zero — nato per i fallimenti transient di
+    generazione AI (tempesta 429), riusato per le prenotazioni contese."""
     if attempt < 1:
         attempt = 1
     return int(min(base * (2 ** (attempt - 1)), cap))
@@ -170,9 +181,11 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
     consecutive_failures = 0
     consecutive_unexpected_errors = 0
     consecutive_gen_failures = 0   # transient AI-gen consecutivi → backoff/defer (anti-tempesta 429)
+    consecutive_lease_lost = 0     # prenotazioni contese di fila → backoff/defer (anti-hot-loop)
     session_profiles: list[str] = []  # usernames of sent DMs this session
     session_failed: int = 0           # failed DM attempts this session
     session_skipped: int = 0          # skipped (global_contacts dedup) this session
+    session_deferred: int = 0         # rinviati per prenotazione contesa — NON uno scarto, si riprendono
     session_account_username: str | None = None  # set once account is loaded
     job_id = f"worker:{campaign_id}:{account_id}"
     lease_owner = f"{job_id}:{uuid.uuid4().hex[:8]}"
@@ -212,7 +225,8 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
         acct_label = f"@{session_account_username}" if session_account_username else account_id[:8]
         summary = (
             f"{reason}: sessione {acct_label} completata "
-            f"({len(session_profiles)} inviati, {session_failed} falliti, {session_skipped} saltati). "
+            f"({len(session_profiles)} inviati, {session_failed} falliti, {session_skipped} saltati, "
+            f"{session_deferred} rinviati per prenotazione contesa). "
             f"Pausa {pause_min} min, ripartenza prevista circa alle {resume_at_local:%H:%M}."
         )
         # Heartbeat: il defer (pausa sessione, fino a SESSION_BREAK_MAX min) NON è
@@ -245,7 +259,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                         [
                             "*Mini-session recap*",
                             f"Account: `{acct_label}`",
-                            f"Inviati: `{len(session_profiles)}`  Falliti: `{session_failed}`  Saltati: `{session_skipped}`",
+                            f"Inviati: `{len(session_profiles)}`  Falliti: `{session_failed}`  Saltati: `{session_skipped}`  Rinviati: `{session_deferred}`",
                             f"Profili contattati:\n{profiles_str}",
                             f"Pausa: `{pause_min} min` - riparte circa alle `{resume_at_local:%H:%M}`",
                         ]
@@ -420,6 +434,7 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                 session_profiles.clear()
                 session_failed = 0
                 session_skipped = 0
+                session_deferred = 0
                 dm_pacer.reset()   # nuova sessione dopo il break = nuovo batch
                 if not still_running:
                     emit_event(campaign_id, "worker_stopped", "Campagna fermata durante pausa sessione", level="warn")
@@ -493,14 +508,45 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
             targa_riservata = follower.ig_user_id
             reserved = await reservation.try_reserve(targa_riservata, job_id, campaign_id, db)
             if not reserved:
-                follower.status = FollowerStatus.skipped
-                follower.skip_reason = "already_contacted_globally"
+                # Il lease e' un lock di 30 min (reservation.RESERVATION_TTL_MINUTES),
+                # non un blocco permanente: da quando la Task 5 ammette anche le targhe
+                # provvisorie in anagrafica, si arriva qui per una ragione sola — un
+                # ALTRO worker sta davvero lavorando questo contatto adesso. Marcarlo
+                # skipped era uno scarto per sempre travestito da lock temporaneo:
+                # rilascio e basta, il follower resta nel suo stato e viene ripescato
+                # (da questo o da un altro worker) appena la prenotazione si libera.
                 follower.locked_by_account_id = None
                 follower.locked_at = None
-                session_skipped += 1
+                session_deferred += 1
+                consecutive_lease_lost += 1
                 await db.commit()
-                logger.debug(f"[Worker] Skipping @{follower.username} — already in global_contacts")
+                logger.info(
+                    f"[Worker] @{follower.username} in lavorazione da un altro worker "
+                    "(prenotazione attiva, TTL 30 min) — lo riprendo piu' tardi, non lo scarto"
+                )
+                if consecutive_lease_lost >= LEASE_LOST_DEFER_THRESHOLD:
+                    # Pool residuo quasi tutto conteso (non un singolo lead sfortunato):
+                    # continuare a riclaimare a raffica brucia round-trip DB a vuoto.
+                    # Rimando l'intero batch invece di un backoff sempre piu' lungo.
+                    emit_event(
+                        campaign_id, "lease_contention_backoff",
+                        f"{consecutive_lease_lost} prenotazioni contese di fila — rimando il batch",
+                        level="warn",
+                    )
+                    logger.warning(
+                        f"[Worker] {consecutive_lease_lost} prenotazioni contese consecutive — defer batch"
+                    )
+                    await _defer_next_batch("Prenotazioni contese")
+                    return
+                backoff = _gen_backoff_seconds(
+                    consecutive_lease_lost,
+                    LEASE_LOST_BACKOFF_BASE_SECONDS,
+                    LEASE_LOST_BACKOFF_CAP_SECONDS,
+                )
+                logger.debug(f"[Worker] lease contesa — backoff {backoff}s prima del prossimo claim")
+                await asyncio.sleep(backoff)
                 continue
+            consecutive_lease_lost = 0
             active_follower = follower
 
             # ── 8. Generate AI message ─────────────────────────────────────
@@ -1478,47 +1524,6 @@ async def _send_dm(
         account_id=account_id,
         username=follower.username,
         message_text=message.generated_text,
-    )
-
-
-async def _legacy_global_contact_placeholder(ig_user_id: int, db: AsyncSession) -> bool:
-    """
-    Atomically reserve a global contact slot BEFORE sending a DM.
-
-    Uses INSERT OR IGNORE on the UNIQUE ig_user_id column — SQLite WAL serializes
-    writes, so exactly one worker wins the insert. Returns True if this worker
-    successfully reserved the slot (first contact), False if already claimed.
-
-    The placeholder row is either:
-    - Updated with full details by _mark_globally_contacted() on send success
-    - Deleted on send failure
-    """
-    result = await db.execute(
-        _upsert_ignore(
-            GlobalContact,
-            {
-                "id": str(uuid.uuid4()),
-                "ig_user_id": ig_user_id,
-                "contacted_by_campaign_ids": "[]",
-                "contact_history": "[]",
-                "created_at": datetime.utcnow(),
-            },
-            "ig_user_id",
-            settings.database_url,
-        )
-    )
-    await db.commit()
-    return result.rowcount == 1
-
-
-async def _legacy_release_placeholder(ig_user_id: int, db: AsyncSession) -> None:
-    """
-    Delete the placeholder inserted by the legacy reservation helper when a send fails.
-    This allows other campaigns/workers to attempt contacting this user in the future.
-    NOTE: does NOT commit — caller is responsible for the next commit().
-    """
-    await db.execute(
-        delete(GlobalContact).where(GlobalContact.ig_user_id == ig_user_id)
     )
 
 
