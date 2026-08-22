@@ -589,10 +589,9 @@ modelli correnti, poi **toglie a mano** le colonne che le migrazioni successive 
 `username_norm` esiste già nel modello (Step 2), quindi `create_all` la crea, e poi la 039
 proverebbe ad aggiungerla di nuovo: **`duplicate column name`, 7 test rossi**.
 
-Non è teoria: è successo esattamente così alla migration **038**, ed è stato scoperto solo
-eseguendo la CI in locale (PR **#108**, 22/08). Se quella PR non è ancora mergiata, il file che
-modifichi qui potrebbe non contenere ancora la riga della 038 — **verifica ed evita il
-conflitto**.
+Non è teoria: è successo esattamente così alla migration **038**, e ha lasciato 7 test rossi su
+`main` finché la **PR #107** non l'ha corretto (22/08, già mergiata — la riga della 038 è ora in
+`POST_024_COLUMNS`). Aggiungi la tua accanto a quella, non al suo posto.
 
 In `POST_024_COLUMNS` aggiungi la voce per la tabella nuova (`global_contacts` **non c'è
 ancora** nel dizionario, va creata la chiave):
