@@ -26,7 +26,18 @@ async def harvest_profile_into_follower(db, follower, payload: dict | None) -> b
     # 'pending rollback' e rileggere un attributo ORM del follower (es. .username,
     # per il log stesso) puo' far risalire PendingRollbackError -- esattamente
     # l'eccezione che questa funzione promette di non far mai risalire.
-    username = getattr(follower, "username", "?")
+    #
+    # `getattr(obj, name, default)` sopprime SOLO AttributeError. Se il follower
+    # arriva qui su una sessione GIA' in pending-rollback — per un guasto
+    # precedente nella stessa richiesta, non causato da questa funzione — la
+    # lettura dell'attributo solleva PendingRollbackError, che non eredita da
+    # AttributeError e attraversa il getattr indisturbata: l'eccezione uscirebbe
+    # PRIMA ancora di entrare nel try, cioe' proprio dove il contratto promette
+    # che non succeda. E gira dopo che il DM e' partito.
+    try:
+        username = getattr(follower, "username", "?")
+    except Exception:
+        username = "?"
     try:
         from app.services.browser_bio import graphql_user_to_web_shape, web_user_to_shim
 

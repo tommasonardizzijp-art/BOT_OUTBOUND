@@ -493,6 +493,21 @@ def decidi_sostituzione_targa(targa_attuale: int | None, pk_vero) -> str:
         pk = int(pk_vero)
     except (TypeError, ValueError):
         return "invariata"
+    if pk <= 0:
+        # Instagram non assegna pk negativi ne' zero: e' l'invariante su cui si
+        # regge tutta la targa provvisoria (inbox_browser/targa.py:12-13 — "la
+        # collisione con una targa reale e' impossibile, non improbabile").
+        # Senza questo controllo un pk negativo malformato nel payload verrebbe
+        # scritto come targa "vera" e potrebbe coincidere con la provvisoria che
+        # un ALTRO contatto calcolera' da solo piu' tardi (SHA-256 dello
+        # username, funzione pura e pubblica): quando quel contatto viene
+        # scoperto, il suo INSERT collide sull'UNIQUE e run_inbox_list lo scarta
+        # in silenzio. Un contatto vero sparirebbe senza un errore.
+        logger.warning(
+            f"[Targa] pk non valido nel payload ({pk_vero!r}): non lo tratto come "
+            "targa reale. La riga resta com'e'."
+        )
+        return "invariata"
     if e_provvisoria(targa_attuale):
         return "sostituisci"
     if targa_attuale != pk:
