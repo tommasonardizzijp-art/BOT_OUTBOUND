@@ -265,3 +265,57 @@ def test_ma_peggiorare_resta_vietato(client):
     assert client.put(f"/api/campaigns/{cid}", json={"ai_enabled": True}).status_code == 200
     p = client.put(f"/api/campaigns/{cid}", json={"enrichment_level": "none"})
     assert p.status_code == 400, p.text
+
+
+# -- L'AVVIO, non solo la configurazione ------------------------------------
+# I due gate HTTP impediscono di CREARE la combinazione vietata, non di USARLA se
+# esiste gia': una campagna nata prima della guardia partiva lo stesso. In
+# produzione ce n'era una (BORDERLINE X LISTA 7, misurata il 22/08). La guardia
+# all'avvio sta in `ensure_campaign_can_send_messages` perche' e' il gate condiviso
+# da tutti i percorsi di avvio E dal worker: coprire i quattro endpoint uno per uno
+# avrebbe lasciato scoperto proprio il worker, che e' quello che genera i DM.
+
+def _finta_campagna(ai_enabled, enrichment_level, template="Ciao, ti va di sentirci?"):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        messaging_enabled=True, base_message_template=template,
+        ai_enabled=ai_enabled, enrichment_level=enrichment_level,
+    )
+
+
+def test_l_avvio_rifiuta_la_combinazione_vietata():
+    from app.services.campaign_control import (
+        CampaignControlError, ensure_campaign_can_send_messages,
+    )
+    with pytest.raises(CampaignControlError) as e:
+        ensure_campaign_can_send_messages(_finta_campagna(True, "none"))
+    assert "Solo DM" in str(e.value)
+    # Deve dire cosa fare, non solo che e' vietato.
+    assert "spegni la personalizzazione AI" in str(e.value)
+
+
+@pytest.mark.parametrize("ai,livello", [
+    (True, "bio"), (True, "contacts"), (False, "none"), (False, "bio"),
+])
+def test_l_avvio_non_ostacola_le_combinazioni_sane(ai, livello):
+    from app.services.campaign_control import ensure_campaign_can_send_messages
+    ensure_campaign_can_send_messages(_finta_campagna(ai, livello))
+
+
+def test_la_campagna_che_gira_oggi_in_produzione_non_viene_bloccata():
+    """PRIMERO ADV3 DM X VDF, 'running' il 22/08: scrape, livello 'bio', AI spenta.
+    Misurata prima di introdurre questa guardia proprio per assicurarsi che non la
+    fermasse. Se un domani questo test diventa rosso, la guardia si e' allargata."""
+    from app.services.campaign_control import ensure_campaign_can_send_messages
+    ensure_campaign_can_send_messages(_finta_campagna(False, "bio"))
+
+
+def test_l_ordine_dei_controlli_non_maschera_i_precedenti():
+    """La guardia nuova sta in fondo: chi non ha il template deve continuare a
+    sentirsi dire che manca il template, non che l'AI e' incompatibile."""
+    from app.services.campaign_control import (
+        CampaignControlError, ensure_campaign_can_send_messages,
+    )
+    with pytest.raises(CampaignControlError) as e:
+        ensure_campaign_can_send_messages(_finta_campagna(True, "none", template="ciao"))
+    assert "Template" in str(e.value)
