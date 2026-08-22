@@ -632,6 +632,36 @@ git commit -m "feat(db): username_norm come ponte fra targa reale e provvisoria 
 
 ---
 
+### Task 4.5 (scoperta il 22/08 collaudando): la guardia AI non copre gli AVVII
+
+`valida_ai_senza_bio` e' chiamata **solo** in `create_campaign` (`api/campaigns.py:222`) e
+`update_campaign` (`:395`). I quattro endpoint che fanno partire il lavoro —
+`start-scrape` (`:518`), `start` (`:771`), `resume` (`:863`), `start-dm-auto` (`:1031`) —
+**non la chiamano**. Una campagna gia' in stato vietato quindi parte lo stesso: il
+pulsante spento impedisce di *creare* la combinazione, non di *usarla*.
+
+Non e' teorico. Misurato sul Postgres di produzione il 22/08:
+
+```
+campagne con ai_enabled=true e enrichment_level='none': 1
+   BORDERLINE X LISTA 7   paused   import   none   ai_enabled=True
+```
+
+E' la campagna da cui e' partita la sessione.
+
+**Perche' NON va corretto prima della Task 5.** Oggi quella campagna e' sana: e'
+`import`, e la passata di risoluzione salva ancora la bio, quindi l'AI ha il dato.
+La regola a una condizione sola e' calibrata sul mondo **dopo** la Task 5, quando la
+risoluzione cade e il pk arriva dal primo DM. Bloccarne l'avvio adesso vieterebbe
+qualcosa che funziona.
+
+**Quindi**: aggiungere `valida_ai_senza_bio` ai quattro endpoint di avvio come
+**ultimo step della Task 5**, nello stesso commit che fa cadere la risoluzione — cosi'
+il divieto e il motivo del divieto entrano insieme. Con un messaggio che dica quale
+campagna e cosa cambiare, non un 400 secco.
+
+---
+
 ### Task 5: La targa provvisoria diventa legittima
 
 **Files:**
