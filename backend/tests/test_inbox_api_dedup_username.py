@@ -93,16 +93,32 @@ def test_username_sconosciuto_resta_un_contatto_nuovo():
 
 @pytest.mark.parametrize("username", ["", "   ", "@", None])
 def test_username_inutilizzabile_non_promuove_mai(username):
-    """Senza username non si puo' riconoscere nulla: si tratta come nuovo, mai
-    come promozione (promuovere sulla riga sbagliata scriverebbe il pk di uno
-    sconosciuto su un contatto gia' lavorato)."""
+    """Senza username non si puo' riconoscere nulla: MAI una promozione
+    (promuovere sulla riga sbagliata scriverebbe il pk di uno sconosciuto su un
+    contatto gia' lavorato). Questo invariante e' il motivo per cui il test esiste
+    e resta intatto.
+
+    Cambiato il 22/08: prima si asseriva anche `nuovi == [(555, username)]`, cioe'
+    che la riga venisse INSERITA. Ora `handle_valido` la scarta in ingresso, ed e'
+    la cosa giusta: una riga senza username e' morta alla nascita. L'invio naviga
+    su instagram.com/<username>/, e NIENTE riscrive mai `Follower.username` a
+    valle (verificato: l'unica assegnazione nel codice e'
+    `contact.username = follower.username`, che copia nella direzione opposta).
+    Quindi il pk non basta a recuperare l'handle: la riga resterebbe non
+    contattabile per sempre, occupando pero' uno slot di
+    UniqueConstraint(campaign_id, ig_user_id) e gonfiando i contatori.
+    Con `username=None` era anche peggio: `Follower.username` e' nullable=False,
+    quindi l'insert sollevava IntegrityError e veniva loggato come "pk gia'
+    presente" — un messaggio falso su una causa diversa.
+    """
     esito = classifica_pagina(
         [(555, username)],
         existing_ids=set(),
         targa_per_username=_targhe([("", -1), ("mario_shop", -8347)]),
     )
     assert esito.promozioni == []
-    assert esito.nuovi == [(555, username)]
+    assert esito.nuovi == []
+    assert esito.segnaposto_scartati == 1
 
 
 # ═══════════════════════════════════════════════════════════════════

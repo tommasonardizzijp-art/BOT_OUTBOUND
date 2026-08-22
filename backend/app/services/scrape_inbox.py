@@ -20,7 +20,7 @@ from app.models.account import InstagramAccount, AccountStatus
 from app.models.follower import Follower, FollowerStatus
 from app.services.bot_state_service import is_halted
 from app.services.scraper import is_challenge_exception, isolate_challenged_account
-from app.services.inbox_browser.targa import normalizza_username
+from app.services.inbox_browser.targa import handle_valido, normalizza_username
 from app.services.inbox_source import PAGINA_ATTESA, ApiInboxSource
 from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, ScraperError
 from app.utils.instagrapi_client import login as _login
@@ -82,6 +82,7 @@ class EsitoPagina:
     # username gia' in DB con una targa REALE diversa: username riassegnato dopo un
     # rename, quindi due persone diverse. Si inserisce e si segnala.
     collisioni_username: list[str] = field(default_factory=list)
+    segnaposto_scartati: int = 0
 
 
 def classifica_pagina(participants, existing_ids, targa_per_username) -> EsitoPagina:
@@ -112,6 +113,13 @@ def classifica_pagina(participants, existing_ids, targa_per_username) -> EsitoPa
     esito = EsitoPagina(gia_presenti=gia_presenti)
     promossi_in_pagina: set[str] = set()
     for pk, username in fresh:
+        # Profilo chiuso/disattivato: Instagram mostra a tutti lo stesso segnaposto,
+        # che qui arriva nel campo username. Non entra: non e' contattabile (l'invio
+        # naviga per username) e con lo username come chiave d'identita' tutti i
+        # profili chiusi collasserebbero in un contatto solo.
+        if not handle_valido(username):
+            esito.segnaposto_scartati += 1
+            continue
         u = normalizza_username(username) if isinstance(username, str) else ""
         targa = targa_per_username.get(u) if u else None
         if targa is None or u in promossi_in_pagina:
@@ -438,6 +446,11 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 logger.warning(
                     f"[InboxLista] @{u} esiste gia' con una targa REALE diversa: "
                     "username riassegnato dopo un rename, la nuova riga e' un'altra persona."
+                )
+            if esito.segnaposto_scartati:
+                logger.info(
+                    f"[InboxLista] {esito.segnaposto_scartati} profili chiusi/disattivati "
+                    "scartati (username segnaposto, non contattabili)."
                 )
             nuovi_tot += stored
             promossi_tot += promossi

@@ -61,6 +61,13 @@ def handle_valido(username: str | None) -> bool:
     su `instagram.com/<username>/`, quindi un contatto che si chiama
     "utente instagram" non ricevera' mai un DM.
     """
+    # `normalizza_username` chiama .strip(): su un valore non-stringa solleverebbe
+    # AttributeError. Oggi non e' raggiungibile (l'estrattore dei partecipanti
+    # garantisce gia' una stringa), ma questa funzione sta per diventare il filtro
+    # d'ingresso della chiave d'identita': deve reggere qualunque chiamante futuro
+    # rispondendo "no", non esplodendo.
+    if not isinstance(username, str):
+        return False
     return bool(_FORMA_HANDLE.match(normalizza_username(username)))
 
 
