@@ -1,16 +1,19 @@
 """
 Adversarial tests for the inbox-engine switch in update_campaign.
 
-Part A — pure helper: engine_switch_resets_cursor edge cases.
-Part B — endpoint state-gating via TestClient + SQLite fixture.
+Il contratto e' cambiato (fix 22/08/2026): il cambio engine NON azzera piu'
+nessun cursore. I due motori hanno gia' colonne separate — l'API scrive
+`inbox_deep_cursor`/`scrape_cursor`, il browser `inbox_cursor_at` (migration
+033) — quindi non c'e' nessun token da invalidare, e l'azzeramento era una
+perdita secca: cancellava la frontiera della discesa e non metteva niente al
+suo posto. Misurato su `PRIMERO ADV3 DM X VDF`, che ha dovuto ri-attraversare
+1.200 conversazioni gia' raccolte (60 pagine) per tornare dov'era.
 
-Design notes:
-- Part A needs no DB: tests the pure helper directly.
-- Part B mirrors the pattern in test_inbox_guard_adversarial.py (module-scoped
-  temp SQLite, dependency_overrides for get_db + get_current_user).
-- The endpoint is PUT /{id}, not PATCH. inbox_engine schema validates
-  pattern='^(browser|api)$', so odd values ('API', '', None) are rejected
-  by Pydantic (422) before the endpoint logic — documented in Part A comments.
+Endpoint state-gating via TestClient + SQLite fixture (module-scoped temp DB,
+dependency_overrides per get_db + get_current_user). L'endpoint e' PUT /{id},
+non PATCH; `inbox_engine` e' validato dallo schema con pattern
+'^(browser|api)$', quindi i valori sporchi ('API', '', None) sono respinti da
+Pydantic (422) prima di arrivare alla logica.
 """
 
 import asyncio
@@ -21,8 +24,6 @@ from datetime import datetime
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from app.api.campaigns import engine_switch_resets_cursor
 
 # Register all ORM tables on Base.metadata.
 import app.models.account  # noqa: F401
@@ -38,121 +39,6 @@ from app.database import Base, get_db
 from app.models.campaign import Campaign, CampaignStatus
 from app.models.user import User
 from app.utils.auth_deps import get_current_user
-
-
-# ============================================================================
-# PART A — pure helper: engine_switch_resets_cursor
-# ============================================================================
-
-# --- Equal engines: no switch → cursor must be preserved ---
-
-def test_same_engine_browser_browser_no_reset():
-    """Identical engine (browser/browser) → False: cursor survives."""
-    assert engine_switch_resets_cursor("browser", "browser") is False
-
-
-def test_same_engine_api_api_no_reset():
-    """Identical engine (api/api) → False: cursor survives."""
-    assert engine_switch_resets_cursor("api", "api") is False
-
-
-# --- Different engines: switch → cursor must be reset ---
-
-def test_switch_browser_to_api_resets_cursor():
-    """browser → api: different engines → True, cursor invalidated."""
-    assert engine_switch_resets_cursor("browser", "api") is True
-
-
-def test_switch_api_to_browser_resets_cursor():
-    """api → browser: different engines → True, cursor invalidated."""
-    assert engine_switch_resets_cursor("api", "browser") is True
-
-
-# --- Odd / dirty inputs: document that any difference forces reset ---
-#
-# NOTE: in the real endpoint, inbox_engine on CampaignUpdate is validated with
-# pattern='^(browser|api)$', so 'API', '', and None are rejected by Pydantic
-# (→ 422) before the function is ever called. The tests below verify the
-# *helper's own behavior* with such values so we understand whether the helper
-# itself has a safety net.
-#
-# In every case where old != new, the helper returns True (safe direction:
-# cursor gets reset). Returning True on a dirty value is harmless — it just
-# resets the cursor when in doubt, which prevents using a stale token from
-# a different engine context.
-
-def test_none_old_vs_api_new_returns_true():
-    """
-    DB field defaults to 'browser', but if somehow old_engine is None
-    (pre-migration row) and new_engine is 'api', they differ → True.
-    Safe: cursor is wiped rather than risked as a cross-engine token.
-    """
-    assert engine_switch_resets_cursor(None, "api") is True
-
-
-def test_none_old_vs_browser_new_returns_true():
-    """None old vs 'browser' new → True (any difference → reset)."""
-    assert engine_switch_resets_cursor(None, "browser") is True
-
-
-def test_none_vs_none_returns_false():
-    """
-    Both None: no difference → False. A pair of pre-migration rows that
-    are both None won't spuriously invalidate each other's cursor.
-    """
-    assert engine_switch_resets_cursor(None, None) is False
-
-
-def test_uppercase_API_vs_api_returns_true():
-    """
-    'API' vs 'api': case mismatch → True (safe direction).
-    The Pydantic schema on CampaignUpdate rejects 'API' (422), so
-    this combination cannot reach the endpoint via normal flow. But if
-    the DB somehow stores 'API' (e.g. a direct write), the helper treats it
-    as a different engine and wipes the cursor — correct behaviour.
-    """
-    assert engine_switch_resets_cursor("API", "api") is True
-
-
-def test_uppercase_BROWSER_vs_browser_returns_true():
-    """'BROWSER' vs 'browser': case mismatch → True (safe)."""
-    assert engine_switch_resets_cursor("BROWSER", "browser") is True
-
-
-def test_uppercase_same_returns_false():
-    """
-    'API' vs 'API': identical dirty values → False.
-    No switch, no reset — consistent with the equal-engine contract.
-    """
-    assert engine_switch_resets_cursor("API", "API") is False
-
-
-def test_empty_string_old_vs_browser_returns_true():
-    """
-    '' vs 'browser': they differ → True.
-    An empty DB value is not a valid engine; treating it as different is safe.
-    """
-    assert engine_switch_resets_cursor("", "browser") is True
-
-
-def test_empty_string_old_vs_api_returns_true():
-    """'' vs 'api' → True (safe direction)."""
-    assert engine_switch_resets_cursor("", "api") is True
-
-
-def test_empty_string_both_returns_false():
-    """'' vs '' → False: equal, no reset."""
-    assert engine_switch_resets_cursor("", "") is False
-
-
-def test_whitespace_variants_return_true():
-    """
-    ' browser' (leading space) vs 'browser': differ → True.
-    Any whitespace-polluted DB value forces a cursor reset.
-    """
-    assert engine_switch_resets_cursor(" browser", "browser") is True
-    assert engine_switch_resets_cursor("browser ", "browser") is True
-    assert engine_switch_resets_cursor(" api", "api") is True
 
 
 # ============================================================================
@@ -233,6 +119,8 @@ def _make_campaign(
     name: str,
     status: CampaignStatus,
     scrape_cursor: str | None = None,
+    inbox_deep_cursor: str | None = None,
+    inbox_cursor_at: datetime | None = None,
     inbox_engine: str = "browser",
     scrape_mode: str = "dm_threads",
     messaging_enabled: bool = False,
@@ -247,6 +135,8 @@ def _make_campaign(
         scrape_mode=scrape_mode,
         inbox_engine=inbox_engine,
         scrape_cursor=scrape_cursor,
+        inbox_deep_cursor=inbox_deep_cursor,
+        inbox_cursor_at=inbox_cursor_at,
         status=status,
         messaging_enabled=messaging_enabled,
         bio_engine=bio_engine,
@@ -254,18 +144,32 @@ def _make_campaign(
     )
 
 
-# ---------- B-1: paused campaign, engine switch → cursor reset ---------------
+# ---------- B-1: il cambio engine CONSERVA tutti e tre i segnalibri ----------
 
-def test_engine_switch_on_paused_resets_cursor(client, _temp_db):
+def test_engine_switch_preserves_every_cursor(client, _temp_db):
     """
-    dm_threads, paused, scrape_cursor='ABC', inbox_engine='browser'.
-    PUT inbox_engine='api' → 200, scrape_cursor becomes None, inbox_engine=='api'.
+    Il cuore del fix. Campagna paused con i segnalibri di ENTRAMBI i motori
+    valorizzati; PUT inbox_engine='api' → 200 e nessuno dei tre viene toccato.
+
+    Perche' i tre insieme e non solo quello dell'API: il vecchio codice
+    azzerava `scrape_cursor` e `inbox_deep_cursor` e lasciava intatto
+    `inbox_cursor_at`, cioe' trattava come "token dello stesso engine" tre
+    colonne che engine dello stesso tipo non sono. Se un giorno qualcuno
+    reintroduce l'azzeramento su una sola di esse, questo test lo prende.
+
+    `inbox_deep_cursor` non e' esposto in CampaignResponse (e non deve
+    esserlo: e' stato interno del worker), quindi si verifica leggendo la
+    riga dal DB e non il corpo della risposta.
     """
     _, sf = _temp_db
+    frontiera = '{"cursor_thread_v2_id":1395122721987860,"cursor_timestamp_seconds":1768837439}'
+    quando = datetime(2026, 1, 19, 15, 43, 59)
     camp = _make_campaign(
-        name="B1-paused-switch",
+        name="B1-switch-conserva-i-segnalibri",
         status=CampaignStatus.paused,
-        scrape_cursor="ABC",
+        scrape_cursor=frontiera,
+        inbox_deep_cursor=frontiera,
+        inbox_cursor_at=quando,
         inbox_engine="browser",
     )
     camp_id = camp.id
@@ -282,9 +186,64 @@ def test_engine_switch_on_paused_resets_cursor(client, _temp_db):
     )
     assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
     body = resp.json()
-    assert body["inbox_engine"] == "api", f"inbox_engine not updated: {body['inbox_engine']}"
-    assert body["scrape_cursor"] is None, (
-        f"DEFECT: cursor should be reset to None on engine switch, got: {body['scrape_cursor']}"
+    assert body["inbox_engine"] == "api", f"inbox_engine non aggiornato: {body['inbox_engine']}"
+    assert body["scrape_cursor"] == frontiera, (
+        f"DIFETTO: il cambio engine ha azzerato scrape_cursor. Got: {body['scrape_cursor']!r}"
+    )
+
+    async def _rileggi(db):
+        row = await db.get(Campaign, camp_id)
+        return row.inbox_deep_cursor, row.inbox_cursor_at
+
+    deep, cursor_at = _run(sf, _rileggi)
+    assert deep == frontiera, (
+        f"DIFETTO: il cambio engine ha azzerato la frontiera della discesa. Got: {deep!r}"
+    )
+    assert cursor_at == quando, (
+        f"DIFETTO: il cambio engine ha toccato il segnalibro del browser. Got: {cursor_at!r}"
+    )
+
+
+# ---------- B-1b: il cambio engine lascia una traccia ------------------------
+
+def test_engine_switch_scrive_activity_log(client, _temp_db):
+    """
+    Un'azione che cambia il comportamento del motore deve lasciare una traccia
+    permanente. Gli eventi della UI vivono su Redis con scadenza 24h: senza
+    questo log, a 48h di distanza non c'e' modo di sapere se un engine e' stato
+    cambiato — ed e' esattamente la domanda a cui non si e' potuto rispondere
+    indagando il caso PRIMERO del 22/08/2026.
+    """
+    _, sf = _temp_db
+    camp = _make_campaign(
+        name="B1b-switch-lascia-traccia",
+        status=CampaignStatus.paused,
+        inbox_engine="browser",
+    )
+    camp_id = camp.id
+
+    async def _seed(db):
+        db.add(camp)
+        await db.commit()
+
+    _run(sf, _seed)
+
+    resp = client.put(f"/api/campaigns/{camp_id}", json={"inbox_engine": "api"})
+    assert resp.status_code == 200, resp.text
+
+    async def _logs(db):
+        from app.models.activity_log import ActivityLog
+        from sqlalchemy import select as _select
+        rows = (await db.execute(
+            _select(ActivityLog).where(ActivityLog.campaign_id == camp_id)
+        )).scalars().all()
+        return [(r.action, r.details) for r in rows]
+
+    logs = _run(sf, _logs)
+    switch = [d for a, d in logs if a == "inbox_engine_cambiato"]
+    assert len(switch) == 1, f"DIFETTO: atteso 1 log di cambio engine, trovati {logs}"
+    assert '"browser"' in (switch[0] or "") and '"api"' in (switch[0] or ""), (
+        f"DIFETTO: il log non dice da quale engine a quale. details={switch[0]!r}"
     )
 
 
@@ -330,9 +289,24 @@ def test_same_engine_patch_preserves_cursor(client, _temp_db):
     assert body["inbox_engine"] == "browser", f"inbox_engine changed unexpectedly: {body['inbox_engine']}"
     assert body["scrape_cursor"] == "ABC", (
         f"DEFECT: cursor was reset even though engine did not change. "
-        f"Got: {body['scrape_cursor']!r} (expected 'ABC'). "
-        f"engine_switch_resets_cursor('browser','browser') must return False."
+        f"Got: {body['scrape_cursor']!r} (expected 'ABC')."
     )
+
+    # Nessun cambio, nessuna traccia: un log a ogni salvataggio riempirebbe di
+    # rumore proprio la tabella che serve a rispondere "l'engine e' stato
+    # cambiato?", e la UI puo' rimandare lo stesso valore a ogni refresh.
+    async def _logs(db):
+        from app.models.activity_log import ActivityLog
+        from sqlalchemy import select as _select
+        rows = (await db.execute(
+            _select(ActivityLog).where(
+                ActivityLog.campaign_id == camp_id,
+                ActivityLog.action == "inbox_engine_cambiato",
+            )
+        )).scalars().all()
+        return len(rows)
+
+    assert _run(sf, _logs) == 0, "DIFETTO: loggato un cambio engine che non e' avvenuto"
 
 
 # ---------- B-3: active states → engine switch must be blocked (400) --------
@@ -585,19 +559,21 @@ def test_engine_switch_blocked_in_completed_state(client, _temp_db):
 
 # ---------- B-8: cursor is reset even when engine switch happens in 'ready' --
 
-def test_engine_switch_in_ready_with_existing_cursor_resets_it(client, _temp_db):
+def test_engine_switch_in_ready_conserva_il_cursore(client, _temp_db):
     """
-    A campaign in 'ready' state can have a leftover cursor from a previous
-    listing phase. Switching engine in ready must STILL reset the cursor.
+    Una campagna in 'ready' porta il cursore del giro precedente. Il cambio
+    engine in ready lo deve CONSERVARE: e' lo stato in cui una campagna inbox
+    passa la maggior parte della sua vita fra un giro e l'altro, quindi e'
+    proprio qui che l'azzeramento faceva il danno peggiore.
 
     bio_engine/enrichment_level are seeded 'browser'/'contacts' up front so
     that switching inbox_engine to 'browser' lands on a combo the Task-7 gate
-    (valida_combinazione_motori) accepts — this test is about cursor reset,
+    (valida_combinazione_motori) accepts — this test is about the cursor,
     not about the gate.
     """
     _, sf = _temp_db
     camp = _make_campaign(
-        name="B8-ready-cursor-reset",
+        name="B8-ready-cursore-conservato",
         status=CampaignStatus.ready,
         scrape_cursor="LEFTOVER_CURSOR",
         inbox_engine="api",
@@ -619,7 +595,7 @@ def test_engine_switch_in_ready_with_existing_cursor_resets_it(client, _temp_db)
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["inbox_engine"] == "browser"
-    assert body["scrape_cursor"] is None, (
-        f"DEFECT: cursor not reset on engine switch in 'ready' state. "
+    assert body["scrape_cursor"] == "LEFTOVER_CURSOR", (
+        f"DIFETTO: il cambio engine in 'ready' ha azzerato il cursore. "
         f"Got: {body['scrape_cursor']!r}"
     )

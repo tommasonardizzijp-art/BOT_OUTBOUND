@@ -145,6 +145,11 @@ class CampaignResponse(BaseModel):
     # True = la discesa API ha gia' toccato il fondo dell'inbox: da li' in poi ogni
     # giro e' solo una passata di cima per i DM nuovi.
     inbox_bottom_reached: bool = False
+    # Pagine di discesa gia' fatte. Esposto per una ragione sola: la conferma del
+    # "riapri la discesa" deve poter dire QUANTO lavoro si sta buttando, altrimenti
+    # e' una domanda a cui l'operatore non puo' rispondere. La frontiera vera
+    # (`inbox_deep_cursor`) resta interna al worker.
+    inbox_deep_pages: int = 0
     bio_progress: dict | None = None
 
     model_config = {"from_attributes": True}

@@ -65,7 +65,8 @@ POST_024_COLUMNS = {
     "campaigns": ["enrichment_level",                                    # 029
                   "inbox_cursor_at", "inbox_cursor_updated_at",          # 033
                   "inbox_bottom_reached", "inbox_deep_cursor",           # 037
-                  "inbox_deep_pages"],                                   # 037
+                  "inbox_deep_pages",                                    # 037
+                  "inbox_deep_senza_lavoro"],                            # 038
     "instagram_accounts": ["daily_likes_today", "daily_likes_date"],  # 030
     "followers": ["last_message_at", "last_message_from",             # 031
                   "last_message_text", "source_channel"],

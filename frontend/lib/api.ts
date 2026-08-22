@@ -142,6 +142,11 @@ export const api = {
     resume: (id: string) => request<Campaign>(`/campaigns/${id}/resume`, { method: 'POST' }),
     stop: (id: string) => request<Campaign>(`/campaigns/${id}/stop`, { method: 'POST' }),
     reset: (id: string) => request<Campaign>(`/campaigns/${id}/reset`, { method: 'POST' }),
+    // Butta la frontiera della discesa inbox e riparte dalla cima. Contatti,
+    // messaggi e stati restano dove sono. Unica azione che cancella il
+    // segnalibro: deve restare esplicita e sotto conferma.
+    riapriDiscesa: (id: string) =>
+      request<Campaign>(`/campaigns/${id}/inbox/riapri-discesa`, { method: 'POST' }),
     preGenerate: (id: string) => request<Campaign>(`/campaigns/${id}/pre-generate`, { method: 'POST' }),
     retryFailed: (id: string) => request<Campaign>(`/campaigns/${id}/retry-failed`, { method: 'POST' }),
     abStats: (id: string) => request<ABStats>(`/campaigns/${id}/ab-stats`),

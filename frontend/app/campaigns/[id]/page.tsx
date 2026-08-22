@@ -1099,6 +1099,42 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               <Loader2 className="w-3 h-3 animate-spin" />Salvataggio...
             </div>
           )}
+
+          {/* Discesa nell'inbox. Sta qui e non fra i bottoni di testa perche' e'
+              l'unica azione che butta il segnalibro dell'inbox, e va letta accanto
+              allo stato che descrive — non in mezzo a Reset ed Elimina, dove
+              sembrerebbe una delle tante. Cambiare engine NON lo tocca piu': questo
+              e' l'unico modo di perdere la posizione, ed e' sotto conferma. */}
+          <div className="border-t border-gray-700/50 pt-3 space-y-2">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm text-gray-300 font-medium">Discesa nell&apos;inbox</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {campaign.inbox_bottom_reached
+                    ? 'Fondo raggiunto: ogni giro rilegge solo la cima, per intercettare i DM nuovi.'
+                    : `In discesa verso le conversazioni piu' vecchie — ${campaign.inbox_deep_pages ?? 0} pagine fatte. Il segnalibro sopravvive a pause, riavvii e cambio engine.`}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-amber-700 text-amber-400 hover:bg-amber-900/20 flex-shrink-0"
+                disabled={loadingAction}
+                onClick={() => openConfirm(
+                  'Riaprire la discesa?',
+                  campaign.inbox_bottom_reached
+                    ? 'La campagna tornera\' a scendere verso le conversazioni piu\' vecchie invece di rileggere solo la cima. Il segnalibro attuale viene buttato: la discesa riparte dalla cima e ri-attraversa i contatti gia\' presi (li riconosce, non li duplica, ma ci mette pagine e tempo). Contatti, messaggi e stati restano intatti.'
+                    : `Il segnalibro attuale viene buttato e la discesa riparte dalla CIMA dell'inbox: ${campaign.inbox_deep_pages ?? 0} pagine gia' fatte andranno ri-attraversate. I contatti gia' presi vengono riconosciuti e non duplicati, ma il giro costa tempo e chiamate. Contatti, messaggi e stati restano intatti.`,
+                  'Riapri la discesa',
+                  () => action(() => api.campaigns.riapriDiscesa(id)),
+                  'warning'
+                )}
+                title="Butta il segnalibro dell'inbox e riparte dalla cima"
+              >
+                {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><RotateCcw className="w-4 h-4 mr-1" />Riapri la discesa</>}
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 
