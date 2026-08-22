@@ -13,6 +13,11 @@ import { avvioLabel } from '@/lib/avvio'
 import { useState } from 'react'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
+// Stessa regola del backend e della pagina di dettaglio: una campagna con AI
+// accesa e livello «Solo DM» non parte, quindi il pulsante non deve invitare a
+// cliccarlo. Qui e' un passo PRIMA del dettaglio: senza, il divieto si scopriva
+// da un toast dopo il click, dalla lista.
+import { campagnaNonAvviabile, MOTIVO_NON_AVVIABILE } from '@/lib/arricchimento'
 
 const STATUS_COLORS: Record<CampaignStatus, string> = {
   draft: 'bg-gray-600',
@@ -204,7 +209,9 @@ export default function CampaignsPage() {
                     )}
                     {c.status === 'ready' && (
                       <Button size="sm" className="bg-green-600 hover:bg-green-700"
-                        onClick={() => action(c.id, () => api.campaigns.start(c.id))} disabled={isLoading}>
+                        onClick={() => action(c.id, () => api.campaigns.start(c.id))} disabled={isLoading || campagnaNonAvviabile(c.ai_enabled, c.enrichment_level)}
+                        title={campagnaNonAvviabile(c.ai_enabled, c.enrichment_level)
+                          ? MOTIVO_NON_AVVIABILE : undefined}>
                         {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />Avvia</>}
                       </Button>
                     )}
@@ -216,7 +223,9 @@ export default function CampaignsPage() {
                     )}
                     {c.status === 'paused' && (
                       <Button size="sm" className="bg-green-600 hover:bg-green-700"
-                        onClick={() => action(c.id, () => api.campaigns.resume(c.id))} disabled={isLoading}>
+                        onClick={() => action(c.id, () => api.campaigns.resume(c.id))} disabled={isLoading || campagnaNonAvviabile(c.ai_enabled, c.enrichment_level)}
+                        title={campagnaNonAvviabile(c.ai_enabled, c.enrichment_level)
+                          ? MOTIVO_NON_AVVIABILE : undefined}>
                         {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />Riprendi</>}
                       </Button>
                     )}

@@ -6,7 +6,7 @@ import useSWR from 'swr'
 import Link from 'next/link'
 import { api } from '@/lib/api'
 import { renderPreview, findUnknownPlaceholders } from '@/lib/spintax'
-import { soloDmVietato, MOTIVO_SOLO_DM_VIETATO } from '@/lib/arricchimento'
+import { soloDmVietato, MOTIVO_SOLO_DM_VIETATO, campagnaNonAvviabile, MOTIVO_NON_AVVIABILE } from '@/lib/arricchimento'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -825,6 +825,12 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
 
   const hasAssignedAccounts = (campaignAccounts?.filter(ca => ca.is_active) ?? []).length > 0
 
+  // Una campagna gia' salvata con AI accesa + livello «Solo DM» non puo' partire:
+  // stessa regola del backend (ensure_campaign_can_send_messages), applicata qui
+  // per spegnere i pulsanti invece di far scoprire il divieto DOPO il click, con
+  // un toast. Misurato dal vivo il 22/08 su BORDERLINE X LISTA 7.
+  const nonAvviabile = campagnaNonAvviabile(campaign.ai_enabled, campaign.enrichment_level)
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -892,7 +898,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           )}
           {campaign.status === 'ready' && campaign.messaging_enabled && (
             <Button size="sm" className="bg-green-600 hover:bg-green-700"
-              onClick={() => action(() => api.campaigns.start(id))} disabled={loadingAction}>
+              onClick={() => action(() => api.campaigns.start(id))} disabled={loadingAction || nonAvviabile}
+              title={nonAvviabile ? MOTIVO_NON_AVVIABILE : undefined}>
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />Avvia</>}
             </Button>
           )}
@@ -913,8 +920,10 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 && (campaign.messages_pending > 0 || !campaign.scrape_completed_at))
           ) && (
             <Button size="sm" className="bg-green-600 hover:bg-green-700"
-              onClick={() => action(() => api.campaigns.resume(id))} disabled={loadingAction}
-              title={campaign.scrape_completed_at
+              onClick={() => action(() => api.campaigns.resume(id))} disabled={loadingAction || nonAvviabile}
+              title={nonAvviabile
+                ? MOTIVO_NON_AVVIABILE
+                : campaign.scrape_completed_at
                 ? 'Riprende l\'invio dei DM'
                 : 'Riprende la raccolta profili (lista/bio) da dove era rimasta'}>
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Play className="w-4 h-4 mr-1" />{campaign.scrape_completed_at ? 'Riprendi' : 'Riprendi scraping'}</>}
@@ -926,8 +935,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           {campaign.messaging_enabled && campaign.status === 'paused' && !campaign.scrape_completed_at
             && (campaignAccounts?.some(ca => ca.is_active && canDm(ca.role)) ?? false) && (
             <Button size="sm" className="bg-green-700 hover:bg-green-600 text-white"
-              onClick={() => action(() => api.campaigns.start(id))} disabled={loadingAction}
-              title="Invia i DM ai profili già raccolti, lasciando lo scraping fermo">
+              onClick={() => action(() => api.campaigns.start(id))} disabled={loadingAction || nonAvviabile}
+              title={nonAvviabile ? MOTIVO_NON_AVVIABILE : "Invia i DM ai profili già raccolti, lasciando lo scraping fermo"}>
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Zap className="w-4 h-4 mr-1" />Avvia solo DM</>}
             </Button>
           )}
@@ -946,8 +955,8 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
           {/* Avvia DM in parallelo mentre scraping gira (non per import: fase singola) */}
           {campaign.messaging_enabled && campaign.source_type !== 'import' && campaign.status === 'scraping' && !campaign.scrape_completed_at && (campaignAccounts?.some(ca => ca.is_active && canDm(ca.role)) ?? false) && (
             <Button size="sm" className="bg-green-700 hover:bg-green-600 text-white"
-              onClick={() => action(() => api.campaigns.startDmAuto(id))} disabled={loadingAction}
-              title="Avvia invio DM mentre lo scraping continua in background (auto-gen)">
+              onClick={() => action(() => api.campaigns.startDmAuto(id))} disabled={loadingAction || nonAvviabile}
+              title={nonAvviabile ? MOTIVO_NON_AVVIABILE : "Avvia invio DM mentre lo scraping continua in background (auto-gen)"}>
               {loadingAction ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Zap className="w-4 h-4 mr-1" />Avvia DM ora</>}
             </Button>
           )}
