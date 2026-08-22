@@ -70,6 +70,7 @@ POST_024_COLUMNS = {
     "instagram_accounts": ["daily_likes_today", "daily_likes_date"],  # 030
     "followers": ["last_message_at", "last_message_from",             # 031
                   "last_message_text", "source_channel"],
+    "global_contacts": ["username_norm"],  # 039
 }
 
 
