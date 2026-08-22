@@ -205,8 +205,6 @@ class Campaign(Base):
     # questa no. Migration 036.
     inbox_deep_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Pagine lette in questa discesa (azzerate quando il fondo arriva davvero). Il
-    # budget di sessione chiude un giro e ne fa ripartire un altro: da solo non
-    # garantisce che la discesa finisca. Migration 036.
     inbox_deep_pages: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )

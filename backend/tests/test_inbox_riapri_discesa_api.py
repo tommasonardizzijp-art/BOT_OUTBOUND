@@ -185,3 +185,55 @@ def test_e_idempotente_su_una_campagna_gia_in_discesa(client, _temp_db):
 
     c = _run(factory, _leggi)
     assert c.inbox_bottom_reached is False
+
+
+def test_azzera_ANCHE_scrape_cursor_o_non_riparte_dalla_cima(client, _temp_db):
+    """Difetto trovato in review: azzerare solo `inbox_deep_cursor` non basta.
+    All'avvio del giro un travaso rimette dentro `scrape_cursor` quando il campo
+    profondo e' vuoto, e `scrape_cursor` resta valorizzato ogni volta che il giro
+    precedente e' uscito dalla pausa di sessione — cioe' quasi sempre, in una
+    discesa lunga. Senza questa riga l'operatore riprende esattamente dal cursore
+    di cui, per ipotesi, non si fida piu'. In silenzio."""
+    engine, factory = _temp_db
+    cid = _crea_campagna_in_fondo(factory)
+
+    async def _metti_scrape_cursor(db):
+        c = await db.get(Campaign, cid)
+        c.scrape_cursor = '{"cursor_timestamp_seconds":1772054057}'
+        await db.commit()
+
+    _run(factory, _metti_scrape_cursor)
+
+    r = client.post("/api/campaigns/{}/inbox/riapri-discesa".format(cid))
+    assert r.status_code == 200, r.text
+
+    async def _leggi(db):
+        return await db.get(Campaign, cid)
+
+    c = _run(factory, _leggi)
+    assert c.inbox_deep_cursor is None
+    assert c.scrape_cursor is None, \
+        "senza questo il travaso all'avvio rimette dentro il cursore vecchio"
+
+
+def test_rifiuta_la_riapertura_a_campagna_in_corsa(client, _temp_db):
+    """A campagna in `listing` il worker riscrive il cursore a ogni pagina:
+    l'azzeramento verrebbe sovrascritto entro pochi secondi e resterebbero solo
+    gli altri campi, con la discesa che prosegue da dov'era e il contatore
+    ripartito da zero. Un esito che dipende dall'ordine di due scritture non e'
+    una rete di sicurezza."""
+    engine, factory = _temp_db
+    cid = _crea_campagna_in_fondo(factory)
+
+    async def _in_corsa(db):
+        c = await db.get(Campaign, cid)
+        c.status = CampaignStatus.listing
+        await db.commit()
+
+    _run(factory, _in_corsa)
+
+    r = client.post("/api/campaigns/{}/inbox/riapri-discesa".format(cid))
+    assert r.status_code == 409, r.text
+
+    c = _run(factory, lambda db: db.get(Campaign, cid))
+    assert c.inbox_bottom_reached is True, "rifiutata la chiamata, niente e' cambiato"

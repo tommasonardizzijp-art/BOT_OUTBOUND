@@ -41,7 +41,15 @@ def _as_users(raw_thread) -> list:
     if isinstance(raw_thread, dict):
         users = raw_thread.get("users") or []
         from types import SimpleNamespace
-        return [SimpleNamespace(pk=u.get("pk"), username=u.get("username")) for u in users]
+        # Gli elementi non-dict si scartano invece di far sollevare l'intera
+        # pagina: un payload degradato al punto da mettere interi o stringhe qui
+        # dentro e' esattamente il caso che le guardie a valle devono poter
+        # contare come "niente da estrarre", non un errore che porta via il giro.
+        return [
+            SimpleNamespace(pk=u.get("pk"), username=u.get("username"))
+            for u in users
+            if isinstance(u, dict)
+        ]
     return getattr(raw_thread, "users", []) or []
 
 
@@ -116,7 +124,17 @@ class ApiInboxSource:
         threads_con_utenti = 0
         for t in threads:
             utenti = _as_users(t)
-            if any(getattr(u, "pk", None) is not None for u in (utenti or [])):
+            # "Leggibile" deve significare la stessa cosa che pretende
+            # extract_thread_participant: pk E username. Contare il solo pk
+            # lascerebbe muta la guardia proprio sul payload degradato in cui i pk
+            # arrivano e gli username no — e il giro finirebbe col messaggio
+            # "inbox gia' tutto raccolto" che questa guardia esiste per evitare.
+            if any(
+                getattr(u, "pk", None) is not None
+                and isinstance(getattr(u, "username", None), str)
+                and getattr(u, "username").strip()
+                for u in (utenti or [])
+            ):
                 threads_con_utenti += 1
             p = extract_thread_participant(utenti, self._own_pk)
             if p is not None:

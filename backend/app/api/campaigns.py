@@ -648,11 +648,14 @@ async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: A
             ),
         )
     campaign.status = CampaignStatus.listing
-    # Il tetto delle pagine di discesa e' una protezione contro il giro che non
-    # finisce da solo, non una condanna: un avvio manuale lo ricarica. Le sessioni
-    # automatiche riprendono via Retry(defer) senza passare di qui, quindi la
-    # garanzia fra una sessione e l'altra resta intatta.
-    campaign.inbox_deep_pages = 0
+    # `inbox_deep_pages` non e' piu' un budget: il tetto a pagine e' stato
+    # rimosso il 22/08 perche' chiudeva il lavoro a meta' su un inbox grande.
+    # Oggi e' la MISURA della profondita' raggiunta, e come tale finisce negli
+    # alert e nei log. Per questo un avvio manuale NON la azzera piu': lo faceva,
+    # e avrebbe fatto dire "dopo 3 pagine" a una discesa che ne aveva fatte 900,
+    # buttando via proprio il dato che serve a capire quanto e' grande l'inbox.
+    # Si azzera solo dove la discesa riparte davvero dalla cima (reset e
+    # riapri-discesa).
     campaign.updated_at = datetime.utcnow()
     db.add(ActivityLog(campaign_id=campaign.id, action="list_started"))
     await db.commit()
@@ -866,19 +869,39 @@ async def riapri_discesa_inbox(campaign_id: str, db: AsyncSession = Depends(get_
     della campagna, che pero' CANCELLA tutti i Message e riporta indietro lo stato
     di tutti i follower: una motosega per un interruttore.
 
-    Questo endpoint tocca solo i tre campi della discesa. I contatti raccolti, i
-    messaggi e gli stati restano dove sono. La discesa riparte dalla CIMA (il
-    cursore viene azzerato): il dedup a valle rende innocuo il riattraversamento,
-    mentre tenere un cursore vecchio di cui non ci si fida piu' non lo sarebbe.
+    Questo endpoint tocca solo i campi della discesa. I contatti raccolti, i
+    messaggi e gli stati restano dove sono. La discesa riparte dalla CIMA: il
+    dedup a valle rende innocuo il riattraversamento, mentre tenere un cursore
+    vecchio di cui non ci si fida piu' non lo sarebbe.
+
+    Richiede la campagna ferma: vedi il controllo di stato qui sotto.
     """
     campaign = await _get_or_404(campaign_id, db)
     if campaign.scrape_mode != "dm_threads":
         raise HTTPException(status_code=400,
                             detail="Solo le campagne inbox (dm_threads) hanno una discesa")
+    # A campagna in corsa il worker riscrive `inbox_deep_cursor` a ogni pagina:
+    # l'azzeramento verrebbe sovrascritto entro pochi secondi e resterebbero solo
+    # gli altri due campi, con la discesa che prosegue da dov'era e il contatore
+    # ripartito da zero. Un esito che dipende dall'ordine di due scritture non e'
+    # una rete di sicurezza: si ferma prima la campagna.
+    if campaign.status in (CampaignStatus.listing, CampaignStatus.listing_break):
+        raise HTTPException(
+            status_code=409,
+            detail="La Fase Lista e' in corso: fermala prima di riaprire la discesa",
+        )
 
     era_in_fondo = bool(campaign.inbox_bottom_reached)
     campaign.inbox_bottom_reached = False
     campaign.inbox_deep_cursor = None
+    # Va azzerato ANCHE questo, o non si riparte affatto dalla cima: all'avvio del
+    # giro un travaso rimette `scrape_cursor` dentro `inbox_deep_cursor` quando
+    # quest'ultimo e' vuoto (migrazione dati pre-036). `scrape_cursor` resta
+    # valorizzato ogni volta che il giro precedente e' uscito da una porta che non
+    # e' quella normale — la pausa di sessione, per esempio, cioe' lo stato in cui
+    # una discesa lunga passa la maggior parte della sua vita. Senza questa riga
+    # l'operatore riprende dal cursore di cui, per ipotesi, non si fida piu'.
+    campaign.scrape_cursor = None
     campaign.inbox_deep_pages = 0
     campaign.updated_at = datetime.utcnow()
     db.add(ActivityLog(campaign_id=campaign.id, action="inbox_discesa_riaperta"))

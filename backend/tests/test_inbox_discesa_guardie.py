@@ -331,3 +331,127 @@ def test_un_cursore_illeggibile_non_rompe_il_log(monkeypatch):
         assert n == 2, "il giro prosegue anche con un cursore non decodificabile"
     finally:
         cleanup()
+
+
+# ─────────── 6. il secondo giro: il punto cieco trovato in review ──────────
+def _riporta_in_listing(factory, campaign_id):
+    """Rimette la campagna in listing come farebbe un rilancio dalla UI."""
+    async def _go(db=None):
+        async with factory() as db:
+            c = await db.get(Campaign, campaign_id)
+            c.status = CampaignStatus.listing
+            await db.commit()
+    asyncio.run(_go())
+
+
+def test_un_inbox_multiplo_esatto_di_20_non_resta_bloccato_per_sempre(monkeypatch):
+    """Il difetto trovato in review, e il piu' pericoloso di tutti.
+
+    Un inbox con esattamente N x 20 conversazioni ha l'ultima pagina PIENA per
+    davvero. La guardia del fondo falso la rifiuta — giustamente, la prima volta.
+    Ma se Instagram non manda un cursore su quell'ultima pagina, la frontiera
+    resta ferma e OGNI rilancio ritrova la stessa pagina e la rifiuta di nuovo:
+    per sempre, con un alert Telegram a ogni giro, e senza mai passare in
+    modalita' cima — quindi smettendo anche di raccogliere i DM nuovi.
+
+    La regola che scioglie il nodo: se rilanciando si ritrova lo stesso identico
+    punto di partenza, non e' piu' un dubbio. O e' il fondo vero, o e' un blocco
+    che nessun rilancio sciogliera'."""
+    ultima = _pagina(n_part=3, base=100, cursor=None, bottom=True,
+                     threads=PIENA, has_older=False)
+    factory, cid, src, cleanup = _setup(
+        monkeypatch, [_pagina(n_part=3, base=0, cursor="C0"), ultima])
+    try:
+        _run(factory, cid)
+        c, _ = _stato(factory, cid)
+        assert c.inbox_bottom_reached is False, \
+            "al PRIMO incontro il fondo su pagina piena si rifiuta"
+
+        # Secondo giro: riparte dallo stesso punto e ritrova la stessa pagina.
+        src._pages = [ultima]
+        _riporta_in_listing(factory, cid)
+        _run(factory, cid)
+        c, _ = _stato(factory, cid)
+        assert c.inbox_bottom_reached is True, \
+            ("al secondo incontro dallo stesso punto il fondo si accetta: "
+             "rifiutarlo di nuovo significa rifiutarlo per sempre")
+    finally:
+        cleanup()
+
+
+def test_la_guardia_del_fondo_non_scatta_in_modalita_cima(monkeypatch):
+    """In cima non si sta scendendo: un inbox piccolo e multiplo di 20 arriva in
+    fondo a ogni passata, e sparare un alert 'sospetto un limite di profondita''
+    ogni volta e' rumore che addestra a ignorare gli alert."""
+    pagine = [_pagina(n_part=2, base=0, cursor="C0", bottom=True,
+                      threads=PIENA, has_older=False)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine, bottom_reached=True)
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        assert not any("pagina PIENA" in m for m in spia["warning"]), \
+            "in modalita' cima la guardia della discesa non deve parlare"
+    finally:
+        cleanup()
+
+
+# ─────────── 7. buchi di copertura segnalati in review ────────────────────
+def test_una_pagina_NON_misurata_non_fa_scattare_la_guardia(monkeypatch):
+    """`threads_con_utenti=None` significa 'non misurato' — pagine costruite da
+    sorgenti che non hanno un payload da ispezionare. Su un dato che non abbiamo
+    la guardia deve tacere: sconosciuto non e' un'accusa."""
+    pagine = [_pagina(n_part=2, base=0, cursor="C0")]
+    pagine += [InboxPage(participants=[], cursor="CN{}".format(i), exhausted=False,
+                         threads_letti=PIENA, has_older=True,
+                         threads_con_utenti=None) for i in range(6)]
+    pagine += [_pagina(n_part=2, base=500, cursor="C9")]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        c, n = _stato(factory, cid)
+        assert n == 4, "il giro prosegue su pagine non misurate: trovati {}".format(n)
+        assert not any("utenti leggibili" in m for m in spia["warning"])
+    finally:
+        cleanup()
+
+
+def test_la_latenza_finisce_davvero_nel_log(monkeypatch):
+    """L'assert precedente su 'ms' passava anche cancellando la misura, perche'
+    nei test la latenza e' sempre None e il log stampa il fallback '?ms'."""
+    import re
+    pagina = _pagina(n_part=2, base=0, cursor="C0")
+    pagina.latenza_ms = 437
+    factory, cid, src, cleanup = _setup(monkeypatch, [pagina])
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        righe = " | ".join(spia["info"])
+        assert re.search(r"latenza=\d+ms", righe), \
+            "la latenza misurata deve comparire come numero: {}".format(righe)
+    finally:
+        cleanup()
+
+
+def test_la_discesa_si_ferma_se_non_produce_piu_niente(monkeypatch):
+    """Rete di sicurezza al posto del vecchio tetto a pagine: pagine piene,
+    cursori sempre nuovi, utenti veri ma tutti gia' in lista. Nessuna delle altre
+    guardie lo vede e il giro scenderebbe all'infinito bruciando chiamate."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "inbox_discesa_senza_lavoro_stop", 4)
+    monkeypatch.setattr(settings, "inbox_session_pages", 10_000)
+    pagine = [_pagina(n_part=1, base=0, cursor="C0")]
+    # stessi partecipanti a ogni pagina: gia' in lista dopo la prima
+    pagine += [_pagina(n_part=1, base=0, cursor="D{}".format(i)) for i in range(20)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        c, n = _stato(factory, cid)
+        assert c.inbox_bottom_reached is False, "non e' il fondo, e' una resa"
+        assert src.chiamate <= 7, \
+            "doveva fermarsi dopo ~5 pagine, ne ha chieste {}".format(src.chiamate)
+        assert any("senza un solo" in m for m in spia["warning"]), \
+            "serve un warning dedicato: {}".format(spia["warning"])
+    finally:
+        cleanup()
