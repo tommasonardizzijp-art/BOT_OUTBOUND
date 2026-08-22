@@ -1,0 +1,333 @@
+"""Guardie e osservabilita' della DISCESA nell'inbox (fase Lista API).
+
+Contesto (22/08): la campagna "DM Claudio x AV" si e' fermata a 2999 contatti
+dichiarando `ready` — cioe' "finito" — col cursore ancora fermo al 25 febbraio.
+Non sapremo mai perche': non c'era un solo log utile. Il target di 10.000 era
+un'impostazione dell'utente, non una misura dell'inbox, quindi quel numero NON
+prova che ci fosse un tetto: quell'inbox poteva finire davvero li'. Resta che
+una discesa puo' morire in silenzio dicendo che e' andata bene, e che oggi non
+avremmo modo di distinguere i due casi.
+
+Il principio comune di questi test: un motore che si ferma deve saper dire SE ha
+finito davvero o se qualcuno gli ha detto di smettere. Sono due cose diverse e
+prima erano indistinguibili.
+"""
+import asyncio
+import os
+import sys
+import tempfile
+import uuid
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import app.models.account          # noqa: F401 — register in metadata
+import app.models.campaign_account  # noqa: F401
+import app.models.message          # noqa: F401
+import app.models.activity_log     # noqa: F401
+import app.models.global_contact   # noqa: F401
+
+from app.database import Base
+from app.models.campaign import Campaign, CampaignStatus
+from app.models.follower import Follower
+from app.services import scrape_inbox
+from app.services.inbox_source import InboxPage
+
+PIENA = 20   # thread per pagina richiesti a IG (limit=20)
+
+
+class _ScriptedSource:
+    """Restituisce le pagine preparate, poi una pagina finale esaurita."""
+
+    def __init__(self, pages):
+        self._pages = list(pages)
+        self.chiamate = 0
+
+    async def next_page(self):
+        self.chiamate += 1
+        if self._pages:
+            return self._pages.pop(0)
+        return InboxPage(participants=[], cursor=None, exhausted=True)
+
+
+def _pagina(*, n_part=0, threads=PIENA, cursor="C", bottom=False, has_older=True,
+            base=0, con_utenti=None):
+    """Una pagina di inbox. `base` sposta i pk per non collidere fra pagine."""
+    return InboxPage(
+        participants=[(base + i + 1, "u{}".format(base + i + 1)) for i in range(n_part)],
+        cursor=cursor,
+        exhausted=False,
+        bottom_confirmed=bottom,
+        threads_letti=threads,
+        has_older=has_older,
+        # Per default i thread portano i loro utenti: e' il caso normale, gruppi
+        # inclusi. `con_utenti=0` simula il payload degradato (nessun dato utente).
+        threads_con_utenti=threads if con_utenti is None else con_utenti,
+    )
+
+
+def _setup(monkeypatch, pages, *, bottom_reached=False, deep_pages=0):
+    fd, path = tempfile.mkstemp(suffix=".db", prefix="inbox_guardie_")
+    os.close(fd)
+    engine = create_async_engine("sqlite+aiosqlite:///{}".format(path),
+                                 connect_args={"check_same_thread": False})
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    campaign_id = str(uuid.uuid4())
+    src = _ScriptedSource(pages)
+
+    async def _seed():
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with factory() as db:
+            db.add(Campaign(
+                id=campaign_id, name="guardie discesa", source_type="scrape",
+                scrape_mode="dm_threads", inbox_engine="api",
+                status=CampaignStatus.listing, messaging_enabled=False,
+                inbox_bottom_reached=bottom_reached,
+                inbox_deep_pages=deep_pages,
+                scrape_session_size=100_000,
+                scrape_break_minutes_min=30, scrape_break_minutes_max=45,
+            ))
+            await db.commit()
+
+    asyncio.run(_seed())
+
+    async def _fake_build(db, campaign):
+        async def _noop():
+            return None
+        return src, 999_999, None, _noop
+
+    monkeypatch.setattr(scrape_inbox, "build_inbox_source", _fake_build)
+
+    # Il pacing vero fra pagine e' 10-60s: in un test da centinaia di pagine
+    # sarebbero ore. Si azzera l'attesa, non la logica che la decide.
+    async def _senza_attesa(*a, **k):
+        return None
+
+    monkeypatch.setattr(scrape_inbox, "_inbox_page_delay", _senza_attesa)
+
+    def cleanup():
+        asyncio.run(engine.dispose())
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    return factory, campaign_id, src, cleanup
+
+
+def _run(factory, campaign_id, timeout=60):
+    async def _go():
+        async with factory() as db:
+            campaign = await db.get(Campaign, campaign_id)
+            return await scrape_inbox.run_inbox_list(campaign_id, db, campaign)
+    return asyncio.run(asyncio.wait_for(_go(), timeout=timeout))
+
+
+def _stato(factory, campaign_id):
+    async def _go():
+        async with factory() as db:
+            c = await db.get(Campaign, campaign_id)
+            n = await db.scalar(select(func.count(Follower.id))
+                                .where(Follower.campaign_id == campaign_id))
+            return c, n
+    return asyncio.run(_go())
+
+
+def _spia_log(monkeypatch):
+    """Cattura i messaggi che il motore logga, divisi per livello."""
+    reale = scrape_inbox.logger
+    catturati = {"info": [], "warning": [], "error": [], "debug": []}
+
+    class _Proxy:
+        def info(self, m, *a, **k):
+            catturati["info"].append(str(m))
+
+        def warning(self, m, *a, **k):
+            catturati["warning"].append(str(m))
+
+        def error(self, m, *a, **k):
+            catturati["error"].append(str(m))
+
+        def debug(self, m, *a, **k):
+            catturati["debug"].append(str(m))
+
+        def exception(self, m, *a, **k):
+            catturati["error"].append(str(m))
+
+        def __getattr__(self, n):
+            return getattr(reale, n)
+
+    monkeypatch.setattr(scrape_inbox, "logger", _Proxy())
+    return catturati
+
+
+# ─────────────────────── 1. il tetto delle pagine non c'e' piu' ────────────
+def test_la_discesa_non_si_ferma_oltre_le_vecchie_500_pagine(monkeypatch):
+    """Tommaso vende 20.000 contatti: il vecchio tetto a 500 pagine (= 10.000
+    thread) gli avrebbe chiuso il lavoro a meta' DICHIARANDO di aver finito.
+
+    Si parte da una campagna gia' a 600 pagine di discesa — cioe' ben oltre il
+    tetto rimosso — e si verifica che il giro prosegua e raccolga: prima si
+    sarebbe fermato alla prima pagina con un warning."""
+    pagine = [_pagina(n_part=2, base=0, cursor="C0"),
+              _pagina(n_part=2, base=100, cursor="C1"),
+              _pagina(n_part=2, base=200, cursor="C2")]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine, deep_pages=600)
+    try:
+        _run(factory, cid)
+        c, n = _stato(factory, cid)
+        assert n == 6, "oltre le 500 pagine la discesa deve proseguire: trovati {}".format(n)
+        assert c.inbox_deep_pages >= 603
+        assert c.inbox_bottom_reached is False
+    finally:
+        cleanup()
+
+
+def test_il_setting_del_tetto_non_esiste_piu():
+    """Il tetto non deve sopravvivere come costante inerte: si rimuove."""
+    from app.config import settings
+    assert not hasattr(settings, "inbox_deep_max_pages")
+
+
+# ─────────────────────── 2. il fondo falso su pagina piena ────────────────
+def test_fondo_dichiarato_su_pagina_PIENA_non_alza_linterruttore(monkeypatch):
+    """LA guardia piu' importante. Una lista che finisce davvero ha l'ultima
+    pagina PARZIALE: se ci sono 9.412 conversazioni, l'ultima ne porta 12, non 20.
+    Pagina piena + "non c'e' altro sotto" e' una contraddizione — ed e' anche il
+    modo piu' economico che avrebbe IG per mettere un tetto di profondita' senza
+    restituire un errore. Crederci alza `inbox_bottom_reached`, che e' PERMANENTE:
+    si perde il resto dell'inbox per sempre, e l'unico reset esistente cancella
+    tutti i Message della campagna."""
+    pagine = [_pagina(n_part=3, base=0, cursor="C0"),
+              _pagina(n_part=3, base=100, cursor="C1", bottom=True, threads=PIENA,
+                      has_older=False)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        c, n = _stato(factory, cid)
+        assert c.inbox_bottom_reached is False, \
+            "fondo dichiarato su pagina piena: NON si alza l'interruttore permanente"
+        assert c.inbox_deep_cursor is not None, "la frontiera non va persa"
+        assert any("piena" in m.lower() for m in spia["warning"]), \
+            "serve un warning esplicito, trovati: {}".format(spia["warning"])
+    finally:
+        cleanup()
+
+
+def test_fondo_dichiarato_su_pagina_PARZIALE_alza_linterruttore(monkeypatch):
+    """Il caso legittimo deve continuare a funzionare: ultima pagina non piena +
+    has_older=False = l'inbox e' finito davvero."""
+    pagine = [_pagina(n_part=3, base=0, cursor="C0"),
+              _pagina(n_part=2, base=100, cursor="C1", bottom=True, threads=7,
+                      has_older=False)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    try:
+        _run(factory, cid)
+        c, n = _stato(factory, cid)
+        assert c.inbox_bottom_reached is True
+        assert c.inbox_deep_cursor is None
+    finally:
+        cleanup()
+
+
+# ─────────────────────── 3. pagine senza partecipanti estraibili ──────────
+def test_pagine_piene_di_thread_ma_senza_partecipanti_fermano_la_discesa(monkeypatch):
+    """Se IG servisse thread senza i dati utente, `extract_thread_participant` li
+    scarta tutti e la pagina risulta "nessun contatto nuovo" — IDENTICA a una
+    pagina di gente gia' in lista. Il motore direbbe "inbox gia' raccolto" e
+    chiuderebbe con un messaggio di successo mentre gli stanno servendo pagine
+    vuote. Va distinto e va fermato con una ragione propria."""
+    pagine = [_pagina(n_part=2, base=0, cursor="C0")]
+    pagine += [_pagina(n_part=0, threads=PIENA, con_utenti=0,
+                       cursor="CV{}".format(i))
+               for i in range(6)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        c, n = _stato(factory, cid)
+        assert c.inbox_bottom_reached is False, "non e' il fondo: e' una resa"
+        assert any("username" in m.lower() or "partecipant" in m.lower()
+                   for m in spia["warning"]), \
+            "serve un warning dedicato, trovati: {}".format(spia["warning"])
+        assert src.chiamate <= 5, \
+            "doveva fermarsi presto, ha chiesto {} pagine".format(src.chiamate)
+    finally:
+        cleanup()
+
+
+def test_poche_pagine_di_soli_gruppi_NON_fermano_la_discesa(monkeypatch):
+    """Falso positivo da evitare, trovato da un test gia' esistente: un tratto di
+    chat di GRUPPO da' zero partecipanti 1-a-1 ed e' del tutto legittimo. La
+    differenza col payload degradato non e' il conteggio (identico) ma il fatto
+    che nei gruppi gli utenti CI SONO, sono solo piu' di uno."""
+    pagine = [_pagina(n_part=2, base=0, cursor="C0"),
+              _pagina(n_part=0, threads=PIENA, cursor="C1"),
+              _pagina(n_part=2, base=100, cursor="C3")]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    try:
+        _run(factory, cid)
+        c, n = _stato(factory, cid)
+        assert n == 4, "i contatti dopo il tratto di gruppi vanno presi: trovati {}".format(n)
+    finally:
+        cleanup()
+
+
+# ─────────────────────── 4. pagina corta: avvisa, non ferma ───────────────
+def test_pagina_corta_avvisa_ma_NON_ferma_la_discesa(monkeypatch):
+    """Una pagina da 5 thread quando ne chiediamo 20, con has_older ancora vero,
+    e' il modo tipico in cui un servizio frena senza dirlo. Decisione di Tommaso
+    (22/08): per ora si LOGGA soltanto — potrebbe avere altre cause e fermare a
+    caso costerebbe piu' di quanto salva."""
+    pagine = [_pagina(n_part=2, base=0, cursor="C0"),
+              _pagina(n_part=1, base=100, threads=5, cursor="C1"),
+              _pagina(n_part=2, base=200, cursor="C2")]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        c, n = _stato(factory, cid)
+        assert n == 5, "la discesa deve proseguire: trovati {} contatti".format(n)
+        assert any("corta" in m.lower() for m in spia["warning"]), \
+            "serve l'avviso di pagina corta, trovati: {}".format(spia["warning"])
+    finally:
+        cleanup()
+
+
+# ─────────────────────── 5. il log di pagina ──────────────────────────────
+def test_il_log_di_pagina_riporta_has_older_cursore_e_latenza(monkeypatch):
+    """Senza questi tre, "0 nuovi" nel log puo' voler dire cinque cose diverse e
+    non si distinguono. Col cursore si legge anche a che DATA si e' arrivati:
+    e' il dato che dice quanto e' grande davvero l'inbox dopo mezz'ora invece
+    che dopo due settimane."""
+    cursore = ('{"cursor_thread_v2_id":1,"cursor_timestamp_seconds":1772054057,'
+               '"cursor_relevancy_score":0}')
+    pagine = [_pagina(n_part=2, base=0, cursor=cursore)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        righe = " | ".join(spia["info"])
+        assert "has_older" in righe, "manca has_older nel log: {}".format(righe)
+        assert "2026-02-25" in righe, \
+            "la data del cursore va decodificata e mostrata: {}".format(righe)
+        assert "ms" in righe, "manca la latenza: {}".format(righe)
+    finally:
+        cleanup()
+
+
+def test_un_cursore_illeggibile_non_rompe_il_log(monkeypatch):
+    """Il parsing del cursore e' un ORNAMENTO: se IG cambia formato, il log
+    perde una data, non il giro. Fail-open."""
+    pagine = [_pagina(n_part=2, base=0, cursor="non-json-affatto")]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    try:
+        _run(factory, cid)
+        c, n = _stato(factory, cid)
+        assert n == 2, "il giro prosegue anche con un cursore non decodificabile"
+    finally:
+        cleanup()

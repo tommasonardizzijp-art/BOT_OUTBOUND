@@ -6,6 +6,7 @@ con le due implementazioni (API/browser). Vedi spec 2026-06-23-inbox-dm-scraping
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -44,6 +45,12 @@ def _as_users(raw_thread) -> list:
     return getattr(raw_thread, "users", []) or []
 
 
+PAGINA_ATTESA = 20
+"""Thread richiesti a IG per pagina (`limit`). Serve anche a valle: una pagina
+PIENA che dichiara il fondo e' una contraddizione, e una piu' corta senza
+fondo e' il sintomo tipico di un freno silenzioso."""
+
+
 def fetch_inbox_page(client, cursor: str | None) -> tuple[list, str | None, bool, bool]:
     """Una pagina dell'inbox via private API.
 
@@ -61,7 +68,7 @@ def fetch_inbox_page(client, cursor: str | None) -> tuple[list, str | None, bool
         "visual_message_return_type": "unseen",
         "thread_message_limit": "10",
         "persistentBadging": "true",
-        "limit": "20",
+        "limit": str(PAGINA_ATTESA),
         "is_prefetching": "false",
     }
     if cursor:
@@ -93,12 +100,25 @@ class ApiInboxSource:
         self._cursor = cursor
 
     async def next_page(self) -> InboxPage:
+        _t0 = time.monotonic()
         threads, next_cursor, has_older, fondo_dichiarato = await asyncio.to_thread(
             fetch_inbox_page, self._client, self._cursor
         )
+        latenza_ms = int((time.monotonic() - _t0) * 1000)
         participants: list[tuple[int, str]] = []
+        # Thread che portano ALMENO un utente con pk leggibile, anche se poi il
+        # filtro 1-a-1 li scarta. Serve a distinguere due casi che dall'esterno
+        # danno lo stesso segnale ("zero partecipanti") ma sono opposti:
+        #   - tratto di chat di GRUPPO  -> gli utenti ci sono, sono solo troppi.
+        #     Legittimo, la discesa deve proseguire.
+        #   - payload DEGRADATO         -> gli utenti non ci sono proprio.
+        #     Non c'e' niente da estrarre: fermarsi e dirlo.
+        threads_con_utenti = 0
         for t in threads:
-            p = extract_thread_participant(_as_users(t), self._own_pk)
+            utenti = _as_users(t)
+            if any(getattr(u, "pk", None) is not None for u in (utenti or [])):
+                threads_con_utenti += 1
+            p = extract_thread_participant(utenti, self._own_pk)
             if p is not None:
                 participants.append(p)
         self._cursor = next_cursor
@@ -111,6 +131,8 @@ class ApiInboxSource:
         return InboxPage(
             participants=participants, cursor=next_cursor, exhausted=exhausted,
             bottom_confirmed=fondo_dichiarato, threads_letti=len(threads),
+            has_older=has_older, latenza_ms=latenza_ms,
+            threads_con_utenti=threads_con_utenti,
         )
 
 
@@ -125,6 +147,21 @@ class InboxPage:
     # da' zero partecipanti ma non e' una pagina vuota, e non deve far credere che
     # la discesa sia finita.
     threads_letti: int = 0
+    # Cosa ha risposto IG su "sotto c'e' altro": serve nel log per distinguere una
+    # discesa che si e' fermata da una che e' arrivata in fondo.
+    has_older: bool = False
+    # Quanto ha impiegato la chiamata. Una latenza che raddoppia e' il primo
+    # sintomo leggibile di un freno lato server.
+    latenza_ms: int | None = None
+    # Thread che portavano almeno un utente leggibile (anche se scartati dal filtro
+    # 1-a-1). A zero su una pagina piena di thread significa payload senza dati
+    # utente: niente da estrarre, e va distinto da un tratto di gruppi.
+    #
+    # `None` = NON MISURATO, e non va confuso con zero: e' il valore delle pagine
+    # costruite a mano (test, sorgenti alternative) che non hanno un payload da
+    # ispezionare. Su "non misurato" la guardia a valle NON scatta — sconosciuto
+    # non e' un'accusa. Solo la sorgente API vera lo valorizza.
+    threads_con_utenti: int | None = None
 
 
 class InboxListSource(Protocol):

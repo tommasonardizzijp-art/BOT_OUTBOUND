@@ -855,6 +855,42 @@ async def stop_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     return await _enrich_campaign(campaign, db, include_today=True)
 
 
+@router.post("/{campaign_id}/inbox/riapri-discesa", response_model=CampaignResponse)
+async def riapri_discesa_inbox(campaign_id: str, db: AsyncSession = Depends(get_db)):
+    """Rimette in discesa una campagna inbox che si era dichiarata "in fondo".
+
+    `inbox_bottom_reached` e' un interruttore PERMANENTE: si alza quando Instagram
+    dice has_older=False e da quel momento la campagna guarda solo la cima della
+    lista. Se quel "no" era una bugia — un tetto di profondita', un payload
+    degradato, un blip — l'unico modo di tornare a scendere era il reset generale
+    della campagna, che pero' CANCELLA tutti i Message e riporta indietro lo stato
+    di tutti i follower: una motosega per un interruttore.
+
+    Questo endpoint tocca solo i tre campi della discesa. I contatti raccolti, i
+    messaggi e gli stati restano dove sono. La discesa riparte dalla CIMA (il
+    cursore viene azzerato): il dedup a valle rende innocuo il riattraversamento,
+    mentre tenere un cursore vecchio di cui non ci si fida piu' non lo sarebbe.
+    """
+    campaign = await _get_or_404(campaign_id, db)
+    if campaign.scrape_mode != "dm_threads":
+        raise HTTPException(status_code=400,
+                            detail="Solo le campagne inbox (dm_threads) hanno una discesa")
+
+    era_in_fondo = bool(campaign.inbox_bottom_reached)
+    campaign.inbox_bottom_reached = False
+    campaign.inbox_deep_cursor = None
+    campaign.inbox_deep_pages = 0
+    campaign.updated_at = datetime.utcnow()
+    db.add(ActivityLog(campaign_id=campaign.id, action="inbox_discesa_riaperta"))
+    await db.commit()
+    await db.refresh(campaign)
+    logger.info(
+        f"[Campaign {campaign_id}] discesa inbox riaperta "
+        f"(era_in_fondo={era_in_fondo}) — messaggi e contatti intatti"
+    )
+    return await _enrich_campaign(campaign, db, include_today=True)
+
+
 @router.post("/{campaign_id}/reset", response_model=CampaignResponse)
 async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     """Reset a campaign back to draft state so it can be re-scraped."""

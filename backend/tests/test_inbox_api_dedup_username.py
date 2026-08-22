@@ -445,32 +445,19 @@ def test_un_tratto_di_soli_gruppi_non_conta_come_pagina_vuota(monkeypatch):
         cleanup()
 
 
-def test_la_discesa_ha_un_tetto_di_pagine_oltre_la_singola_sessione(monkeypatch):
-    """Il budget di sessione chiude un giro e ne fa ripartire un altro: da solo non
-    garantisce che la discesa finisca. Con pagine sempre piene e cursori sempre
-    diversi (inbox che cicla) si scenderebbe per sessioni all'infinito."""
-    session_factory, campaign_id, cleanup = _setup_inbox_db(monkeypatch, [])
-    try:
-        async def _porta_al_limite():
-            async with session_factory() as db:
-                c = await db.get(Campaign, campaign_id)
-                c.inbox_deep_pages = settings.inbox_deep_max_pages - 1
-                await db.commit()
-        asyncio.run(_porta_al_limite())
+def test_la_discesa_NON_ha_piu_un_tetto_di_pagine(monkeypatch):
+    """Il tetto di 500 pagine e' stato RIMOSSO il 22/08 e questo test ne prende il
+    posto (prima asseriva l'opposto).
 
-        noti = [(1, "uno")]
-        src = _CountingSource(lambda n: InboxPage(
-            participants=noti, cursor=f"c{n}", exhausted=False, threads_letti=1,
-        ))
-        _inject_source(monkeypatch, src)
-        result = _run_inbox_list(session_factory, campaign_id)
-        _, campaign = _leggi_follower(session_factory, campaign_id)
-        assert result is None, "il giro deve chiudersi, non deferire"
-        assert src.calls == 1
-        assert campaign.inbox_deep_cursor is not None, "la frontiera resta: si riprende da li'"
-    finally:
-        cleanup()
-
+    Perche': 500 pagine = 10.000 thread, scelto assumendo che nessun inbox reale
+    andasse oltre. L'obiettivo commerciale su @michele.carozza e' 20.000 contatti,
+    quindi quel tetto avrebbe chiuso il lavoro a meta' — e la campagna sarebbe
+    finita in `ready`, cioe' indistinguibile da una riuscita. A fermare la discesa
+    restano solo segnali VERI: fondo dichiarato da IG su pagina parziale, cursore
+    fermo, pagine vuote, pagine senza dati utente.
+    La copertura di dettaglio sta in tests/test_inbox_discesa_guardie.py."""
+    from app.config import settings
+    assert not hasattr(settings, "inbox_deep_max_pages"),         "il tetto non deve tornare, nemmeno come costante inerte"
 
 def test_fermarsi_senza_cursore_non_si_annuncia_come_completata(monkeypatch):
     """Una discesa interrotta da un payload senza cursore non deve essere

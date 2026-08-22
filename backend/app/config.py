@@ -174,10 +174,20 @@ class Settings(BaseSettings):
     # 15 pagine x 20 thread = 300 = lo stesso ritmo di inbox_session_size quando
     # l'inbox e' vergine e ogni pagina porta solo contatti nuovi.
     inbox_session_pages: int = 15
-    # Tetto della DISCESA intera (non della singola sessione): oltre questo numero
-    # di pagine senza aver mai raggiunto il fondo, il giro si ferma e avvisa. 500
-    # pagine = 10.000 thread, molto oltre qualunque inbox reale.
-    inbox_deep_max_pages: int = 500
+    # NESSUN tetto di pagine sulla discesa (rimosso il 22/08): era 500 = 10.000
+    # thread, scelto assumendo che nessun inbox reale andasse oltre. Assunzione
+    # sbagliata — l'obiettivo su @michele.carozza e' 20.000 contatti, e il tetto
+    # avrebbe chiuso il lavoro a meta' dichiarando di aver finito. A fermare la
+    # discesa restano i segnali VERI: fondo dichiarato da IG, cursore fermo,
+    # pagine vuote, pagine senza partecipanti estraibili.
+    #
+    # Quante pagine di fila possono portare thread ma ZERO partecipanti 1-a-1
+    # prima di fermare il giro. Un tratto di sole chat di gruppo e' legittimo e
+    # non deve fermare niente; una serie lunga no: sarebbe IG che serve thread
+    # senza i dati utente, e quelle pagine sono indistinguibili da "gente gia' in
+    # lista" — il motore chiuderebbe dicendo "inbox gia' raccolto" mentre gli
+    # stanno servendo pagine vuote.
+    inbox_pagine_senza_partecipanti_stop: int = 3
     # Batch invio DM: quanti DM consecutivi (random tra min e max) prima di fare
     # il feed browse/riposo. Dentro il batch nessuna attesa aggiunta tra i DM (il
     # browse del profilo target fa gia' da gap). Riduce la frequenza dello scroll.
