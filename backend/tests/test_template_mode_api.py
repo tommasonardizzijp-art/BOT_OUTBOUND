@@ -155,6 +155,14 @@ def test_create_with_ai_and_template_c(client):
         "message_template_c": "Terzo template abbastanza lungo",
         "ai_enabled": True,
         "ai_system_prompt": "Tono formale, max 3 frasi.",
+        # `enrichment_level` va detto esplicitamente: lo schema lo lascia a 'none'
+        # di default, e da 22/08 la combinazione AI accesa + 'none' e' vietata
+        # (valida_ai_senza_bio) perche' a quel livello il profilo non si apre mai e
+        # l'AI genererebbe senza bio. Questo test parla di template C e system
+        # prompt, non del livello: gli si da' un livello sano invece di allentare la
+        # guardia. Il frontend lo manda sempre (new/page.tsx), quindi la UI non e'
+        # toccata da questa asimmetria.
+        "enrichment_level": "bio",
     })
     assert resp.status_code == 201, resp.text
     body = resp.json()
