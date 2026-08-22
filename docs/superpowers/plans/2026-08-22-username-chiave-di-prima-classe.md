@@ -763,6 +763,31 @@ def targa_ammessa_in_anagrafica(ig_user_id: int | None) -> bool:
 > `username_norm` che compaiono con più di un `ig_user_id` reale distinto. Se ne
 > esce qualcuno, è un segnaposto sfuggito e va aggiunto alla guardia.
 
+> ⚠️ **Due fatti misurati collaudando il 22/08, da leggere prima di questo Step.**
+>
+> **1. Oggi `username_norm` non la scrive NESSUNO.** `grep -rn username_norm app/` dà
+> solo la riga del modello. La migration 039 ha backfillato le 13.342 righe già in
+> tabella, ma è un colpo solo: ogni contatto scritto da qui in avanti nasce con
+> `NULL`, e il ponte fra pk reale e targa provvisoria **smette di formarsi appena i
+> dati nuovi superano i vecchi**. L'indice UNIQUE è corretto e non protegge nulla.
+> Finché questo Step non è fatto, la 039 è una promessa non mantenuta.
+> C'è un test che lo presidia: `tests/test_e2e_username_chiave_global_contacts_index.py::test_DIFETTO_upsert_lead_non_valorizza_mai_username_norm`,
+> marcato `xfail(strict=True)` — quando lo Step atterra **torna verde da solo** e
+> pytest lo segnala come XPASS. Togli l'xfail in quel momento, non prima.
+>
+> **2. `Base.metadata.create_all` NON crea l'indice UNIQUE.** Esiste solo nel DDL
+> della migration (`op.create_index`), e il modello non ha un `__table_args__` che lo
+> specchi. Conseguenza: **un test costruito con `create_all` non vede il vincolo** e
+> passerebbe verde su dati che in produzione solleverebbero. Se scrivi test su questo
+> Step, fabbrica lo schema con alembic come fa
+> `test_e2e_username_chiave_global_contacts_index.py`, non con `create_all`.
+>
+> Se pensi di aggiungere l'indice al modello per allineare i due: **attenzione**,
+> `test_wa_migration.py` fabbrica lo stato «prod a 024» con `create_all` e poi fa
+> `DROP COLUMN` sulle colonne post-024. SQLite rifiuta di droppare una colonna
+> indicizzata: aggiungere l'indice al modello senza toccare quel fixture rimette
+> rossi i 7 test delle migrazioni. Verificalo prima di committare.
+
 - [ ] **Step 4: Scrivi `username_norm` negli upsert**
 
 In `upsert_lead` e in `_mark_globally_contacted` (`campaign_orchestrator.py:1509+`):
