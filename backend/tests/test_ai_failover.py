@@ -88,3 +88,57 @@ def test_no_fallback_solleva_senza_ripiego(monkeypatch):
     with pytest.raises(OllamaError):
         asyncio.run(ai.ConfiguredAIClient().generate("sys", "usr", 400))
     assert calls == ["gemini"]  # nessun secondo tentativo
+
+
+# ── budget dei token di ragionamento (gpt-oss) ─────────────────────────────
+# Perche' esistono: il fallback Groq e' rimasto rotto in silenzio per giorni con
+# un modello dismesso, e il suo sostituto ragiona dentro `max_tokens`. Un DM
+# troncato non solleva: `_validate_message` lo scarta e restituisce il template,
+# quindi il guasto NON si vede nei log degli invii. Va inchiodato qui.
+
+def test_reasoning_spento_solo_su_gpt_oss():
+    assert ai._reasoning_va_spento("openai/gpt-oss-120b")
+    assert ai._reasoning_va_spento("openai/gpt-oss-20b")
+    # Un provider OpenAI-compatible che non conosce il parametro risponderebbe 400.
+    assert not ai._reasoning_va_spento("qwen/qwen3.6-27b")
+    assert not ai._reasoning_va_spento("llama-3.1-8b-instant")
+    assert not ai._reasoning_va_spento("")
+
+
+def _cattura_payload(monkeypatch):
+    """Intercetta la POST e restituisce il payload che sarebbe partito davvero."""
+    visti: list[dict] = []
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"content": "un messaggio lungo abbastanza"}}]}
+
+    class _Client:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, headers=None, json=None, **kw):
+            visti.append(json)
+            return _Resp()
+
+    monkeypatch.setattr(ai.httpx, "AsyncClient", _Client)
+    return visti
+
+
+def test_payload_gpt_oss_porta_reasoning_effort(monkeypatch):
+    visti = _cattura_payload(monkeypatch)
+    asyncio.run(ai._generate_openai_compatible("sys", "usr", 400, "K", "openai/gpt-oss-120b"))
+    assert visti[0]["reasoning_effort"] == "low"
+
+
+def test_payload_altro_modello_non_porta_reasoning_effort(monkeypatch):
+    visti = _cattura_payload(monkeypatch)
+    asyncio.run(ai._generate_openai_compatible("sys", "usr", 400, "K", "qwen/qwen3.6-27b"))
+    assert "reasoning_effort" not in visti[0]
+
+
+def test_default_groq_non_e_il_modello_dismesso():
+    # 404 model_not_found il 22/08/2026: il catalogo Groq non ha piu' Llama di chat.
+    assert ai._resolve_model("groq", "") == "openai/gpt-oss-120b"
+    assert "llama" not in ai._GROQ_DEFAULT_MODEL.lower()
