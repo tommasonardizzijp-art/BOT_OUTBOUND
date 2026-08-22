@@ -714,6 +714,25 @@ def targa_ammessa_in_anagrafica(ig_user_id: int | None) -> bool:
     return ig_user_id is not None and ig_user_id != 0
 ```
 
+> ⚠️ **Limite noto di quel muro, rilevato in review il 22/08 — leggilo prima di
+> dare per scontata la UNIQUE.** `handle_valido` boccia i segnaposto perché
+> contengono uno **spazio** (o caratteri fuori da `[a-z0-9._]`). Regge su tutte
+> le lingue verificate — spagnolo/francese/portoghese/indonesiano usano lo spazio,
+> tedesco/olandese il trattino, turco/vietnamita caratteri non-ASCII: tutti
+> bocciati. Ma **non è una copertura dimostrata sui dati IG reali**: se in una
+> lingua non controllata il segnaposto fosse un token unico ASCII minuscolo senza
+> spazi, passerebbe come handle valido.
+>
+> Perché conta qui e non nella Task 2: là un segnaposto sfuggito produce una riga
+> morta in una campagna. **Qui produrrebbe una fusione.** La UNIQUE su
+> `username_norm` è globale fra TUTTE le campagne: due profili chiusi diversi che
+> normalizzano allo stesso token collasserebbero in un contatto solo, mescolando
+> cronologia e contatti di persone diverse — e nessun errore lo direbbe.
+>
+> **Da fare nella Task 8 (collaudo)**: contare in `global_contacts` gli
+> `username_norm` che compaiono con più di un `ig_user_id` reale distinto. Se ne
+> esce qualcuno, è un segnaposto sfuggito e va aggiunto alla guardia.
+
 - [ ] **Step 4: Scrivi `username_norm` negli upsert**
 
 In `upsert_lead` e in `_mark_globally_contacted` (`campaign_orchestrator.py:1509+`):
