@@ -582,6 +582,31 @@ In `backend/app/models/global_contact.py`, dopo `username`:
     username_norm: Mapped[str | None] = mapped_column(Text, nullable=True)
 ```
 
+- [ ] **Step 2b: Censisci la colonna nel test delle migrazioni — NON saltare**
+
+`backend/tests/test_wa_migration.py` fabbrica lo stato «prod già a 024» con `create_all` sui
+modelli correnti, poi **toglie a mano** le colonne che le migrazioni successive introducono.
+`username_norm` esiste già nel modello (Step 2), quindi `create_all` la crea, e poi la 039
+proverebbe ad aggiungerla di nuovo: **`duplicate column name`, 7 test rossi**.
+
+Non è teoria: è successo esattamente così alla migration **038**, ed è stato scoperto solo
+eseguendo la CI in locale (PR **#108**, 22/08). Se quella PR non è ancora mergiata, il file che
+modifichi qui potrebbe non contenere ancora la riga della 038 — **verifica ed evita il
+conflitto**.
+
+In `POST_024_COLUMNS` aggiungi la voce per la tabella nuova (`global_contacts` **non c'è
+ancora** nel dizionario, va creata la chiave):
+
+```python
+    "global_contacts": ["username_norm"],  # 039
+```
+
+- [ ] **Step 2c: Verifica che il censimento basti**
+
+Run: `cd backend && rm -f data/test_bot_ci039.db && WA_TEST_DB_SLOT=ci039 venv/Scripts/python.exe -m pytest tests/test_wa_migration.py -q`
+Expected: **tutti verdi**. Un `duplicate column name: username_norm` qui significa che la chiave
+non è stata aggiunta o è scritta con un nome diverso da quello del modello.
+
 - [ ] **Step 3: Applica la migrazione**
 
 **Ferma prima bot, worker e backend** (un `idle in transaction` blocca gli `ALTER TABLE`).
