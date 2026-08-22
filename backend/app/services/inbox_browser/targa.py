@@ -20,6 +20,7 @@ uno spazio che GlobalContact condivide fra TUTTE le campagne.
 from __future__ import annotations
 
 import hashlib
+import re as _re
 
 # 63 bit: il valore negato sta sempre in un BIGINT firmato.
 _MASCHERA = (1 << 63) - 1
@@ -32,6 +33,35 @@ def normalizza_username(username: str) -> str:
     come '@michele.carozza'.
     """
     return (username or "").strip().lstrip("@").lower()
+
+
+# Instagram ammette lettere, cifre, punto e underscore. Niente spazi, niente
+# trattini. Max 30 caratteri.
+_FORMA_HANDLE = _re.compile(r"^[a-z0-9._]{1,30}$")
+
+
+def handle_valido(username: str | None) -> bool:
+    """True se la stringa ha la forma di uno username Instagram reale.
+
+    Serve a tenere fuori dalla chiave d'identita' i SEGNAPOSTO dei profili chiusi
+    o disattivati, che Instagram mostra uguali per tutti ("Utente di Instagram",
+    "Instagram User", e l'equivalente in ogni altra lingua) e che finiscono nel
+    campo username (log reale 22/08: `[InboxLista] @utente instagram ...`).
+
+    Perche' la FORMA e non l'insieme dei segnaposto: `e_segnaposto`
+    (inbox_browser/testo.py) confronta con `LINGUE`, che contiene solo IT e EN, e
+    il segnaposto dipende dalla lingua dell'interfaccia dell'ACCOUNT — non nostra.
+    Su un account in spagnolo quel filtro non scatta e nessun errore lo segnala.
+    Uno spazio in mezzo invece esclude un handle in QUALUNQUE lingua.
+
+    Finche' la chiave era il pk questo non mordeva: N profili chiusi diventavano N
+    righe distinte, brutte ma separate. Con lo username chiave, senza questo
+    controllo collasserebbero tutti in un contatto solo, mescolando cronologia e
+    contatti di persone diverse. E sarebbero comunque righe morte: l'invio naviga
+    su `instagram.com/<username>/`, quindi un contatto che si chiama
+    "utente instagram" non ricevera' mai un DM.
+    """
+    return bool(_FORMA_HANDLE.match(normalizza_username(username)))
 
 
 def targa_provvisoria(username: str) -> int:
