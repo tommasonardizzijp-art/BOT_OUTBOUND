@@ -16,6 +16,8 @@ da una visita dedicata, quindi la bio su 'none' non arriva piu' neanche li'. La
 regola torna letterale ovunque (vedi
 docs/superpowers/plans/2026-08-22-username-chiave-di-prima-classe.md, Task 7).
 """
+import sqlite3
+
 import pytest
 
 from app.models.campaign import valida_ai_senza_bio
@@ -38,24 +40,34 @@ def test_senza_ai_e_none_e_permessa():
     assert valida_ai_senza_bio(False, "none") is None
 
 
-def test_import_ai_e_none_e_vietata_dopo_il_cantiere_username():
-    """PRIMA di questo cantiere questa combinazione era permessa (la risoluzione
-    import apriva sempre il profilo e salvava la bio a prescindere dal livello).
-    Dopo le Task 3-5 di username-chiave-di-prima-classe.md quella passata di
-    risoluzione cade: su import il pk arriva dal primo DM, non da una visita
-    dedicata, quindi a livello 'none' la bio non arriva piu' nemmeno qui. Il
-    test e' stato girato di proposito perche' la regola e' cambiata, non perche'
-    era rosso."""
-    errore = valida_ai_senza_bio(True, "none")
-    assert errore is not None
+def test_la_regola_non_guarda_piu_la_SORGENTE():
+    """La regola e' cambiata di proposito, e questo test la inchioda.
 
+    PRIMA di questo cantiere `valida_ai_senza_bio` prendeva anche `source_type` e
+    PERMETTEVA la combinazione su 'import', perche' la passata di risoluzione
+    apriva sempre il profilo e salvava la bio a prescindere dal livello. Dopo le
+    Task 3-5 quella passata cade: su import il pk arriva dal primo DM, non da una
+    visita dedicata, quindi a livello 'none' la bio non arriva piu' nemmeno li'.
 
-def test_import_senza_ai_e_none_e_permessa():
-    assert valida_ai_senza_bio(False, "none") is None
+    Asserire di nuovo `valida_ai_senza_bio(True, "none") is not None` sarebbe una
+    copia dei test qui sopra e non misurerebbe niente (rilievo di review del
+    22/08: due test erano esattamente questo). Cio' che si puo' misurare e che
+    conta e' che la firma NON torni ad avere un'eccezione per sorgente: se
+    qualcuno la reintroducesse, la combinazione vietata si ricreerebbe da li'.
+    La copertura per sorgente vive dove la sorgente esiste davvero, cioe' nei
+    test HTTP qui sotto (`test_put_import_ai_e_none_ora_e_rifiutato`).
+    """
+    import inspect
+
+    parametri = list(inspect.signature(valida_ai_senza_bio).parameters)
+    assert parametri == ["ai_enabled", "enrichment_level"], (
+        f"la guardia ha di nuovo un parametro di troppo: {parametri}. "
+        "Se e' una scelta, aggiorna questo test spiegando perche'."
+    )
 
 
 # -- I due verbi HTTP -------------------------------------------------------
-# Entrambe le direzioni del PATCH, non una: il gate sta a valle dei campi
+# Entrambe le direzioni del PUT, non una: il gate sta a valle dei campi
 # applicati, quindi deve fermare sia "accendo l'AI su una campagna gia' 'none'"
 # sia "abbasso il livello su una campagna che ha gia' l'AI". Un controllo su un
 # campo alla volta lascerebbe passare la direzione non controllata.
@@ -160,7 +172,7 @@ def test_create_rifiuta_ai_e_none(client):
     assert "Solo DM" in r.json()["detail"]
 
 
-def test_patch_accendere_ai_su_campagna_none_e_rifiutato(client):
+def test_put_accendere_ai_su_campagna_none_e_rifiutato(client):
     r = _crea(client, name="g-patch-ai", ai_enabled=False, enrichment_level="none")
     assert r.status_code == 201, r.text
     cid = r.json()["id"]
@@ -169,7 +181,7 @@ def test_patch_accendere_ai_su_campagna_none_e_rifiutato(client):
     assert "Solo DM" in p.json()["detail"]
 
 
-def test_patch_abbassare_livello_su_campagna_ai_e_rifiutato(client):
+def test_put_abbassare_livello_su_campagna_ai_e_rifiutato(client):
     r = _crea(client, name="g-patch-liv", ai_enabled=True, enrichment_level="bio")
     assert r.status_code == 201, r.text
     cid = r.json()["id"]
@@ -178,7 +190,7 @@ def test_patch_abbassare_livello_su_campagna_ai_e_rifiutato(client):
     assert "Solo DM" in p.json()["detail"]
 
 
-def test_patch_import_ai_e_none_ora_e_rifiutato(client):
+def test_put_import_ai_e_none_ora_e_rifiutato(client):
     """Girato rispetto al piano superato: prima permetteva questa combinazione su
     'import' (la risoluzione salvava la bio a prescindere dal livello). Dopo il
     cantiere username-chiave-di-prima-classe la passata di risoluzione cade e la
@@ -191,3 +203,65 @@ def test_patch_import_ai_e_none_ora_e_rifiutato(client):
     p = client.put(f"/api/campaigns/{cid}", json={"enrichment_level": "none"})
     assert p.status_code == 400, p.text
     assert "Solo DM" in p.json()["detail"]
+
+
+# -- Una campagna gia' nello stato vietato resta MODIFICABILE ----------------
+# Rilievo di review avversariale del 22/08, verificato in produzione: esiste una
+# campagna (BORDERLINE X LISTA 7) creata prima di questa guardia, con l'AI accesa e
+# il livello 'none' insieme. Valutando la combinazione finale a OGNI put, quella
+# campagna rifiutava qualunque modifica — compreso l'abbassamento di daily_limit,
+# che e' la leva anti-ban d'emergenza. Una guardia che blocca la manovra di
+# sicurezza e' peggio del difetto che previene.
+
+def _campagna_legacy_vietata(client, engine):
+    """Riproduce lo stato storico: creata lecita, poi portata a mano nella
+    combinazione che oggi la guardia rifiuterebbe in creazione.
+
+    L'UPDATE va fatto sul file sqlite DELLA FIXTURE (`engine.url.database`), non
+    su `os.environ["DATABASE_URL"]`: la fixture si crea un DB temporaneo suo con
+    mkstemp. La prima versione di questo helper scriveva sul DB sbagliato, quindi
+    la campagna restava con l'AI spenta e i test passavano identici con la guardia
+    corretta e con quella incondizionata — cioe' non misuravano niente.
+    """
+    r = _crea(client, name=f"legacy-{id(engine)}", ai_enabled=False, enrichment_level="none")
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    assert client.put(f"/api/campaigns/{cid}", json={"ai_enabled": True}).status_code == 400,         "la guardia deve rifiutare questa transizione dall'API"
+
+    con = sqlite3.connect(engine.url.database)
+    con.execute("UPDATE campaigns SET ai_enabled = 1 WHERE id = ?", (cid,))
+    con.commit()
+    con.close()
+
+    # Precondizione: senza questa, un helper rotto renderebbe i test qui sotto
+    # verdi per il motivo sbagliato.
+    letta = client.get(f"/api/campaigns/{cid}").json()
+    assert letta["ai_enabled"] is True, "lo stato legacy non e' stato riprodotto"
+    assert (letta.get("enrichment_level") or "none") == "none"
+    return cid
+
+
+def test_campo_estraneo_resta_modificabile_su_campagna_gia_vietata(client, _temp_db):
+    cid = _campagna_legacy_vietata(client, _temp_db[0])
+    p = client.put(f"/api/campaigns/{cid}", json={"daily_limit": 12})
+    assert p.status_code == 200, p.text
+    assert p.json()["daily_limit"] == 12
+
+
+def test_la_via_di_uscita_resta_aperta(client, _temp_db):
+    """Spegnere l'AI, o alzare il livello: sono i due modi di uscire dallo stato
+    vietato e devono restare sempre percorribili."""
+    cid = _campagna_legacy_vietata(client, _temp_db[0])
+    assert client.put(f"/api/campaigns/{cid}", json={"enrichment_level": "bio"}).status_code == 200
+    cid2 = _campagna_legacy_vietata(client, _temp_db[0])
+    assert client.put(f"/api/campaigns/{cid2}", json={"ai_enabled": False}).status_code == 200
+
+
+def test_ma_peggiorare_resta_vietato(client):
+    """La scappatoia non deve diventare un varco: chi tocca uno dei due campi
+    viene comunque valutato sulla combinazione finale."""
+    r = _crea(client, name="legacy-peggiora", ai_enabled=False, enrichment_level="bio")
+    cid = r.json()["id"]
+    assert client.put(f"/api/campaigns/{cid}", json={"ai_enabled": True}).status_code == 200
+    p = client.put(f"/api/campaigns/{cid}", json={"enrichment_level": "none"})
+    assert p.status_code == 400, p.text

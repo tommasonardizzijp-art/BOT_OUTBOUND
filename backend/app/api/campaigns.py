@@ -392,9 +392,25 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
     # applicati (ai_enabled sopra, enrichment_level appena sopra), quindi copre
     # sia chi accende l'AI su una campagna gia' 'none' sia chi abbassa il
     # livello su una campagna che ha gia' l'AI accesa.
-    errore_ai = valida_ai_senza_bio(campaign.ai_enabled, campaign.enrichment_level)
-    if errore_ai:
-        raise HTTPException(status_code=400, detail=errore_ai)
+    #
+    # Ma SOLO se la richiesta tocca davvero uno dei due campi. Valutare la
+    # combinazione finale a ogni PUT sembrava piu' sicuro ed era il contrario:
+    # una campagna gia' in quello stato — ne esiste una in produzione, creata
+    # prima che questa guardia esistesse — rifiutava OGNI modifica, anche di
+    # campi che non c'entrano nulla. Su una campagna che sta girando
+    # `enrichment_level` non e' modificabile (guardia di stato qui sopra),
+    # quindi l'unica uscita sarebbe spegnere l'AI: fino ad allora non si
+    # potrebbe abbassare `daily_limit`, che e' la leva anti-ban d'emergenza.
+    # Una guardia che blocca la manovra di sicurezza e' peggio del difetto che
+    # previene.
+    #
+    # Non apre un buco: se la richiesta non tocca ne' l'AI ne' il livello, lo
+    # stato finale e' identico a quello di partenza. Chi ne tocca almeno uno
+    # viene comunque valutato sulla combinazione FINALE, non sul delta.
+    if data.ai_enabled is not None or data.enrichment_level is not None:
+        errore_ai = valida_ai_senza_bio(campaign.ai_enabled, campaign.enrichment_level)
+        if errore_ai:
+            raise HTTPException(status_code=400, detail=errore_ai)
 
     if data.scrape_session_size is not None:
         campaign.scrape_session_size = data.scrape_session_size

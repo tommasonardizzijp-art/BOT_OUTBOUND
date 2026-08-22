@@ -21,12 +21,21 @@ ripulisce uno spazio che Python lascia). La formula qui sotto,
 `lower(ltrim(trim(x), '@'))` (senza il trim esterno), da' lo STESSO risultato di
 `normalizza_username` su tutti i casi verificati (chiocciole multiple, spazi dopo
 la chiocciola, maiuscole, stringa vuota/solo spazi, None). Resta un'unica
-divergenza nota, minore: SQLite `trim()` senza argomenti toglie solo lo spazio
-ASCII, non tab/newline, mentre Python `str.strip()` toglie ogni whitespace --
-irrilevante in pratica perche' tab/newline non sono caratteri validi in uno
-username Instagram e non supererebbero comunque `handle_valido()`. Riguarda solo
-questo backfill una tantum: il percorso live (Task 5, `upsert_lead`) chiama
-`normalizza_username` in Python, non questa formula SQL.
+divergenza nota: SQLite `trim()` senza argomenti toglie solo lo spazio ASCII,
+non tab/newline, mentre Python `str.strip()` toglie ogni whitespace. Una riga con
+username "	mario" prende quindi la chiave "	mario", che nessun percorso Python
+produrra' mai, e convive con la riga "mario" invece di essere riconosciuta come
+doppione.
+
+ATTENZIONE, la prima stesura di questo commento diceva che quei valori "non
+supererebbero comunque handle_valido()": e' FALSO, e va detto perche' e' il tipo
+di giustificazione che fa chiudere un rilievo senza guardare. `handle_valido` NON
+e' applicato a questo backfill — qui gira solo SQL. La difesa vera e' un'altra:
+il filtro sotto azzera cio' che contiene uno spazio ASCII, e cio' che sfugge
+resta comunque fuori dal percorso VIVO, che passa da `normalizza_username` in
+Python. Misurato sul Postgres di produzione il 22/08, subito dopo la migrazione:
+zero righe con whitespace in `username_norm`, zero fuori da [a-z0-9._], zero
+vuote. Il caso limite esiste, su questi dati non si e' presentato.
 
 Scelta del vincitore fra doppioni pre-esistenti: il modello ha `created_at`
 (`DateTime`, `nullable=False`), quindi si sceglie il piu' vecchio VERO per
@@ -75,7 +84,7 @@ def upgrade() -> None:
     op.execute("""
         UPDATE global_contacts SET username_norm = NULL
         WHERE username_norm IS NOT NULL
-          AND (username_norm LIKE '% %' OR length(username_norm) > 30)
+          AND (username_norm LIKE '% %' OR length(username_norm) > 30 OR username_norm = '')
     """)
 
     # I doppioni pre-esistenti impedirebbero l'indice UNIQUE: azzera username_norm

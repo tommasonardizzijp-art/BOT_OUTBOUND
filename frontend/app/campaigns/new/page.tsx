@@ -548,7 +548,7 @@ export default function NewCampaignPage() {
                   )
                 })}
               </div>
-              {soloDmVietato(form.ai_enabled) && (
+              {enrichmentLevel === 'none' && soloDmVietato(form.ai_enabled) && (
                 <p className="text-xs text-gray-500">{MOTIVO_SOLO_DM_VIETATO}</p>
               )}
               {enrichmentLevel === 'none' && (

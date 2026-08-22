@@ -133,3 +133,18 @@ def test_dopo_il_backfill_l_unique_si_crea():
         "SELECT username_norm FROM global_contacts WHERE username_norm IS NOT NULL"
     )]
     assert chiavi == ["mario_shop"]
+
+
+def test_la_chiocciola_sola_non_diventa_una_chiave():
+    """`@` normalizza alla stringa vuota, che il filtro sullo spazio non intercetta:
+    una riga si sarebbe presa come identita' un "handle vuoto", e la seconda l'avrebbe
+    perso. Rilievo di review avversariale del 22/08. In produzione non c'erano righe
+    cosi' (verificato: zero `username_norm = ''`), ma la migration gira anche altrove."""
+    con = _db_seminato([
+        ("r1", "@", "2026-01-01"),
+        ("r2", "@@", "2026-01-02"),
+        ("r3", "mario_shop", "2026-01-03"),
+    ])
+    assert _norm(con, "r1") is None
+    assert _norm(con, "r2") is None
+    assert _norm(con, "r3") == "mario_shop"

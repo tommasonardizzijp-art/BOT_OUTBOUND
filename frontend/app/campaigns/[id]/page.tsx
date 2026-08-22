@@ -1185,7 +1185,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               )
             })}
           </div>
-          {soloDmVietato(campaign.ai_enabled ?? false) && (
+          {(campaign.enrichment_level ?? 'none') === 'none' && soloDmVietato(campaign.ai_enabled ?? false) && (
             <p className="text-xs text-gray-500">{MOTIVO_SOLO_DM_VIETATO}</p>
           )}
           {/* La nota sui nomi mancanti vale solo per le campagne scrape, dove i dati
