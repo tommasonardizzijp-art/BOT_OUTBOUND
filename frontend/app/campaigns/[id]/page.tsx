@@ -1165,10 +1165,17 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
                 title={vietato ? MOTIVO_SOLO_DM_VIETATO : d}
                 onClick={() => { if (!vietato) handleEnrichmentSwitch(v) }}
                 className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${
-                  vietato
+                  // Il livello SELEZIONATO va mostrato come tale anche quando e'
+                  // vietato: una campagna creata prima della guardia puo' avere l'AI
+                  // accesa e il livello 'none' insieme, e controllando prima `vietato`
+                  // nessuno dei tre pulsanti risultava attivo — chi guarda non vedeva
+                  // piu' quale livello fosse in vigore, solo che uno era bloccato.
+                  (campaign.enrichment_level ?? 'none') === v
+                    ? vietato
+                      ? 'bg-purple-600/10 border-purple-800 text-purple-300/60 cursor-not-allowed'
+                      : 'bg-purple-600/20 border-purple-500 text-purple-300'
+                    : vietato
                     ? 'bg-gray-800/40 border-gray-800 text-gray-600 cursor-not-allowed'
-                    : (campaign.enrichment_level ?? 'none') === v
-                    ? 'bg-purple-600/20 border-purple-500 text-purple-300'
                     : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
                 }`}
               >

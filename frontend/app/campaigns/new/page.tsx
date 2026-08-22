@@ -530,10 +530,15 @@ export default function NewCampaignPage() {
                     title={vietato ? MOTIVO_SOLO_DM_VIETATO : d}
                     onClick={() => { if (!vietato) setEnrichmentLevel(v) }}
                     className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${
-                      vietato
+                      // Selezionato prima di vietato: qui la porta di servizio impedisce
+                      // lo stato "selezionato e spento", ma se un domani cadesse, questo
+                      // resterebbe leggibile invece di spegnere tutti e tre i pulsanti.
+                      enrichmentLevel === v
+                        ? vietato
+                          ? 'bg-purple-600/10 border-purple-800 text-purple-300/60 cursor-not-allowed'
+                          : 'bg-purple-600/20 border-purple-500 text-purple-300'
+                        : vietato
                         ? 'bg-gray-800/40 border-gray-800 text-gray-600 cursor-not-allowed'
-                        : enrichmentLevel === v
-                        ? 'bg-purple-600/20 border-purple-500 text-purple-300'
                         : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
                     }`}
                   >

@@ -974,6 +974,24 @@ che descrive un comportamento non più esistente è peggio di nessun avviso.
 Verificato il 22/08 (Task 7): **oggi è ancora accurato**, quindi non va toccato prima
 che la Task 5 sia dentro.
 
+- [ ] **Step 3c: L'avviso sbagliato nella pagina di CREAZIONE (difetto preesistente)**
+
+Trovato collaudando il 22/08, **non introdotto da questo cantiere**: la pagina di
+dettaglio differenzia l'avviso per sorgente, quella di creazione no.
+
+- `[id]/page.tsx:1184-1201` — due testi, scelti da `campaign.source_type`.
+- `new/page.tsx:549-554` — **un testo solo**, mostrato per entrambe le sorgenti, ed è
+  quello scritto per `scrape`: *«Circa un contatto su quattro non ha il nome nella
+  lista…»*.
+
+Su una campagna **import** il nome c'è sempre, quindi chi crea un'import con «Solo DM»
+legge un avviso che non lo riguarda, e non legge quello che lo riguarderebbe. La
+pagina di creazione non è mai stata aggiornata quando quella di dettaglio ha
+differenziato per sorgente.
+
+Da sistemare insieme allo Step 3b, che riscrive l'altro testo: si toccano gli stessi
+due punti e conviene farlo in un colpo solo.
+
 - [ ] **Step 4: Doc**
 
 Riallinea `docs/architecture/DATABASE.md` (colonna nuova + indice), `docs/architecture/SCALA_E_PARALLELISMO.md` (il dedup cross-campagna **non esiste** ed è una scelta, non una dimenticanza), `INDEX.md` e `PROGRESS.md`.
