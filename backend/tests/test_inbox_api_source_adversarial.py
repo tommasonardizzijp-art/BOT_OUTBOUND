@@ -479,3 +479,66 @@ async def test_exhausted_when_has_older_false_even_if_cursor_present():
     src = ApiInboxSource(client, OWN)
     page = await src.next_page()
     assert page.exhausted is True
+
+
+# ── Utenti leggibili: la misura che alimenta la guardia sui payload degradati ──
+# Trovato in review: la guardia esisteva ma NESSUN test la copriva — rimettendo il
+# bug non diventava rosso niente. `threads_con_utenti` e' prodotto qui, quindi e'
+# qui che va provato.
+
+class _ClientFinto:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def private_request(self, path, params=None):
+        return self._payload
+
+
+def _pagina_da(threads):
+    import asyncio as _asyncio
+    from app.services.inbox_source import ApiInboxSource
+    src = ApiInboxSource(_ClientFinto({"inbox": {"threads": threads,
+                                                 "has_older": True,
+                                                 "oldest_cursor": "C1"}}), own_pk=999)
+    return _asyncio.run(src.next_page())
+
+
+def test_utenti_col_pk_ma_SENZA_username_non_contano_come_leggibili():
+    """`extract_thread_participant` scarta un utente se manca il pk OPPURE lo
+    username. Se la misura contasse il solo pk, un payload degradato con i pk e
+    senza username lascerebbe muta la guardia — e il giro chiuderebbe con "inbox
+    gia' tutto raccolto", esattamente il messaggio che quella guardia esiste per
+    evitare."""
+    pagina = _pagina_da([
+        {"users": [{"pk": 111, "username": None}]},
+        {"users": [{"pk": 222}]},
+        {"users": [{"pk": 333, "username": "   "}]},
+    ])
+    assert pagina.threads_letti == 3
+    assert pagina.threads_con_utenti == 0, \
+        "senza username non c'e' niente da estrarre: non sono utenti leggibili"
+    assert pagina.participants == []
+
+
+def test_un_thread_di_gruppo_conta_come_leggibile():
+    """La distinzione che tiene in piedi tutto: nei gruppi gli utenti CI SONO,
+    sono solo piu' di uno. Va contato come leggibile, o la guardia fermerebbe un
+    tratto di chat di gruppo del tutto legittimo."""
+    pagina = _pagina_da([
+        {"users": [{"pk": 1, "username": "a"}, {"pk": 2, "username": "b"}]},
+    ])
+    assert pagina.participants == [], "un gruppo non da' partecipanti 1-a-1"
+    assert pagina.threads_con_utenti == 1, "ma gli utenti ci sono: e' leggibile"
+
+
+def test_users_con_elementi_non_dict_non_fa_sollevare():
+    """Il payload piu' rotto era l'unico che la guardia non vedeva: elementi non
+    dict dentro `users` facevano sollevare l'intera pagina invece di essere
+    contati come "niente da estrarre"."""
+    pagina = _pagina_da([
+        {"users": [42, "x", None]},
+        {"users": "non-una-lista"},
+    ])
+    assert pagina.threads_letti == 2
+    assert pagina.threads_con_utenti == 0
+    assert pagina.participants == []

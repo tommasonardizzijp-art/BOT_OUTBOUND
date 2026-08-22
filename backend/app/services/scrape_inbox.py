@@ -322,13 +322,6 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
         pagine_da_pausa = 0   # pagine lette dall'ultima pausa: e' il budget di sessione
         empty_streak = 0   # pagine consecutive senza contatti nuovi (drain-stop, modo cima)
         senza_part_streak = 0   # pagine con thread ma zero partecipanti estraibili
-        # Da dove e' ripartito QUESTO giro, e quante pagine ha letto finora.
-        # Servono a distinguere un dubbio da una certezza: se il fondo sospetto
-        # ricompare sulla PRIMA pagina di un giro ripartito dallo stesso punto,
-        # vuol dire che l'abbiamo gia' rifiutato una volta e rilanciare non
-        # cambia niente.
-        cursore_di_partenza = campaign.inbox_deep_cursor
-        pagine_lette_nel_giro = 0
         vuote_streak = 0   # pagine consecutive senza NESSUN partecipante (fine discesa)
         nuovi_tot = 0
         promossi_tot = 0
@@ -454,7 +447,6 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             # pagine di sole promozioni sono il primo giro dopo questo fix, non un
             # inbox drenato.
             empty_streak = 0 if (stored or promossi) else empty_streak + 1
-            pagine_lette_nel_giro += 1
             vuote_streak = 0 if (page.threads_letti or page.participants) else vuote_streak + 1
             # Pagina CON thread ma senza nemmeno un partecipante 1-a-1 estraibile.
             # Diverso da 'vuota' (nessun thread), da 'gia' in lista'
@@ -479,6 +471,15 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 # sessioni, cioe' mesi. E solo in discesa: le passate di cima non
                 # scendono, non devono consumare quel budget.
                 campaign.inbox_deep_pages = (campaign.inbox_deep_pages or 0) + 1
+                # Persistito insieme al conteggio pagine, e nello stesso commit:
+                # e' l'unico contatore che sopravvive alla pausa di sessione, e
+                # senza di lui la rete di sicurezza della discesa non scatterebbe
+                # mai (il giro esce ogni 15 pagine).
+                if stored or promossi:
+                    campaign.inbox_deep_senza_lavoro = 0
+                else:
+                    campaign.inbox_deep_senza_lavoro = (
+                        campaign.inbox_deep_senza_lavoro or 0) + 1
             if not modo_cima and page.cursor:
                 # Solo un cursore VERO fa avanzare la frontiera: una risposta senza
                 # oldest_cursor (payload troncato, blip) la azzererebbe, e il giro
@@ -523,25 +524,29 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                     + (f" (+{promossi} gia' presi dal browser, ora con pk reale)" if promossi else ""),
                 )
 
-            # Il fondo sospetto e' gia' stato rifiutato al giro scorso? Lo si
-            # riconosce cosi': ricompare sulla PRIMA pagina di un giro ripartito
-            # dallo stesso cursore. Rifiutarlo di nuovo significherebbe rifiutarlo
-            # per sempre — la campagna non passerebbe mai in modalita' cima e
-            # smetterebbe anche di raccogliere i DM nuovi. Se rilanciare non
-            # cambia il punto d'arrivo, non e' piu' un dubbio: o e' il fondo vero
-            # (inbox con un multiplo esatto di 20 conversazioni: l'ultima pagina e'
-            # piena per davvero) o e' un blocco che nessun rilancio sciogliera'.
-            # In entrambi i casi insistere e' la scelta peggiore.
-            fondo_gia_rifiutato = (
-                pagine_lette_nel_giro == 1
-                and cursore_di_partenza is not None
-                and not modo_cima
-            )
+            # Il fondo sospetto si rifiuta SOLO se rifiutarlo costa un giro, non
+            # l'eternita'. Il segnale che distingue i due casi e' il cursore della
+            # pagina stessa:
+            #   - c'e' un cursore  -> la frontiera avanza, il giro dopo atterra
+            #     altrove, e se il fondo era vero lo si ritrovera' come pagina
+            #     parziale. Il rifiuto costa un giro: si rifiuta.
+            #   - NON c'e' cursore -> la frontiera resta ferma e ogni rilancio
+            #     ritrovera' questa identica pagina. Rifiutare significherebbe
+            #     rifiutare per sempre: la campagna non passerebbe mai in modalita'
+            #     cima e smetterebbe anche di raccogliere i DM nuovi. Allora non e'
+            #     piu' un dubbio: o e' il fondo vero (inbox con un multiplo esatto
+            #     di 20 conversazioni, dove l'ultima pagina e' piena per davvero) o
+            #     e' un blocco che nessun rilancio sciogliera'. Si accetta.
+            #
+            # Il criterio precedente ("prima pagina di un giro ripreso") sembrava
+            # equivalente e non lo era: lasciava la guardia SPENTA su una pagina
+            # ogni quindici — quella dopo ogni pausa di sessione — dove un fondo
+            # finto passava in silenzio, che e' peggio del loop che sostituiva.
             if (
                 page.bottom_confirmed
                 and page.threads_letti >= PAGINA_ATTESA
                 and not modo_cima
-                and not fondo_gia_rifiutato
+                and page.cursor is not None
             ):
                 # Fondo dichiarato su una pagina PIENA: contraddizione. Una lista
                 # che finisce davvero ha l'ultima pagina parziale — 9.412 thread
@@ -574,17 +579,18 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 # Il fondo VERO: IG ha detto has_older=False su una pagina parziale,
                 # oppure su una pagina piena che avevamo gia' rifiutato una volta e
                 # che si ripresenta identica. Solo qui si alza l'interruttore.
-                if page.threads_letti >= PAGINA_ATTESA:
+                if page.threads_letti >= PAGINA_ATTESA and not modo_cima:
                     logger.warning(
-                        f"[InboxLista] fondo su pagina piena, ma e' lo stesso punto "
-                        f"da cui e' ripartito il giro: gia' rifiutato una volta, "
-                        f"rilanciare non cambia nulla. Lo accetto ({already})"
+                        f"[InboxLista] fondo su pagina piena e senza cursore: la "
+                        f"frontiera non avanzerebbe, quindi rifiutarlo sarebbe "
+                        f"rifiutarlo per sempre. Lo accetto ({already})"
                     )
                 else:
                     logger.info(f"[InboxLista] Fondo dell'inbox raggiunto ({already})")
                 campaign.inbox_bottom_reached = True
                 campaign.inbox_deep_cursor = None
                 campaign.inbox_deep_pages = 0
+                campaign.inbox_deep_senza_lavoro = 0
                 campaign.updated_at = datetime.utcnow()
                 await db.commit()
                 break
@@ -626,7 +632,8 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             # Senza questa guardia il motore scenderebbe a vuoto e poi chiuderebbe
             # dichiarando "inbox gia' tutto raccolto" — con un messaggio di
             # successo su un giro che non ha raccolto niente.
-            if senza_part_streak >= settings.inbox_pagine_senza_partecipanti_stop:
+            if (not modo_cima
+                    and senza_part_streak >= settings.inbox_pagine_senza_partecipanti_stop):
                 logger.warning(
                     f"[InboxLista] {senza_part_streak} pagine consecutive con thread "
                     f"ma ZERO utenti leggibili (manca il pk o lo username): non e' il "
@@ -658,24 +665,25 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             # il giro scenderebbe all'infinito senza produrre niente. Soglia molto
             # alta: il riattraversamento legittimo del gia' raccolto costa decine
             # di pagine, non centinaia.
+            senza_lavoro = campaign.inbox_deep_senza_lavoro or 0
             if (
                 not modo_cima
                 and settings.inbox_discesa_senza_lavoro_stop
-                and empty_streak >= settings.inbox_discesa_senza_lavoro_stop
+                and senza_lavoro >= settings.inbox_discesa_senza_lavoro_stop
             ):
                 logger.warning(
-                    f"[InboxLista] {empty_streak} pagine consecutive senza un solo "
+                    f"[InboxLista] {senza_lavoro} pagine consecutive senza un solo "
                     f"contatto nuovo ne' una promozione: la discesa non sta "
                     f"producendo niente, mi fermo ({already})"
                 )
                 emit_event(
                     campaign_id, "scrape_warning",
-                    f"Discesa fermata dopo {empty_streak} pagine che non hanno portato "
+                    f"Discesa fermata dopo {senza_lavoro} pagine che non hanno portato "
                     "nessun contatto. La posizione e' salva: si riprende da li'.",
                     level="warn",
                 )
                 _avvisa_telegram(
-                    f"Fase Lista inbox: {empty_streak} pagine di fila senza contatti "
+                    f"Fase Lista inbox: {senza_lavoro} pagine di fila senza contatti "
                     f"nuovi ({already} in lista). Discesa fermata, frontiera conservata."
                 )
                 fine_discesa = True

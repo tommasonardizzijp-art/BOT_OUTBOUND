@@ -903,6 +903,7 @@ async def riapri_discesa_inbox(campaign_id: str, db: AsyncSession = Depends(get_
     # l'operatore riprende dal cursore di cui, per ipotesi, non si fida piu'.
     campaign.scrape_cursor = None
     campaign.inbox_deep_pages = 0
+    campaign.inbox_deep_senza_lavoro = 0
     campaign.updated_at = datetime.utcnow()
     db.add(ActivityLog(campaign_id=campaign.id, action="inbox_discesa_riaperta"))
     await db.commit()
@@ -961,6 +962,7 @@ async def reset_campaign(campaign_id: str, db: AsyncSession = Depends(get_db)):
     campaign.inbox_bottom_reached = False
     campaign.inbox_deep_cursor = None
     campaign.inbox_deep_pages = 0
+    campaign.inbox_deep_senza_lavoro = 0
     campaign.scrape_cursor = None
     campaign.updated_at = datetime.utcnow()
 

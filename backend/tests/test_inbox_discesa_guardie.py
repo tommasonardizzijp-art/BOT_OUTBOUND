@@ -348,15 +348,16 @@ def test_un_inbox_multiplo_esatto_di_20_non_resta_bloccato_per_sempre(monkeypatc
     """Il difetto trovato in review, e il piu' pericoloso di tutti.
 
     Un inbox con esattamente N x 20 conversazioni ha l'ultima pagina PIENA per
-    davvero. La guardia del fondo falso la rifiuta — giustamente, la prima volta.
-    Ma se Instagram non manda un cursore su quell'ultima pagina, la frontiera
-    resta ferma e OGNI rilancio ritrova la stessa pagina e la rifiuta di nuovo:
-    per sempre, con un alert Telegram a ogni giro, e senza mai passare in
-    modalita' cima — quindi smettendo anche di raccogliere i DM nuovi.
+    davvero. La guardia del fondo falso la rifiutava. Ma se Instagram non manda un
+    cursore su quell'ultima pagina la frontiera resta ferma, e OGNI rilancio
+    ritrova la stessa pagina e la rifiuta di nuovo: per sempre, con un alert a
+    ogni giro, e senza mai passare in modalita' cima — quindi smettendo anche di
+    raccogliere i DM nuovi.
 
-    La regola che scioglie il nodo: se rilanciando si ritrova lo stesso identico
-    punto di partenza, non e' piu' un dubbio. O e' il fondo vero, o e' un blocco
-    che nessun rilancio sciogliera'."""
+    Il criterio che scioglie il nodo e' il cursore della pagina stessa: senza
+    cursore la frontiera non puo' avanzare, quindi rifiutare vorrebbe dire
+    rifiutare per sempre. Si accetta subito. Il secondo giro qui serve a provare
+    che il loop non c'e': la campagna e' passata in cima e non ripete niente."""
     ultima = _pagina(n_part=3, base=100, cursor=None, bottom=True,
                      threads=PIENA, has_older=False)
     factory, cid, src, cleanup = _setup(
@@ -364,17 +365,16 @@ def test_un_inbox_multiplo_esatto_di_20_non_resta_bloccato_per_sempre(monkeypatc
     try:
         _run(factory, cid)
         c, _ = _stato(factory, cid)
-        assert c.inbox_bottom_reached is False, \
-            "al PRIMO incontro il fondo su pagina piena si rifiuta"
+        assert c.inbox_bottom_reached is True,             "senza cursore il rifiuto sarebbe eterno: il fondo si accetta subito"
+        assert c.inbox_deep_cursor is None
 
-        # Secondo giro: riparte dallo stesso punto e ritrova la stessa pagina.
-        src._pages = [ultima]
+        # Secondo giro: ora e' in modalita' cima, non ridiscende e non ripete
+        # l'alert. Prima di questa correzione qui ricominciava il loop.
+        src._pages = [_pagina(n_part=0, threads=0, cursor=None)]
         _riporta_in_listing(factory, cid)
         _run(factory, cid)
         c, _ = _stato(factory, cid)
-        assert c.inbox_bottom_reached is True, \
-            ("al secondo incontro dallo stesso punto il fondo si accetta: "
-             "rifiutarlo di nuovo significa rifiutarlo per sempre")
+        assert c.inbox_bottom_reached is True, "l'interruttore resta alzato"
     finally:
         cleanup()
 
@@ -436,22 +436,104 @@ def test_la_latenza_finisce_davvero_nel_log(monkeypatch):
 def test_la_discesa_si_ferma_se_non_produce_piu_niente(monkeypatch):
     """Rete di sicurezza al posto del vecchio tetto a pagine: pagine piene,
     cursori sempre nuovi, utenti veri ma tutti gia' in lista. Nessuna delle altre
-    guardie lo vede e il giro scenderebbe all'infinito bruciando chiamate."""
+    guardie lo vede e il giro scenderebbe all'infinito bruciando chiamate.
+
+    Gira con `inbox_session_pages` VERO, cioe' attraverso piu' giri. La prima
+    versione di questo test alzava quel valore a 10.000 ed era verde su un mondo
+    che non esiste: il contatore era locale, la funzione esce ogni 15 pagine, e la
+    rete non poteva scattare mai. Il contatore ora e' persistito in DB (038) ed e'
+    questo test a doverlo dimostrare — quindi il valore di sessione non si tocca.
+    """
     from app.config import settings
-    monkeypatch.setattr(settings, "inbox_discesa_senza_lavoro_stop", 4)
-    monkeypatch.setattr(settings, "inbox_session_pages", 10_000)
-    pagine = [_pagina(n_part=1, base=0, cursor="C0")]
-    # stessi partecipanti a ogni pagina: gia' in lista dopo la prima
-    pagine += [_pagina(n_part=1, base=0, cursor="D{}".format(i)) for i in range(20)]
+    monkeypatch.setattr(settings, "inbox_discesa_senza_lavoro_stop", 20)
+    # stessi partecipanti a ogni pagina: dopo la prima non producono piu' nulla
+    pagine = [_pagina(n_part=1, base=0, cursor="D{}".format(i)) for i in range(200)]
     factory, cid, src, cleanup = _setup(monkeypatch, pagine)
     spia = _spia_log(monkeypatch)
     try:
-        _run(factory, cid)
+        # Piu' giri, come in produzione: ognuno legge 15 pagine e va in pausa.
+        for _ in range(10):
+            _run(factory, cid)
+            c, _ = _stato(factory, cid)
+            if c.status != CampaignStatus.listing_break:
+                break
+            _riporta_in_listing(factory, cid)
+
         c, n = _stato(factory, cid)
         assert c.inbox_bottom_reached is False, "non e' il fondo, e' una resa"
-        assert src.chiamate <= 7, \
-            "doveva fermarsi dopo ~5 pagine, ne ha chieste {}".format(src.chiamate)
-        assert any("senza un solo" in m for m in spia["warning"]), \
-            "serve un warning dedicato: {}".format(spia["warning"])
+        assert src.chiamate < 100,             ("la rete doveva fermare la discesa dopo ~21 pagine, "
+             "ne ha chieste {}".format(src.chiamate))
+        assert any("senza un solo" in m for m in spia["warning"]),             "serve un warning dedicato: {}".format(spia["warning"])
+    finally:
+        cleanup()
+
+
+def test_il_contatore_del_lavoro_a_vuoto_sopravvive_alla_pausa_di_sessione(monkeypatch):
+    """Il cuore del difetto trovato in review: un contatore LOCALE si azzera a
+    ogni uscita dalla funzione, e la funzione esce ogni 15 pagine. Qualunque
+    soglia sopra 15 sarebbe inerte. Deve stare in DB."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "inbox_discesa_senza_lavoro_stop", 0)  # rete spenta
+    pagine = [_pagina(n_part=1, base=0, cursor="E{}".format(i)) for i in range(40)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    try:
+        _run(factory, cid)          # primo giro: 15 pagine, poi pausa
+        c, _ = _stato(factory, cid)
+        primo = c.inbox_deep_senza_lavoro
+        assert primo >= 14, "dopo un giro il contatore deve gia' essere alto: {}".format(primo)
+
+        _riporta_in_listing(factory, cid)
+        _run(factory, cid)          # secondo giro
+        c, _ = _stato(factory, cid)
+        assert c.inbox_deep_senza_lavoro > primo,             ("il contatore deve PROSEGUIRE fra un giro e l'altro, non ripartire: "
+             "{} -> {}".format(primo, c.inbox_deep_senza_lavoro))
+    finally:
+        cleanup()
+
+
+def test_un_fondo_finto_dopo_la_pausa_di_sessione_viene_comunque_rifiutato(monkeypatch):
+    """Lo scenario che il criterio precedente lasciava passare in SILENZIO.
+
+    La prima pagina di un giro ripreso non e' "un fondo gia' rifiutato": e' una
+    pagina mai vista. Col vecchio criterio la guardia era spenta proprio li' —
+    una pagina ogni quindici — e un fondo falso alzava l'interruttore permanente
+    chiudendo con il messaggio normale di successo. Col criterio sul cursore la
+    guardia resta accesa: la pagina porta un cursore, quindi rifiutarla costa un
+    giro, non l'eternita'."""
+    pagine = [_pagina(n_part=2, base=0, cursor="C0"),
+              _pagina(n_part=2, base=100, cursor="C1", bottom=True,
+                      threads=PIENA, has_older=False)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    # la pagina del fondo cade come PRIMA pagina di un giro ripreso
+    async def _riprendi_da_C0(db=None):
+        async with factory() as db:
+            c = await db.get(Campaign, cid)
+            c.inbox_deep_cursor = "C0"
+            await db.commit()
+    asyncio.run(_riprendi_da_C0())
+    src._pages = [pagine[1]]
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        c, _ = _stato(factory, cid)
+        assert c.inbox_bottom_reached is False,             "un fondo mai visto prima non si accetta solo perche' apre un giro"
+        assert any("piena" in m.lower() for m in spia["warning"])
+    finally:
+        cleanup()
+
+
+def test_un_fondo_su_pagina_piena_SENZA_cursore_si_accetta(monkeypatch):
+    """L'altra faccia: senza cursore la frontiera non avanza, quindi ogni rilancio
+    ritroverebbe questa identica pagina. Rifiutarla significherebbe rifiutarla per
+    sempre — e la campagna non passerebbe mai in modalita' cima, smettendo anche
+    di raccogliere i DM nuovi."""
+    pagine = [_pagina(n_part=2, base=0, cursor="C0"),
+              _pagina(n_part=2, base=100, cursor=None, bottom=True,
+                      threads=PIENA, has_older=False)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine)
+    try:
+        _run(factory, cid)
+        c, _ = _stato(factory, cid)
+        assert c.inbox_bottom_reached is True,             "senza cursore rifiutare vorrebbe dire rifiutare per sempre"
     finally:
         cleanup()

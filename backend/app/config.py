@@ -196,10 +196,14 @@ class Settings(BaseSettings):
     # utenti veri ma tutti gia' in lista. Li' il giro scenderebbe per sempre
     # bruciando chiamate API a vuoto, e IG puo' tenere has_older vero
     # all'infinito (comportamento gia' documentato in questo modulo).
-    # La soglia e' ALTISSIMA di proposito: riattraversare il territorio gia'
-    # raccolto e' legittimo e ne costa qualche decina di pagine (1.005 contatti
-    # = ~50 pagine), quindi 300 non tocca mai un lavoro vero. 0 = disattivata.
-    inbox_discesa_senza_lavoro_stop: int = 300
+    # La soglia e' ALTISSIMA di proposito, e 300 non bastava: riattraversare il
+    # territorio gia' raccolto e' legittimo e costa una pagina ogni 20 contatti
+    # (7.000 contatti = ~350 pagine, di piu' se in mezzo ci sono gruppi, che
+    # rendono meno di 20). A 300 la rete sarebbe scattata PRIMA di arrivare al
+    # terreno nuovo, proprio sulla campagna per cui e' stata scritta. A 1000
+    # (= 20.000 contatti riattraversati) resta sopra qualunque lavoro vero e
+    # sotto l'infinito. 0 = disattivata.
+    inbox_discesa_senza_lavoro_stop: int = 1000
     # Batch invio DM: quanti DM consecutivi (random tra min e max) prima di fare
     # il feed browse/riposo. Dentro il batch nessuna attesa aggiunta tra i DM (il
     # browse del profilo target fa gia' da gap). Riduce la frequenza dello scroll.
