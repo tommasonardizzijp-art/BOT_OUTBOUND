@@ -23,8 +23,29 @@ from app.adapters.ai import AIClient
 
 # Provider defaults
 _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-_GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+# llama-3.3-70b-versatile dismesso da Groq (404 model_not_found il 22/08/2026):
+# nel catalogo dell'account non resta NESSUN modello Llama di chat. Fra i superstiti
+# gpt-oss-120b e' l'unico che risponde col solo testo del DM — qwen3.6-27b emette il
+# blocco <think> dentro `content`, che finirebbe dritto nel messaggio inviato.
+_GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b"
 _GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"  # 2.0-flash dismesso/quota free 0
+
+
+def _reasoning_va_spento(model: str) -> bool:
+    """True sui modelli che ragionano DENTRO il budget di `max_tokens`.
+
+    Stessa trappola di `thinkingConfig` su Gemini 2.5, sull'altro provider: i
+    gpt-oss contano i token di ragionamento in `completion_tokens`, e il budget
+    qui e' calibrato sulla lunghezza del DM (floor 400), non sul ragionamento.
+    Misurato il 22/08/2026 col system prompt di produzione: 384 token su 400 —
+    un token in piu' e il messaggio esce troncato (`finish_reason=length`), e
+    `_validate_message` lo scarta cadendo sul fallback SENZA che nulla in log
+    dica che il modello aveva risposto. Con reasoning_effort='low': 119 su 400.
+
+    Non si applica a tutti gli OpenAI-compatible: un provider che non conosce il
+    parametro risponderebbe 400. Si spegne solo dove e' stato verificato.
+    """
+    return "gpt-oss" in (model or "").lower()
 
 
 def _provider_chain() -> list[tuple[str, str, str, str]]:
@@ -208,6 +229,8 @@ async def _generate_openai_compatible(system_prompt: str, user_prompt: str, max_
         "max_tokens": max_tokens,
         "top_p": 0.9,
     }
+    if _reasoning_va_spento(model):
+        payload["reasoning_effort"] = "low"
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             response = await client.post(
