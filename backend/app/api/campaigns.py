@@ -656,6 +656,14 @@ async def start_list(campaign_id: str, body: PhaseStartBody | None = None, db: A
     # buttando via proprio il dato che serve a capire quanto e' grande l'inbox.
     # Si azzera solo dove la discesa riparte davvero dalla cima (reset e
     # riapri-discesa).
+    #
+    # `inbox_deep_senza_lavoro` invece SI', qui: non e' una misura, e' lo stato di
+    # una guardia, e un'azione esplicita dell'operatore deve poterla ricaricare.
+    # Senza questa riga, dopo uno stop della rete ogni rilancio avanzerebbe di UNA
+    # pagina prima di rifarla scattare — la discesa procederebbe al ritmo di una
+    # pagina per intervento manuale, e le sole uscite sarebbero buttare via la
+    # frontiera o resettare la campagna.
+    campaign.inbox_deep_senza_lavoro = 0
     campaign.updated_at = datetime.utcnow()
     db.add(ActivityLog(campaign_id=campaign.id, action="list_started"))
     await db.commit()

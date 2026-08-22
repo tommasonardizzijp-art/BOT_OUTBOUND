@@ -537,3 +537,27 @@ def test_un_fondo_su_pagina_piena_SENZA_cursore_si_accetta(monkeypatch):
         assert c.inbox_bottom_reached is True,             "senza cursore rifiutare vorrebbe dire rifiutare per sempre"
     finally:
         cleanup()
+
+
+def test_la_guardia_dei_partecipanti_vale_ANCHE_in_modalita_cima(monkeypatch):
+    """Chiuso un rilievo disattivando la protezione invece di correggere il
+    messaggio: il `not modo_cima` toglieva l'avviso sbagliato ("Discesa
+    interrotta" in un giro che non scende) togliendo anche la guardia.
+
+    In cima serve piu' che altrove: dopo il fondo la cima e' il regime ordinario
+    della campagna, e li' un payload degradato produceva il messaggio "inbox gia'
+    tutto raccolto" — un successo dichiarato su un giro che non ha raccolto
+    niente, cioe' esattamente cio' che questa guardia esiste per impedire."""
+    pagine = [InboxPage(participants=[], cursor="CC{}".format(i), exhausted=False,
+                        threads_letti=PIENA, has_older=True,
+                        threads_con_utenti=0) for i in range(6)]
+    factory, cid, src, cleanup = _setup(monkeypatch, pagine, bottom_reached=True)
+    spia = _spia_log(monkeypatch)
+    try:
+        _run(factory, cid)
+        assert any("utenti leggibili" in m for m in spia["warning"]), \
+            "in cima la guardia deve parlare: {}".format(spia["warning"])
+        assert src.chiamate <= 5, \
+            "doveva fermarsi presto, ha chiesto {} pagine".format(src.chiamate)
+    finally:
+        cleanup()

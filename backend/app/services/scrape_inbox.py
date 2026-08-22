@@ -632,8 +632,13 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             # Senza questa guardia il motore scenderebbe a vuoto e poi chiuderebbe
             # dichiarando "inbox gia' tutto raccolto" — con un messaggio di
             # successo su un giro che non ha raccolto niente.
-            if (not modo_cima
-                    and senza_part_streak >= settings.inbox_pagine_senza_partecipanti_stop):
+            # Vale in ENTRAMBE le modalita': in cima e' anzi piu' importante,
+            # perche' dopo il fondo la cima e' il regime ordinario della campagna,
+            # e li' un payload degradato produrrebbe il messaggio "inbox gia'
+            # tutto raccolto" — cioe' un successo su un giro che non ha raccolto
+            # niente, esattamente cio' che questa guardia esiste per impedire.
+            # A cambiare e' solo COME lo si racconta: in cima non si sta scendendo.
+            if senza_part_streak >= settings.inbox_pagine_senza_partecipanti_stop:
                 logger.warning(
                     f"[InboxLista] {senza_part_streak} pagine consecutive con thread "
                     f"ma ZERO utenti leggibili (manca il pk o lo username): non e' il "
@@ -642,7 +647,9 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 emit_event(
                     campaign_id, "scrape_warning",
                     "Instagram sta restituendo conversazioni senza i dati dei "
-                    "partecipanti: niente da estrarre. Giro fermato, posizione salva.",
+                    "partecipanti: niente da estrarre. "
+                    + ("Giro di cima fermato." if modo_cima
+                       else "Discesa fermata, posizione salva."),
                     level="warn",
                 )
                 _avvisa_telegram(

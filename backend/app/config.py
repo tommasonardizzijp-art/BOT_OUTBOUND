@@ -202,8 +202,13 @@ class Settings(BaseSettings):
     # rendono meno di 20). A 300 la rete sarebbe scattata PRIMA di arrivare al
     # terreno nuovo, proprio sulla campagna per cui e' stata scritta. A 1000
     # (= 20.000 contatti riattraversati) resta sopra qualunque lavoro vero e
-    # sotto l'infinito. 0 = disattivata.
-    inbox_discesa_senza_lavoro_stop: int = 1000
+    # sotto l'infinito. Ma 1000 pagine = 20.000 contatti riattraversati, cioe'
+    # ESATTAMENTE l'obiettivo della campagna: a traguardo raggiunto un
+    # riapri-discesa costerebbe ~1000 pagine legittime e la rete scatterebbe
+    # sul filo. L'asimmetria decide: una soglia troppo alta costa qualche
+    # chiamata sprecata in uno scenario mai osservato, una troppo bassa ferma
+    # il lavoro vero sulla campagna di punta. 0 = disattivata.
+    inbox_discesa_senza_lavoro_stop: int = 3000
     # Batch invio DM: quanti DM consecutivi (random tra min e max) prima di fare
     # il feed browse/riposo. Dentro il batch nessuna attesa aggiunta tra i DM (il
     # browse del profilo target fa gia' da gap). Riduce la frequenza dello scroll.

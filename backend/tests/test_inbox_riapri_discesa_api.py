@@ -237,3 +237,57 @@ def test_rifiuta_la_riapertura_a_campagna_in_corsa(client, _temp_db):
 
     c = _run(factory, lambda db: db.get(Campaign, cid))
     assert c.inbox_bottom_reached is True, "rifiutata la chiamata, niente e' cambiato"
+
+
+def test_il_rilancio_manuale_della_lista_ricarica_il_budget_della_guardia(client, _temp_db,
+                                                                          monkeypatch):
+    """La rete di sicurezza della discesa si ferma dopo N pagine che non producono
+    nulla, e il suo contatore e' PERSISTITO (altrimenti non scatterebbe mai: il
+    giro esce ogni 15 pagine). Ma se un avvio manuale non lo ricaricasse, dopo uno
+    stop ogni rilancio avanzerebbe di UNA pagina prima di rifar scattare la rete:
+    la discesa procederebbe al ritmo di una pagina per intervento, e le sole
+    uscite sarebbero buttare via la frontiera o resettare la campagna.
+
+    `inbox_deep_pages` invece NON si ricarica, ed e' giusto: quella e' una misura
+    (a che profondita' siamo arrivati), questo e' lo stato di una guardia."""
+    engine, factory = _temp_db
+    cid = _crea_campagna_in_fondo(factory)
+
+    async def _pronta_al_rilancio(db):
+        # L'avvio della lista pretende un account attivo con capability inbox.
+        from app.models.account import AccountStatus, InstagramAccount
+        from app.models.campaign_account import CampaignAccount
+        acct_id = str(uuid.uuid4())
+        db.add(InstagramAccount(
+            id=acct_id, username="acct_test_{}".format(acct_id[:8]),
+            encrypted_password="x", status=AccountStatus.active,
+            created_at=datetime.utcnow(),
+        ))
+        await db.commit()
+        db.add(CampaignAccount(campaign_id=cid, account_id=acct_id, role="inbox"))
+        await db.commit()
+
+        c = await db.get(Campaign, cid)
+        c.status = CampaignStatus.ready
+        c.inbox_bottom_reached = False
+        c.inbox_deep_senza_lavoro = 2999
+        c.inbox_deep_pages = 800
+        c.total_followers = 1
+        c.list_target = None
+        await db.commit()
+
+    _run(factory, _pronta_al_rilancio)
+
+    async def _niente_coda(*a, **k):
+        return None
+
+    monkeypatch.setattr("app.services.work_enqueue.enqueue_list", _niente_coda)
+
+    r = client.post("/api/campaigns/{}/list/start".format(cid))
+    assert r.status_code == 200, r.text
+
+    c = _run(factory, lambda db: db.get(Campaign, cid))
+    assert c.inbox_deep_senza_lavoro == 0, \
+        "il budget della guardia va ricaricato da un'azione esplicita dell'operatore"
+    assert c.inbox_deep_pages == 800, \
+        "la profondita' raggiunta e' una misura, non si azzera: serve negli alert"
