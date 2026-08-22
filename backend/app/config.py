@@ -174,10 +174,41 @@ class Settings(BaseSettings):
     # 15 pagine x 20 thread = 300 = lo stesso ritmo di inbox_session_size quando
     # l'inbox e' vergine e ogni pagina porta solo contatti nuovi.
     inbox_session_pages: int = 15
-    # Tetto della DISCESA intera (non della singola sessione): oltre questo numero
-    # di pagine senza aver mai raggiunto il fondo, il giro si ferma e avvisa. 500
-    # pagine = 10.000 thread, molto oltre qualunque inbox reale.
-    inbox_deep_max_pages: int = 500
+    # NESSUN tetto di pagine sulla discesa (rimosso il 22/08): era 500 = 10.000
+    # thread, scelto assumendo che nessun inbox reale andasse oltre. Assunzione
+    # sbagliata — l'obiettivo su @michele.carozza e' 20.000 contatti, e il tetto
+    # avrebbe chiuso il lavoro a meta' dichiarando di aver finito. A fermare la
+    # discesa restano i segnali VERI: fondo dichiarato da IG, cursore fermo,
+    # pagine vuote, pagine senza partecipanti estraibili.
+    #
+    # Quante pagine di fila possono portare thread ma ZERO partecipanti 1-a-1
+    # prima di fermare il giro. Un tratto di sole chat di gruppo e' legittimo e
+    # non deve fermare niente; una serie lunga no: sarebbe IG che serve thread
+    # senza i dati utente, e quelle pagine sono indistinguibili da "gente gia' in
+    # lista" — il motore chiuderebbe dicendo "inbox gia' raccolto" mentre gli
+    # stanno servendo pagine vuote.
+    inbox_pagine_senza_partecipanti_stop: int = 3
+    # Rete di sicurezza della DISCESA, al posto del vecchio tetto a pagine.
+    # Non conta le pagine (era il numero sbagliato: 500 chiudeva il lavoro a
+    # meta'), conta le pagine consecutive che non producono NIENTE — ne' un
+    # contatto nuovo ne' una promozione. Serve perche' esiste uno scenario che
+    # nessuna delle altre guardie vede: pagine piene, cursori sempre nuovi,
+    # utenti veri ma tutti gia' in lista. Li' il giro scenderebbe per sempre
+    # bruciando chiamate API a vuoto, e IG puo' tenere has_older vero
+    # all'infinito (comportamento gia' documentato in questo modulo).
+    # La soglia e' ALTISSIMA di proposito, e 300 non bastava: riattraversare il
+    # territorio gia' raccolto e' legittimo e costa una pagina ogni 20 contatti
+    # (7.000 contatti = ~350 pagine, di piu' se in mezzo ci sono gruppi, che
+    # rendono meno di 20). A 300 la rete sarebbe scattata PRIMA di arrivare al
+    # terreno nuovo, proprio sulla campagna per cui e' stata scritta. A 1000
+    # (= 20.000 contatti riattraversati) resta sopra qualunque lavoro vero e
+    # sotto l'infinito. Ma 1000 pagine = 20.000 contatti riattraversati, cioe'
+    # ESATTAMENTE l'obiettivo della campagna: a traguardo raggiunto un
+    # riapri-discesa costerebbe ~1000 pagine legittime e la rete scatterebbe
+    # sul filo. L'asimmetria decide: una soglia troppo alta costa qualche
+    # chiamata sprecata in uno scenario mai osservato, una troppo bassa ferma
+    # il lavoro vero sulla campagna di punta. 0 = disattivata.
+    inbox_discesa_senza_lavoro_stop: int = 3000
     # Batch invio DM: quanti DM consecutivi (random tra min e max) prima di fare
     # il feed browse/riposo. Dentro il batch nessuna attesa aggiunta tra i DM (il
     # browse del profilo target fa gia' da gap). Riduce la frequenza dello scroll.

@@ -205,9 +205,14 @@ class Campaign(Base):
     # questa no. Migration 036.
     inbox_deep_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Pagine lette in questa discesa (azzerate quando il fondo arriva davvero). Il
-    # budget di sessione chiude un giro e ne fa ripartire un altro: da solo non
-    # garantisce che la discesa finisca. Migration 036.
     inbox_deep_pages: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # Pagine di discesa CONSECUTIVE che non hanno prodotto niente: ne' un contatto
+    # nuovo ne' una promozione. Persistito e non locale perche' il giro esce ogni
+    # 15 pagine per la pausa di sessione, e un contatore locale non arriverebbe mai
+    # a una soglia utile. E' l'unica garanzia che la discesa termini. Migration 038.
+    inbox_deep_senza_lavoro: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
     # 'completed' | 'partial' | 'rate_limited' — esito ultimo scraping

@@ -4,6 +4,7 @@ listing/listing_break, il session-break via Retry(defer) e il challenge handler.
 """
 import asyncio
 import math
+import json
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -20,10 +21,35 @@ from app.models.follower import Follower, FollowerStatus
 from app.services.bot_state_service import is_halted
 from app.services.scraper import is_challenge_exception, isolate_challenged_account
 from app.services.inbox_browser.targa import normalizza_username
-from app.services.inbox_source import ApiInboxSource
+from app.services.inbox_source import PAGINA_ATTESA, ApiInboxSource
 from app.utils.exceptions import BotHaltedError, ScrapeBudgetError, ScraperError
 from app.utils.instagrapi_client import login as _login
 from app.utils.roles import INBOX_ROLES
+
+
+
+def _data_del_cursore(cursore: str | None) -> str | None:
+    """La data dentro il cursore dell'inbox, se si riesce a leggerla.
+
+    Il cursore non e' opaco: e' JSON in chiaro, del tipo
+    {"cursor_thread_v2_id":..., "cursor_timestamp_seconds":..., "cursor_relevancy_score":0}
+    e quel timestamp dice a che punto del passato e' arrivata la discesa. E' il
+    dato che risponde a "quanto e' grande davvero questo inbox" dopo mezz'ora di
+    giro invece che dopo settimane.
+
+    E' un ORNAMENTO del log: se Instagram cambia formato si perde una data, non il
+    giro. Percio' fail-open su qualunque errore, nessuna eccezione verso l'alto.
+    """
+    if not cursore:
+        return None
+    try:
+        dati = json.loads(cursore)
+        secondi = dati.get("cursor_timestamp_seconds")
+        if not isinstance(secondi, (int, float)) or secondi <= 0:
+            return None
+        return datetime.utcfromtimestamp(secondi).strftime("%Y-%m-%d")
+    except Exception:
+        return None
 
 
 def inbox_collect(participants, existing_ids) -> list[tuple[int, str]]:
@@ -295,6 +321,7 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
         since_break = 0
         pagine_da_pausa = 0   # pagine lette dall'ultima pausa: e' il budget di sessione
         empty_streak = 0   # pagine consecutive senza contatti nuovi (drain-stop, modo cima)
+        senza_part_streak = 0   # pagine con thread ma zero partecipanti estraibili
         vuote_streak = 0   # pagine consecutive senza NESSUN partecipante (fine discesa)
         nuovi_tot = 0
         promossi_tot = 0
@@ -421,6 +448,17 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             # inbox drenato.
             empty_streak = 0 if (stored or promossi) else empty_streak + 1
             vuote_streak = 0 if (page.threads_letti or page.participants) else vuote_streak + 1
+            # Pagina CON thread ma senza nemmeno un partecipante 1-a-1 estraibile.
+            # Diverso da 'vuota' (nessun thread), da 'gia' in lista'
+            # (partecipanti estratti e riconosciuti) e da un tratto di GRUPPI
+            # (utenti presenti ma piu' di uno, scartati dal filtro 1-a-1).
+            # Qui i dati utente non arrivano proprio: non c'e' niente da
+            # estrarre, ed e' l'unico dei casi che il log non distingueva.
+            senza_part_streak = (
+                senza_part_streak + 1
+                if (page.threads_letti and page.threads_con_utenti == 0)
+                else 0
+            )
             # In discesa la frontiera va nel suo campo; `scrape_cursor` serve a
             # campaign_control per sapere che il giro e' a meta', e viene azzerato
             # quando il giro chiude (vedi in fondo).
@@ -433,6 +471,15 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 # sessioni, cioe' mesi. E solo in discesa: le passate di cima non
                 # scendono, non devono consumare quel budget.
                 campaign.inbox_deep_pages = (campaign.inbox_deep_pages or 0) + 1
+                # Persistito insieme al conteggio pagine, e nello stesso commit:
+                # e' l'unico contatore che sopravvive alla pausa di sessione, e
+                # senza di lui la rete di sicurezza della discesa non scatterebbe
+                # mai (il giro esce ogni 15 pagine).
+                if stored or promossi:
+                    campaign.inbox_deep_senza_lavoro = 0
+                else:
+                    campaign.inbox_deep_senza_lavoro = (
+                        campaign.inbox_deep_senza_lavoro or 0) + 1
             if not modo_cima and page.cursor:
                 # Solo un cursore VERO fa avanzare la frontiera: una risposta senza
                 # oldest_cursor (payload troncato, blip) la azzererebbe, e il giro
@@ -443,10 +490,26 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             campaign.updated_at = datetime.utcnow()
             await db.commit()
             logger.info(
-                f"[InboxLista] pagina: {page.threads_letti} thread, {stored} nuovi, "
-                f"{promossi} promossi, {esito.gia_presenti} gia' in lista, "
-                f"{scartati} saltati per collisione (totale {already})"
+                f"[InboxLista] pagina: {page.threads_letti}/{PAGINA_ATTESA} thread, "
+                f"{stored} nuovi, {promossi} promossi, {esito.gia_presenti} gia' in "
+                f"lista, {scartati} saltati per collisione (totale {already}) | "
+                f"has_older={page.has_older} "
+                f"latenza={page.latenza_ms if page.latenza_ms is not None else '?'}ms "
+                f"frontiera={_data_del_cursore(page.cursor) or 'n/d'}"
             )
+
+            # Pagina piu' corta di quella richiesta, con IG che dice che sotto c'e'
+            # ancora roba: e' il modo tipico in cui un servizio frena senza dare un
+            # errore. Per ora si AVVISA soltanto (decisione di Tommaso, 22/08):
+            # puo' avere altre cause e fermare a caso costerebbe piu' di quanto
+            # salva. Se sui dati veri si rivelera' un segnale affidabile, allora
+            # potra' diventare uno stop.
+            if page.threads_letti and page.threads_letti < PAGINA_ATTESA and page.has_older:
+                logger.warning(
+                    f"[InboxLista] pagina corta: {page.threads_letti} thread invece di "
+                    f"{PAGINA_ATTESA}, ma has_older e' ancora vero. Proseguo, ma se si "
+                    f"ripete e' un freno lato Instagram ({already})"
+                )
             if scartati:
                 emit_event(
                     campaign_id, "scrape_warning",
@@ -461,13 +524,73 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                     + (f" (+{promossi} gia' presi dal browser, ora con pk reale)" if promossi else ""),
                 )
 
+            # Il fondo sospetto si rifiuta SOLO se rifiutarlo costa un giro, non
+            # l'eternita'. Il segnale che distingue i due casi e' il cursore della
+            # pagina stessa:
+            #   - c'e' un cursore  -> la frontiera avanza, il giro dopo atterra
+            #     altrove, e se il fondo era vero lo si ritrovera' come pagina
+            #     parziale. Il rifiuto costa un giro: si rifiuta.
+            #   - NON c'e' cursore -> la frontiera resta ferma e ogni rilancio
+            #     ritrovera' questa identica pagina. Rifiutare significherebbe
+            #     rifiutare per sempre: la campagna non passerebbe mai in modalita'
+            #     cima e smetterebbe anche di raccogliere i DM nuovi. Allora non e'
+            #     piu' un dubbio: o e' il fondo vero (inbox con un multiplo esatto
+            #     di 20 conversazioni, dove l'ultima pagina e' piena per davvero) o
+            #     e' un blocco che nessun rilancio sciogliera'. Si accetta.
+            #
+            # Il criterio precedente ("prima pagina di un giro ripreso") sembrava
+            # equivalente e non lo era: lasciava la guardia SPENTA su una pagina
+            # ogni quindici — quella dopo ogni pausa di sessione — dove un fondo
+            # finto passava in silenzio, che e' peggio del loop che sostituiva.
+            if (
+                page.bottom_confirmed
+                and page.threads_letti >= PAGINA_ATTESA
+                and not modo_cima
+                and page.cursor is not None
+            ):
+                # Fondo dichiarato su una pagina PIENA: contraddizione. Una lista
+                # che finisce davvero ha l'ultima pagina parziale — 9.412 thread
+                # danno un'ultima pagina da 12, non da 20. Una pagina piena che
+                # dice "sotto non c'e' altro" e' invece esattamente la forma che
+                # avrebbe un tetto di profondita' imposto senza restituire errori.
+                # `inbox_bottom_reached` e' PERMANENTE e il solo reset esistente
+                # cancella tutti i Message: su un dubbio non si alza.
+                logger.warning(
+                    f"[InboxLista] fondo dichiarato su una pagina PIENA "
+                    f"({page.threads_letti}/{PAGINA_ATTESA}): non ci credo, non alzo "
+                    f"l'interruttore del fondo. Frontiera conservata ({already})"
+                )
+                emit_event(
+                    campaign_id, "scrape_warning",
+                    "Instagram ha dichiarato la fine dell'inbox su una pagina ancora "
+                    "piena: sospetto un limite di profondita', non la fine vera. "
+                    "La posizione e' salva, si puo' riprendere piu' tardi.",
+                    level="warn",
+                )
+                _avvisa_telegram(
+                    f"Fase Lista inbox: fondo dichiarato su pagina piena dopo "
+                    f"{campaign.inbox_deep_pages} pagine ({already} contatti). "
+                    "Interruttore NON alzato, frontiera conservata."
+                )
+                fine_discesa = True
+                break
+
             if page.bottom_confirmed:
-                # Il fondo VERO: IG ha detto has_older=False. Solo qui si alza
-                # l'interruttore permanente.
-                logger.info(f"[InboxLista] Fondo dell'inbox raggiunto ({already})")
+                # Il fondo VERO: IG ha detto has_older=False su una pagina parziale,
+                # oppure su una pagina piena che avevamo gia' rifiutato una volta e
+                # che si ripresenta identica. Solo qui si alza l'interruttore.
+                if page.threads_letti >= PAGINA_ATTESA and not modo_cima:
+                    logger.warning(
+                        f"[InboxLista] fondo su pagina piena e senza cursore: la "
+                        f"frontiera non avanzerebbe, quindi rifiutarlo sarebbe "
+                        f"rifiutarlo per sempre. Lo accetto ({already})"
+                    )
+                else:
+                    logger.info(f"[InboxLista] Fondo dell'inbox raggiunto ({already})")
                 campaign.inbox_bottom_reached = True
                 campaign.inbox_deep_cursor = None
                 campaign.inbox_deep_pages = 0
+                campaign.inbox_deep_senza_lavoro = 0
                 campaign.updated_at = datetime.utcnow()
                 await db.commit()
                 break
@@ -504,6 +627,38 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
             # sintomo di un soft-block o di un payload degradato, e il fondo alza un
             # interruttore permanente. La frontiera resta dov'e': il giro dopo
             # riprende da li' invece di ricominciare dalla cima.
+            # Thread serviti ma nessun dato utente dentro: le pagine sembrano
+            # "niente di nuovo" ed e' indistinguibile da un tratto gia' raccolto.
+            # Senza questa guardia il motore scenderebbe a vuoto e poi chiuderebbe
+            # dichiarando "inbox gia' tutto raccolto" — con un messaggio di
+            # successo su un giro che non ha raccolto niente.
+            # Vale in ENTRAMBE le modalita': in cima e' anzi piu' importante,
+            # perche' dopo il fondo la cima e' il regime ordinario della campagna,
+            # e li' un payload degradato produrrebbe il messaggio "inbox gia'
+            # tutto raccolto" — cioe' un successo su un giro che non ha raccolto
+            # niente, esattamente cio' che questa guardia esiste per impedire.
+            # A cambiare e' solo COME lo si racconta: in cima non si sta scendendo.
+            if senza_part_streak >= settings.inbox_pagine_senza_partecipanti_stop:
+                logger.warning(
+                    f"[InboxLista] {senza_part_streak} pagine consecutive con thread "
+                    f"ma ZERO utenti leggibili (manca il pk o lo username): non e' il "
+                    f"fondo, e non e' roba gia' raccolta. Mi fermo ({already})"
+                )
+                emit_event(
+                    campaign_id, "scrape_warning",
+                    "Instagram sta restituendo conversazioni senza i dati dei "
+                    "partecipanti: niente da estrarre. "
+                    + ("Giro di cima fermato." if modo_cima
+                       else "Discesa fermata, posizione salva."),
+                    level="warn",
+                )
+                _avvisa_telegram(
+                    f"Fase Lista inbox: {senza_part_streak} pagine con thread ma senza "
+                    f"username estraibili ({already} contatti). Giro fermato."
+                )
+                fine_discesa = True
+                break
+
             if vuote_streak >= settings.inbox_empty_page_stop:
                 logger.warning(
                     f"[InboxLista] {vuote_streak} pagine consecutive vuote — "
@@ -512,28 +667,32 @@ async def run_inbox_list(campaign_id: str, db, campaign) -> int | None:
                 fine_discesa = True
                 break
 
-            # Tetto della DISCESA, non della sessione: il budget pagine qui sotto
-            # chiude una sessione e ne fa ripartire un'altra, quindi da solo non
-            # garantisce che la discesa finisca. Se IG continua a servire pagine
-            # piene con cursori sempre diversi (inbox che cicla), senza questo si
-            # scenderebbe per sempre, sessione dopo sessione.
-            if not modo_cima and campaign.inbox_deep_pages >= settings.inbox_deep_max_pages:
+            # Rete di sicurezza della discesa: nessuna delle guardie sopra vede
+            # lo scenario "pagine piene, cursori nuovi, tutti gia' in lista", dove
+            # il giro scenderebbe all'infinito senza produrre niente. Soglia molto
+            # alta: il riattraversamento legittimo del gia' raccolto costa decine
+            # di pagine, non centinaia.
+            senza_lavoro = campaign.inbox_deep_senza_lavoro or 0
+            if (
+                not modo_cima
+                and settings.inbox_discesa_senza_lavoro_stop
+                and senza_lavoro >= settings.inbox_discesa_senza_lavoro_stop
+            ):
                 logger.warning(
-                    f"[InboxLista] {campaign.inbox_deep_pages} pagine di discesa senza "
-                    f"raggiungere il fondo — mi fermo ({already})"
+                    f"[InboxLista] {senza_lavoro} pagine consecutive senza un solo "
+                    f"contatto nuovo ne' una promozione: la discesa non sta "
+                    f"producendo niente, mi fermo ({already})"
                 )
                 emit_event(
                     campaign_id, "scrape_warning",
-                    f"Discesa fermata dopo {campaign.inbox_deep_pages} pagine senza mai "
-                    "raggiungere il fondo dell'inbox. La frontiera e' salva: si riprende "
-                    "da li' rilanciando la lista.",
+                    f"Discesa fermata dopo {senza_lavoro} pagine che non hanno portato "
+                    "nessun contatto. La posizione e' salva: si riprende da li'.",
                     level="warn",
                 )
                 _avvisa_telegram(
-                    f"Fase Lista inbox: {campaign.inbox_deep_pages} pagine di discesa "
-                    "senza mai raggiungere il fondo. Giro fermato, frontiera conservata."
+                    f"Fase Lista inbox: {senza_lavoro} pagine di fila senza contatti "
+                    f"nuovi ({already} in lista). Discesa fermata, frontiera conservata."
                 )
-                await db.commit()
                 fine_discesa = True
                 break
 
