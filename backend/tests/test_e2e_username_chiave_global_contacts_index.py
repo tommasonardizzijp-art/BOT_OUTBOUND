@@ -187,38 +187,23 @@ def test_upsert_lead_su_schema_migrato_non_si_rompe(migrated_db):
     assert per_pk[3001].full_name == "Alfa Aggiornato", "il merge non e' avvenuto"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Lavoro mancante, non difetto di cio' che e' stato consegnato: scrivere "
-        "username_norm negli upsert e' lo Step 4 della Task 5 del piano "
-        "(2026-08-22-username-chiave-di-prima-classe.md), non ancora iniziata. "
-        "La migration 039 backfilla le 13.342 righe gia' in tabella, ma il codice "
-        "vivo non valorizza mai la colonna: ogni contatto nuovo nasce con NULL, e "
-        "il ponte fra pk reale e targa provvisoria smette di formarsi appena i dati "
-        "nuovi superano i vecchi. strict=True di proposito: quando la Task 5 "
-        "atterra, questo test torna verde DA SOLO e xfail_strict lo segnala come "
-        "XPASS invece di lasciarlo passare in silenzio."
-    ),
-)
 def test_DIFETTO_upsert_lead_non_valorizza_mai_username_norm(migrated_db):
-    """Trovato collaudando lo scenario 4: il codice vivo non scrive MAI
-    `username_norm` (verificato per grep: l'unico riferimento fuori dal modello
-    e dalla migration e' un commento non correlato in scrape_inbox.py). La
-    migration 039 lo popola SOLO in backfill, una tantum, sulle righe gia' in
-    tabella al momento della migrazione — non su quelle create dopo.
+    """STORIA — trovato collaudando lo scenario 4, il 22/08: il codice vivo non
+    scriveva MAI `username_norm` (verificato per grep: l'unico riferimento
+    fuori dal modello e dalla migration era un commento non correlato in
+    scrape_inbox.py). La migration 039 la popolava SOLO in backfill, una
+    tantum, sulle righe gia' in tabella al momento della migrazione — non su
+    quelle create dopo, quindi il "ponte" fra pk reale e targa provvisoria
+    smetteva di formarsi non appena i dati vecchi venivano superati dai nuovi.
 
-    Effetto pratico: l'indice UNIQUE parziale esiste ed e' corretto (vedi i due
-    test sopra), ma per ogni contatto scritto DA QUESTO CANTIERE IN POI la sua
-    colonna resta NULL, quindi l'indice non lo protegge mai — il "ponte" fra pk
-    reale e targa provvisoria descritto nella docstring della migration
-    (global_contact_service.py:1-13) smette di formarsi non appena i dati
-    vecchi vengono superati da quelli nuovi.
-
-    Questo test verifica il comportamento CORRETTO atteso (username_norm
-    valorizzato con normalizza_username(username) dopo insert e dopo merge) ed
-    e' quindi RED oggi: non e' un bug nell'harness, e' il difetto stesso reso
-    eseguibile. Non lo marchiamo xfail: il rosso E' il risultato del collaudo."""
+    Il test era marcato `xfail(strict=True)` apposta perche' non era un
+    difetto di cio' che era stato consegnato, ma lavoro mancante (Step 4 della
+    Task 5, non ancora iniziata): quando lo Step e' atterrato (upsert_lead
+    valorizza username_norm con normalizza_username(username) dopo insert e
+    dopo merge, global_contact_service.py) il test e' tornato verde DA SOLO,
+    xfail_strict l'ha segnalato come XPASS, e il decoratore e' stato tolto qui
+    — e' questo il segnale che lo Step 4 ha davvero atterrato, non solo i test
+    nuovi scritti per lui."""
     from app.services.inbox_browser.targa import normalizza_username
 
     engine, sf = _session_factory(migrated_db)

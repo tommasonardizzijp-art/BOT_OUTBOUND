@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timedelta
 from arq.worker import Retry
 from loguru import logger
-from sqlalchemy import select, update, delete, func
+from sqlalchemy import select, update, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.utils.events import emit as emit_event
 from app.utils.roles import can_dm
@@ -37,6 +37,7 @@ from app.models.activity_log import ActivityLog
 from app.models.global_contact import GlobalContact
 from app.services import account_manager
 from app.services.global_contact_service import targa_ammessa_in_anagrafica
+from app.services.inbox_browser.targa import e_provvisoria, handle_valido, normalizza_username
 from app.services import account_lease, reservation
 from app.services.account_manager import get_warmup_limit
 from app.services.follower_workability import (
@@ -483,7 +484,14 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
             # worker/campaign has already contacted (or is about to contact) this user.
             # This prevents the TOCTOU race where two workers both pass a SELECT-based
             # check before either has committed to global_contacts.
-            reserved = await reservation.try_reserve(follower.ig_user_id, job_id, campaign_id, db)
+            # Targa con cui la prenotazione viene presa. `dm_harvest`, dopo l'invio,
+            # puo' sostituire `follower.ig_user_id` con il pk vero (Task 3): il
+            # rilascio a fine ciclo deve chiudere la riga presa CON QUESTA targa,
+            # non con quella (eventualmente diversa) che il follower avra' dopo —
+            # altrimenti la prenotazione vecchia non viene mai trovata e resta
+            # appesa fino al TTL di 30 minuti (trappola trovata in review, 22/08).
+            targa_riservata = follower.ig_user_id
+            reserved = await reservation.try_reserve(targa_riservata, job_id, campaign_id, db)
             if not reserved:
                 follower.status = FollowerStatus.skipped
                 follower.skip_reason = "already_contacted_globally"
@@ -730,11 +738,19 @@ async def run_campaign_worker(campaign_id: str, account_id: str) -> None:
                     await db.rollback()
 
                 try:
+                    # _mark_globally_contacted usa il pk ATTUALE (l'harvest sopra
+                    # puo' averlo appena promosso dalla targa provvisoria a quella
+                    # vera): e' l'identita' giusta da registrare come contattata.
+                    # Il release invece deve chiudere la prenotazione presa con
+                    # `targa_riservata` (catturata al momento della reservation,
+                    # punto 7 del ciclo), non con quella che il follower ha
+                    # adesso — altrimenti la riga vecchia resta appesa fino al
+                    # TTL di 30 minuti.
                     await _mark_globally_contacted(
                         follower.ig_user_id, campaign_id, db,
                         follower=follower, account=account, campaign_name=campaign.name,
                     )
-                    await reservation.release(follower.ig_user_id, db)
+                    await reservation.release(targa_riservata, db)
                 except Exception as e:
                     logger.warning(f"[Worker] _mark_globally_contacted failed post-send (non-fatal): {e}")
                     await db.rollback()
@@ -1517,8 +1533,9 @@ async def _mark_globally_contacted(
 ) -> None:
     if not targa_ammessa_in_anagrafica(ig_user_id):
         # I1: stesso presidio di upsert_lead (global_contact_service) e di
-        # reservation.try_reserve — una targa provvisoria del motore inbox
-        # browser non deve mai entrare nell'anagrafica cross-campagna.
+        # reservation.try_reserve — resta escluso solo cio' che non e' una
+        # targa: None e zero. Le provvisorie sono ammesse (Task 5): il ponte
+        # e' username_norm, non il segno del pk.
         logger.warning(f"[GlobalContact] ig_user_id {ig_user_id}: targa non ammessa in anagrafica — nessuna scrittura")
         return
     now = datetime.utcnow()
@@ -1530,11 +1547,31 @@ async def _mark_globally_contacted(
         "contacted_at": now.isoformat(),
     }
 
-    result = await db.execute(
-        select(GlobalContact).where(GlobalContact.ig_user_id == ig_user_id)
+    # Ponte fra le due rappresentazioni della stessa persona (migration 039):
+    # cerca per pk OPPURE per username_norm, cosi' un contatto gia' visto dal
+    # canale browser (targa provvisoria) converge sulla stessa riga quando
+    # arriva qui col pk vero, invece di duplicarsi.
+    username_norm = (
+        normalizza_username(follower.username)
+        if follower is not None and handle_valido(getattr(follower, "username", None))
+        else None
     )
-    contact = result.scalar_one_or_none()
+    conditions = [GlobalContact.ig_user_id == ig_user_id]
+    if username_norm:
+        conditions.append(GlobalContact.username_norm == username_norm)
+    result = await db.execute(
+        select(GlobalContact).where(or_(*conditions))
+    )
+    contact = result.scalars().first()
     if contact:
+        if e_provvisoria(contact.ig_user_id) and not e_provvisoria(ig_user_id):
+            logger.info(
+                f"[GlobalContact] promuovo la targa provvisoria ({contact.ig_user_id}) "
+                f"al pk reale ({ig_user_id})"
+            )
+            contact.ig_user_id = ig_user_id
+        if username_norm:
+            contact.username_norm = username_norm
         ids = json.loads(contact.contacted_by_campaign_ids)
         if campaign_id not in ids:
             ids.append(campaign_id)
@@ -1560,6 +1597,7 @@ async def _mark_globally_contacted(
         contact = GlobalContact(
             ig_user_id=ig_user_id,
             username=follower.username if follower else None,
+            username_norm=username_norm,
             full_name=follower.full_name if follower else None,
             biography=follower.biography if follower else None,
             phone=getattr(follower, "phone", None) if follower else None,
