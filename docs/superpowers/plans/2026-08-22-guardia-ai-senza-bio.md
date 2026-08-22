@@ -1,5 +1,26 @@
 # Guardia "AI senza bio" — Implementation Plan
 
+> ## ⛔ SUPERATO IN PARTE — leggi prima questo
+>
+> La **regola** di questo piano non è più quella giusta. Qui la guardia è calibrata
+> stretta su `source_type='scrape'`, perché quando è stato scritto la bio su import
+> arrivava sempre e su scrape mai.
+>
+> Nella stessa sessione (22/08/2026) la decisione è cambiata, dopo aver stabilito che
+> lo username diventa una chiave d'identità di prima classe. **La regola finale è una
+> sola condizione, senza eccezioni per sorgente:**
+>
+> > AI accesa → «Solo DM» spento. AI spenta → tutte e tre le opzioni, su tutte le sorgenti.
+>
+> **Piano valido: [`2026-08-22-username-chiave-di-prima-classe.md`](2026-08-22-username-chiave-di-prima-classe.md).**
+> La guardia del pulsante è la sua **Task 7**, che rimanda alle Task 1-3 di questo
+> documento per il codice — **con `valida_ai_senza_bio` a due argomenti**
+> (`ai_enabled`, `enrichment_level`), senza `source_type`.
+>
+> Cosa resta buono qui: la struttura dei task, l'harness dei test HTTP (Task 2, Step 1a)
+> e le trasformazioni della UI (Task 3). Cosa NON va copiato: la firma a tre argomenti,
+> la condizione su `import`, e i due test che asseriscono «su import resta permesso».
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Impedire di configurare una campagna con «Personalizza con AI» attivo e livello di arricchimento «Solo DM» nei casi in cui la bio non arriva mai, spiegando il perche' invece di lasciar produrre DM finto-personalizzati.
