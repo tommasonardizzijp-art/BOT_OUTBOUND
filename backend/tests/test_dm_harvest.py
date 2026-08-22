@@ -28,9 +28,15 @@ class _FakeDb:
 
 
 def _follower(**kw):
-    base = dict(id="f1", username="mario_rossi", full_name=None, biography=None,
+    # ig_user_id/campaign_id: da Task 3 (ancoraggio targa) l'harvest li legge
+    # sempre, anche fuori dal ramo 'sostituisci'. Sul Follower reale sono
+    # NOT NULL, quindi il default qui e' un pk positivo gia' allineato al
+    # payload di questo file (PAYLOAD["pk"] == "123") — cosi' il percorso resta
+    # 'invariata' e questi test restano concentrati sui campi bio, non sulla targa.
+    base = dict(id="f1", campaign_id="c1", ig_user_id=123, username="mario_rossi",
+                full_name=None, biography=None,
                 follower_count=None, following_count=None, is_private=False,
-                is_verified=False, external_url=None)
+                is_verified=False, external_url=None, skip_reason=None)
     base.update(kw)
     return SimpleNamespace(**base)
 
