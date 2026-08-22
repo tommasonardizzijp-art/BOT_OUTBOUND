@@ -83,11 +83,6 @@ def inbox_account_count_ok(scrape_mode: str, active_count: int) -> bool:
     return True
 
 
-def engine_switch_resets_cursor(old_engine: str, new_engine: str) -> bool:
-    """True se il cambio engine invalida il cursore (token non interscambiabili)."""
-    return old_engine != new_engine
-
-
 async def _enrich_campaign(campaign: Campaign, db: AsyncSession, include_today: bool = False) -> CampaignResponse:
     """Build CampaignResponse with live-reconciled counters from Follower.status GROUP BY."""
     counts_result = await db.execute(
@@ -335,9 +330,31 @@ async def update_campaign(campaign_id: str, data: CampaignUpdate, db: AsyncSessi
                 status_code=400,
                 detail="L'engine inbox si cambia solo a campagna ferma (draft/ready/paused/error).",
             )
-        if engine_switch_resets_cursor(campaign.inbox_engine, data.inbox_engine):
-            campaign.scrape_cursor = None  # cursore vecchio non valido per il nuovo engine
-            campaign.inbox_deep_cursor = None
+        # NESSUN azzeramento di cursori qui (rimosso il 22/08/2026). Il codice
+        # precedente buttava `scrape_cursor` e `inbox_deep_cursor` a ogni cambio
+        # di engine, sul presupposto che i due motori si scambiassero lo stesso
+        # campo ("token non interscambiabili"). Non e' cosi': i due segnalibri
+        # hanno colonne diverse e forma diversa — l'API scrive il cursore opaco
+        # di Instagram in `inbox_deep_cursor`, il browser una data in
+        # `inbox_cursor_at` (migration 033). Non c'era niente da invalidare, e
+        # l'azzeramento era una perdita secca: cancellava la frontiera della
+        # discesa senza metterci nulla al posto suo, dietro un bottone senza
+        # conferma che sembra una preferenza.
+        #
+        # La frontiera della discesa e' inoltre un fatto dell'INBOX di quel-
+        # l'account ("fin dove sono sceso"), non del motore che legge le pagine:
+        # resta vera qualunque motore la usi. L'unico modo di buttarla e' ora
+        # esplicito: il pulsante "riapri la discesa" (endpoint dedicato).
+        if data.inbox_engine != campaign.inbox_engine:
+            # Traccia permanente. Gli eventi della UI vivono su Redis e scadono
+            # dopo 24h: senza questo log, a due giorni di distanza non c'e' modo
+            # di sapere se un engine e' stato cambiato — la domanda rimasta
+            # senza risposta indagando il caso PRIMERO del 22/08/2026.
+            db.add(ActivityLog(
+                campaign_id=campaign.id,
+                action="inbox_engine_cambiato",
+                details=json.dumps({"da": campaign.inbox_engine, "a": data.inbox_engine}),
+            ))
         campaign.inbox_engine = data.inbox_engine
     if data.bio_engine is not None:
         if campaign.status not in (

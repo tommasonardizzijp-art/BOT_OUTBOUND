@@ -69,6 +69,11 @@ export interface Campaign {
   scrape_mode: 'followers' | 'following' | 'dm_threads'
   // Engine usato per l'estrazione inbox DM (solo quando scrape_mode = 'dm_threads')
   inbox_engine?: 'browser' | 'api'
+  // Discesa inbox: true = il fondo e' gia' stato toccato, ogni giro e' solo una
+  // passata di cima per i DM nuovi. `inbox_deep_pages` = quante pagine di discesa
+  // si perderebbero riaprendola.
+  inbox_bottom_reached?: boolean
+  inbox_deep_pages?: number
   // Engine usato per la Fase Bio: 'api' = instagrapi (veloce); 'browser' = Patchright (prudente, no cap API)
   bio_engine?: 'api' | 'browser'
   // Livello di arricchimento: 'none' non apre i profili (solo lista + raccolta passiva
